@@ -3,8 +3,7 @@ The COO_to_CSF.cpp file takes the text file with non-zero elements as input and 
 
 coo.txt file contains the example demonstrated in the below image.
 
-
-![Alt text](COO and CSF.png)
+![Alt text](COO%20and%20CSF.png)
 
 
 
