@@ -1,3 +1,31 @@
+// Example : 
+
+// Input COO Data : 
+
+// last element represent the value of the non-zero element and the remaining elements in each line represents the indices
+
+// 1 1 1 5
+// 1 2 2 5
+// 2 1 1 5
+// 2 1 2 5
+// 2 1 3 5
+// 2 1 4 5
+
+
+
+// Output : 
+// mode_0_ptr : 0 2 
+// mode_0_idx : 1 2 
+
+// mode_1_ptr : 0 2 3 
+// mode_1_idx : 1 2 1 
+
+// mode_2_ptr : 0 1 2 6 
+// mode_2_idx : 1 2 1 2 3 4 
+
+// vals : 5 5 5 5 5 5
+
+
 #include <iostream>
 #include <fstream>
 #include <vector>
@@ -70,28 +98,6 @@ void cooToCSF(const vector<COOElement>& cooData, int order) {
         }
         return false;
     });
-
-    // Print sorted COO data
-    // cout << "\nSorted COO data:\n";
-    // for (const auto& elem : sortedCOO) {
-    //     for (const auto& index : elem.indices) {
-    //         cout << index << " ";
-    //     }
-    //     cout << " -> " << elem.value << endl;
-    // }
-    //
-    // Sorted COO data:
-    // 1 8 16 1  -> 2
-    // 1 8 40 1  -> 1
-    // 1 8 46 1  -> 4
-    // 1 8 68 1  -> 1
-    // 35 48 2081 1  -> 1
-    // 35 48 2082 1  -> 3
-    // 35 838 2081 1  -> 1
-    // 35 961 2081 1  -> 1
-    // 35 1453 2081 1  -> 1
-    // 119 265 11171 2  -> 4
-    
     
     // Variables to track the previous indices at each level
     vector<int64_t> prevIndices(order, -1);
@@ -106,7 +112,7 @@ void cooToCSF(const vector<COOElement>& cooData, int order) {
                 // New index for this level
                 idx[level].push_back(elem.indices[level]);
 
-                // For higher levels, push the current size of idx[level - 1]
+                // Once there is a fiber split, push the current size of idx[level + 1] in the ptr[level + 1] vector
                 if (level + 1 < order) {
                     ptr[level+1].push_back(idx[level+1].size());
                 }
@@ -120,7 +126,7 @@ void cooToCSF(const vector<COOElement>& cooData, int order) {
         vals.push_back(elem.value);
     }
 
-    // Finalize pointers: ensure the last size is captured in the pointer array
+    // Finalize pointers: the last value in all pointer vectors is the size of the corresponding index array
     for (int level = 0; level < order; ++level) {
         ptr[level].push_back(idx[level].size());  // Final entry to mark the end
     }
@@ -148,7 +154,7 @@ void cooToCSF(const vector<COOElement>& cooData, int order) {
 
 int main() {
     // Read the COO data from file and dynamically detect the order
-    string filePath = "coo_2.txt";  // Specify your file path here
+    string filePath = "coo.txt";  // Specify the file path 
     int order = 0;
     vector<COOElement> cooData = readCOO(filePath, order);
     
