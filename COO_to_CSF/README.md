@@ -1,4 +1,4 @@
-# spTA
+# COO to CSF
 The COO_to_CSF.cpp file takes the text file with non-zero elements as input and converts them into CSF Format.
 
 coo.txt file contains the example demonstrated in the below image.
