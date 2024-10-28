@@ -25,6 +25,6 @@ void print_vec(ULLI *array, int array_size);
 void print_vec_double(double *array, int array_size);
 
 // Tensor generation function prototype
-void generate_tensor(int argc, char *argv[], int64_t **my_tensor_indices, double **my_tensor_values, int *total_indices, int *total_values);
+void generate_tensor(int argc, char *argv[], int64_t **my_tensor_indices, double **my_tensor_values, int64_t  *total_indices, int64_t  *total_values);
 
 #endif // GENTEN_H

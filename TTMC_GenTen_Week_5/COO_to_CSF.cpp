@@ -36,14 +36,14 @@
 
 using namespace std;
 
-int max_size = 100000; 
+//int max_size = 100000; 
 
-int64_t* mode_0_pointer_csf = new int64_t[max_size];
-int64_t* mode_0_indices_csf = new int64_t[max_size];
-int64_t* mode_1_pointer_csf = new int64_t[max_size];
-int64_t* mode_1_indices_csf = new int64_t[max_size];
-int64_t* mode_2_pointer_csf = new int64_t[max_size];
-int64_t* mode_2_indices_csf = new int64_t[max_size];
+int64_t* mode_0_pointer_csf;
+int64_t* mode_0_indices_csf;
+int64_t* mode_1_pointer_csf;
+int64_t* mode_1_indices_csf;
+int64_t* mode_2_pointer_csf;
+int64_t* mode_2_indices_csf;
 
 int size_mode_0_pointer_csf = 0, size_mode_0_indices_csf = 0;
 int size_mode_1_pointer_csf = 0, size_mode_1_indices_csf = 0;
@@ -83,7 +83,7 @@ struct COOElement {
 
 
 // Function to convert COO to CSF format dynamically
-void cooToCSF(int64_t* my_tensor_indices, double* my_tensor_values, int order, int total_indices, int total_values) {
+void cooToCSF(int64_t* my_tensor_indices, double* my_tensor_values, int order, int64_t  total_indices, int64_t  total_values) {
 
     vector<COOElement> cooData;
     vector<int64_t> indices;
@@ -109,7 +109,7 @@ void cooToCSF(int64_t* my_tensor_indices, double* my_tensor_values, int order, i
 
 
 
-    int64_t nnz = cooData.size();
+    // int64_t nnz = cooData.size();
     
     // CSF structure
     vector<vector<int64_t>> idx(order); // `order` levels of indices
@@ -166,46 +166,61 @@ void cooToCSF(int64_t* my_tensor_indices, double* my_tensor_values, int order, i
     // Output CSF data dynamically based on the detected order
     for (int level = 0; level < order; ++level) {
         if(level == 0){
+            size_mode_0_pointer_csf = ptr[level].size();
+            mode_0_pointer_csf = new int64_t [size_mode_0_pointer_csf];
+            
+            size_mode_0_indices_csf = idx[level].size();
+            mode_0_indices_csf = new int64_t [size_mode_0_indices_csf];
+
             int64_t i = 0;
             for (auto val : ptr[level]) {
                 mode_0_pointer_csf[i] = val;
                 i++;
             }
-            size_mode_0_pointer_csf = ptr[level].size();
+            
             i = 0;
             for (auto val : idx[level]) {
                 mode_0_indices_csf[i] = val;
                 i++;
-            }
-            size_mode_0_indices_csf = idx[level].size();
+            }            
         }
         else if(level == 1){
+            size_mode_1_pointer_csf = ptr[level].size();
+            mode_1_pointer_csf = new int64_t [size_mode_1_pointer_csf];
+            
+            size_mode_1_indices_csf = idx[level].size();
+            mode_1_indices_csf = new int64_t [size_mode_1_indices_csf];
+            
             int64_t i = 0;
             for (auto val : ptr[level]) {
                 mode_1_pointer_csf[i] = val;
                 i++;
             }
-            size_mode_1_pointer_csf = ptr[level].size();
+
             i = 0;
             for (auto val : idx[level]) {
                 mode_1_indices_csf[i] = val;
                 i++;
             }
-            size_mode_1_indices_csf = idx[level].size();
         }
         else if(level == 2){
+            size_mode_2_pointer_csf = ptr[level].size();
+            mode_2_pointer_csf = new int64_t [size_mode_2_pointer_csf];
+            
+            size_mode_2_indices_csf = idx[level].size();
+            mode_2_indices_csf = new int64_t [size_mode_2_indices_csf];
+
             int64_t i = 0;
             for (auto val : ptr[level]) {
                 mode_2_pointer_csf[i] = val;
                 i++;
             }
-            size_mode_2_pointer_csf = ptr[level].size();
+
             i = 0;
             for (auto val : idx[level]) {
                 mode_2_indices_csf[i] = val;
                 i++;
             }
-            size_mode_2_indices_csf = idx[level].size();
         }
     }
 }

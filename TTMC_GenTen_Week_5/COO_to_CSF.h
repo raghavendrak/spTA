@@ -35,6 +35,6 @@ struct COOElement {
 };
 
 // Function to convert COO format to CSF format
-void cooToCSF(int64_t* my_tensor_indices, double* my_tensor_values, int order, int total_indices, int total_values);
+void cooToCSF(int64_t* my_tensor_indices, double* my_tensor_values, int order, int64_t total_indices, int64_t total_values);
 
 #endif // COO_TO_CSF_H

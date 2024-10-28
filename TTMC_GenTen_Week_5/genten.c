@@ -34,7 +34,7 @@ void printusage();
 
 
 
-void generate_tensor(int argc, char *argv[], int64_t **my_tensor_indices, double **my_tensor_values, int *total_indices, int *total_values)
+void generate_tensor(int argc, char *argv[], int64_t **my_tensor_indices, double **my_tensor_values, int64_t *total_indices, int64_t *total_values)
 {
 	double time_start = omp_get_wtime();
 
@@ -65,7 +65,7 @@ void generate_tensor(int argc, char *argv[], int64_t **my_tensor_indices, double
 	int outfile_entered=0;
 	int print_header = 0;
 	int print_debug = 0;
-	int write_tensor = 1;
+	// int write_tensor = 1;
 	
 	int distribution_type = 0;
 
@@ -124,8 +124,8 @@ void generate_tensor(int argc, char *argv[], int64_t **my_tensor_indices, double
 			case 'p':  print_debug = atoi(optarg);
 				break;
 				
-			case 'w':  write_tensor = atoi(optarg);
-				break;
+			// case 'w':  write_tensor = atoi(optarg);
+			// 	break;
 				
 		}
 	}

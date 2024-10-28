@@ -6,8 +6,9 @@
 #include <unordered_map>
 #include <algorithm>
 #include <chrono>
-#include <cstring>  // Add this line to resolve 'memset' error
-#include "genten.h" // Include the header for genten
+#include <cstring>  
+#include <iomanip> 
+#include "genten.h"      // Include the header for genten
 #include "COO_to_CSF.h"
 
 using namespace std;
@@ -15,7 +16,7 @@ using namespace std::chrono;
 
 
 
-bool compare_matrices(double * C1, double * C2, int rows, int cols, double tolerance = 1e-9)
+bool compare_matrices(double*& C1, double*& C2, int rows, int cols, double tolerance = 1e-6)
 {
   for (int i = 0; i < rows * cols; ++i) {
     if (std::fabs(C1[i] - C2[i]) > tolerance) {
@@ -56,12 +57,13 @@ void readMatrix(const string& filename, int64_t& rows, int64_t& cols, double*& a
 }
 
 // Function to perform contraction based on the inputs using 5 for loops
-void performContraction_1(const int64_t* mode_0_ptr, const int64_t* mode_0_idx,
-                        const int64_t* mode_1_ptr, const int64_t* mode_1_idx,
-                        const int64_t* mode_2_ptr, const int64_t* mode_2_idx,
-                        const double* values, const double* arr_A, const double* arr_B,  
-                        double*& arr_O, const int64_t arr_A_size, const int64_t arr_B_size, const int64_t arr_O_size, const int64_t contraction, 
-                        const int64_t l, const int64_t m, const int64_t n, const int64_t f1, const int64_t f2) {
+void performContraction_1(int64_t*& mode_0_ptr, int64_t*& mode_0_idx,
+                        int64_t*& mode_1_ptr, int64_t*& mode_1_idx,
+                        int64_t*& mode_2_ptr, int64_t*& mode_2_idx,
+                        double*& values, double*& arr_A, double*& arr_B,  
+                        double*& arr_O, int64_t& arr_A_size, int64_t& arr_B_size, int64_t& arr_O_size, int& contraction, 
+                        int64_t& l, int64_t& m, int64_t& n, int64_t& f1, int64_t& f2) {
+
     if(contraction == 0){
         // Traverse through CSF tensor pointer and indices arrays for all modes
         for (int64_t i_ptr = 0; i_ptr < mode_0_ptr[1]; ++i_ptr) {
@@ -96,7 +98,7 @@ void performContraction_1(const int64_t* mode_0_ptr, const int64_t* mode_0_idx,
             }
         }
     }
-    if(contraction == 1){
+    else if(contraction == 1){
         // Traverse through CSF tensor pointer and indices arrays for all modes
         for (int64_t i_ptr = 0; i_ptr < mode_0_ptr[1]; ++i_ptr) {
             int64_t i = mode_0_idx[i_ptr] - 1;                         // Index in the mode 'i'
@@ -129,7 +131,7 @@ void performContraction_1(const int64_t* mode_0_ptr, const int64_t* mode_0_idx,
             }
         }
     }
-    if(contraction == 2){
+    else if(contraction == 2){
         // Traverse through CSF tensor pointer and indices arrays for all modes
         for (int64_t i_ptr = 0; i_ptr < mode_0_ptr[1]; ++i_ptr) {
             int64_t i = mode_0_idx[i_ptr] - 1;                         // Index in the mode 'i'
@@ -152,7 +154,7 @@ void performContraction_1(const int64_t* mode_0_ptr, const int64_t* mode_0_idx,
                             int64_t index_B = j * f2 + s;
 
                             // For mode-1 linearized output
-                            int64_t index_O = s * n * f1 + r * n + k;
+                            int64_t index_O = k * f1 * f2 + r * f2 + s;
 
                             // Perform contraction
                             arr_O[index_O] += value * arr_A[index_A] * arr_B[index_B];            
@@ -167,17 +169,17 @@ void performContraction_1(const int64_t* mode_0_ptr, const int64_t* mode_0_idx,
 
 
 // Function to perform contraction based on the inputs using 4 for loops
-void performContraction_2(const int64_t* mode_0_ptr, const int64_t* mode_0_idx,
-                        const int64_t* mode_1_ptr, const int64_t* mode_1_idx,
-                        const int64_t* mode_2_ptr, const int64_t* mode_2_idx,
-                        const double* values, const double* arr_A, const double* arr_B,  
-                        double*& arr_O, const int64_t arr_A_size, const int64_t arr_B_size, const int64_t arr_O_size, const int64_t contraction, 
-                        const int64_t l, const int64_t m, const int64_t n, const int64_t f1, const int64_t f2) {
+void performContraction_2(int64_t*& mode_0_ptr,int64_t*& mode_0_idx,
+                        int64_t*& mode_1_ptr, int64_t*& mode_1_idx,
+                        int64_t*& mode_2_ptr, int64_t*& mode_2_idx,
+                        double*& values, double*& arr_A, double*& arr_B,  
+                        double*& arr_O, int64_t& arr_A_size, int64_t& arr_B_size, int64_t& arr_O_size, int& contraction, 
+                        int64_t& l, int64_t& m, int64_t& n, int64_t& f1, int64_t& f2) {
     
-
+                            
     if(contraction == 0){
         double* buffer = new double[f2];    // buffer for mode-s
- 
+
         // Traverse through CSF tensor pointer and indices arrays for all modes
         for (int64_t i_ptr = 0; i_ptr < mode_0_ptr[1]; ++i_ptr) {
             int64_t i = mode_0_idx[i_ptr] - 1;                         // Index in the mode 'i'
@@ -221,7 +223,7 @@ void performContraction_2(const int64_t* mode_0_ptr, const int64_t* mode_0_idx,
 
         delete [] buffer;
     }
-    if(contraction == 1){
+    else if(contraction == 1){
         double* buffer = new double[f2];    // buffer for mode-s
         
         // Traverse through CSF tensor pointer and indices arrays for all modes
@@ -269,7 +271,7 @@ void performContraction_2(const int64_t* mode_0_ptr, const int64_t* mode_0_idx,
 
         delete [] buffer;
     }
-    if(contraction == 2){
+    else if(contraction == 2){
         double* buffer = new double[n*f2];    // buffer for mode-k and mode-s
         int64_t* k_buffer = new int64_t[n];   // buffer for k-indices
 
@@ -314,7 +316,7 @@ void performContraction_2(const int64_t* mode_0_ptr, const int64_t* mode_0_idx,
                             int64_t index_A = i * f1 + r;
 
                             // For mode-1 linearized output 
-                            int64_t index_O = s * n * f1 + r * n + k;
+                            int64_t index_O = k * f1 * f2 + r * f2 + s;
 
                             int64_t index_buf = k * f2 + s; 
 
@@ -330,6 +332,9 @@ void performContraction_2(const int64_t* mode_0_ptr, const int64_t* mode_0_idx,
         delete [] buffer;
         delete [] k_buffer;
     }
+
+
+    
 }
 
 
@@ -369,9 +374,16 @@ Aborted (core dumped)
 // Command for compiling this program : 
 // g++ -O2 -Wall -fopenmp ttmc_cpu.cpp genten.c COO_to_CSF.cpp -o ttmc_cpu
 
+// argv[1] -> order
+// argv[2] -> dim_0
+// argv[3] -> dim_1
+// argv[4] -> dim_2
+// argv[5] -> Number of columns for matrix A
+// argv[6] -> Number of columns for matrix B
+// argv[7] -> contraction choice [ 0 -> ijk,jr,ks→irs,  1 -> ijk,ir,ks→rjs, 2 -> ijk,ir,js→rsk ]
 
 // Command to run this program : 
-// ./ttmc_cpu 3 100 500 500 -d 0.01 -f 0.1 -c 0.5 -v 0.5 -o ../sample_data/generated_100_3D.tns
+// ./ttmc_cpu 3 100 500 500 2 2 0 -d 0.01 
 
 
 int main(int argc, char* argv[]) {
@@ -383,14 +395,23 @@ int main(int argc, char* argv[]) {
 
     // Save the first four arguments
     int order = atoi(argv[1]);
-    int dim_0 = atoi(argv[2]);
-    int dim_1 = atoi(argv[3]);
-    int dim_2 = atoi(argv[4]);
+    int64_t dim_0 = atoi(argv[2]);
+    int64_t dim_1 = atoi(argv[3]);
+    int64_t dim_2 = atoi(argv[4]);
+    int64_t f1 = atoi(argv[5]);
+    int64_t f2 = atoi(argv[6]);
+    int contraction = atoi(argv[7]);
+
+    // Check if contraction is set correctly
+    if (contraction < 0 || contraction > 2) {
+        std::cerr << "Error: Contraction value must be 0, 1, or 2.\n";
+        return 1;
+    }
 
     int64_t* my_tensor_indices = nullptr;
     double* my_tensor_values = nullptr;
-    int total_indices = 0;
-    int total_values = 0;
+    int64_t total_indices = 0;
+    int64_t total_values = 0;
 
     generate_tensor(argc, argv, &my_tensor_indices, &my_tensor_values, &total_indices, &total_values);
 
@@ -402,7 +423,7 @@ int main(int argc, char* argv[]) {
     cout << "Total size of my_tensor_indices : " << total_indices<< endl;
     cout << "Total size of my_tensor_values : " << total_values << endl;
 
-    cout << "Tensor in COO Format : " << endl;
+    // cout << "Tensor in COO Format : " << endl;
     // for(int i=0, j=0; i<total_indices; i++){
     //     cout << my_tensor_indices[i] << " ";
     //     if((i+1)%3 == 0){
@@ -417,7 +438,7 @@ int main(int argc, char* argv[]) {
 
 
     // Input tensor dimensions (l * m * n)
-    int l, m, n;
+    int64_t l, m, n;
 
     l = dim_0;
     m = dim_1;
@@ -444,14 +465,14 @@ int main(int argc, char* argv[]) {
 
 
     // Iterate through mode_0 pointers and indices
-    std::cout << "Mode 0 Pointer:\n";
-    for (int i = 0; i < size_mode_0_ptr; ++i) {
-        std::cout << mode_0_ptr[i] << " ";
-    }
-    std::cout << "\nMode 0 Indices:\n";
-    for (int i = 0; i < size_mode_0_idx; ++i) {
-        std::cout << mode_0_idx[i] << " ";
-    }
+    // std::cout << "Mode 0 Pointer:\n";
+    // for (int i = 0; i < size_mode_0_ptr; ++i) {
+    //     std::cout << mode_0_ptr[i] << " ";
+    // }
+    // std::cout << "\nMode 0 Indices:\n";
+    // for (int i = 0; i < size_mode_0_idx; ++i) {
+    //     std::cout << mode_0_idx[i] << " ";
+    // }
 
     // // Iterate through mode_1 pointers and indices
     // std::cout << "\n\nMode 1 Pointer:\n";
@@ -478,22 +499,14 @@ int main(int argc, char* argv[]) {
     // for (int i = 0; i < total_values; ++i) {
     //     std::cout << values[i] << " ";
     // }
-    // // Read the CSF tensor from csf_1.txt
-    // readCSFTensor("csf_1.txt", mode_0_ptr, mode_0_idx, mode_1_ptr, mode_1_idx, 
-    //               mode_2_ptr, mode_2_idx, values);
 
-    // Read input matrices A (n * f1) and B (m * f2)
-    int64_t f1, f2;
-    cout << "Enter the column dimension of input matrices A and B respectively (f1) and (f2): ";
-    cin >> f1 >> f2;
+
+    cout << "\nThe column dimensions of input matrices A (f1) : " << f1 << endl;
+    cout << "The column dimensions of input matrices A (f2) : " << f2 << endl;
 
     double* arr_A = nullptr;
     double* arr_B = nullptr;
 
-    // Enter the choice of contraction
-    int64_t contraction;
-    cout << "Choose the contraction, \"0\" for ijk,jr,ks→irs, \"1\" for ijk,ir,ks→rjs, \"2\" for ijk,ir,js→rsk " << endl;
-    cin >> contraction;
     if(contraction == 0){
         cout << "Your Contraction Choice : ijk,jr,ks→irs" << endl; 
     }
@@ -554,8 +567,13 @@ int main(int argc, char* argv[]) {
 
     // Record end time
     auto end_1 = high_resolution_clock::now();
-    auto duration_1 = duration_cast<nanoseconds>(end_1 - start_1);
-    cout << "Time taken by contraction 1 : " << duration_1.count() << " nanoseconds" << endl;
+    auto duration_1 = duration_cast<microseconds>(end_1 - start_1);
+    // cout << "Time taken by contraction 1 : " << duration_1.count() << " microseconds" << endl;
+    double seconds_1 = duration_1.count() / 1e6; // Convert microseconds to seconds
+
+    // Output time taken with 2 decimal places
+    cout << fixed << setprecision(2); // Set fixed-point notation and precision
+    cout << "Time taken by contraction 1 : " << seconds_1 << " seconds" << endl;
 
     // Write the output array to output.txt
     ofstream output_file_1("output_1.txt");
@@ -586,8 +604,13 @@ int main(int argc, char* argv[]) {
 
     // Record end time
     auto end_2 = high_resolution_clock::now();
-    auto duration_2 = duration_cast<nanoseconds>(end_2 - start_2);
-    cout << "Time taken by contraction 2 : " << duration_2.count() << " nanoseconds" << endl;
+    auto duration_2 = duration_cast<microseconds>(end_2 - start_2);
+    // cout << "Time taken by contraction 2 : " << duration_2.count() << " microseconds" << endl;
+    double seconds_2 = duration_2.count() / 1e6; // Convert microseconds to seconds
+
+    // Output time taken with 2 decimal places
+    cout << fixed << setprecision(2); // Set fixed-point notation and precision
+    cout << "Time taken by contraction 2 : " << seconds_2 << " seconds" << endl;
 
     // Write the output array to output.txt
     ofstream output_file_2("output_2.txt");
@@ -606,9 +629,9 @@ int main(int argc, char* argv[]) {
     bool correct = compare_matrices(arr_O_1, arr_O_2, 1, arr_O_size);
 
     if (correct) {
-        std::cout << "Multiplication results are correct." << std::endl;
+        std::cout << "Both output tensors from Method-1[5-for loops] and Method-2[4-for loops] are same." << std::endl;
     } else {
-        std::cout << "Multiplication results are incorrect." << std::endl;
+        std::cout << "Output Tensors from Method-1[5-for loops] and Method-2[4-for loops] are not same." << std::endl;
     }
 
     
@@ -625,11 +648,10 @@ int main(int argc, char* argv[]) {
     delete[] mode_1_idx;
     delete[] mode_2_ptr;
     delete[] mode_2_idx;
-    delete[] values;
     delete[] arr_A;
     delete[] arr_B;
 
-    delete[] my_tensor_indices; // Make sure to free if allocated in generate_tensor
+    delete[] my_tensor_indices; 
     delete[] my_tensor_values; 
 
     return 0;
