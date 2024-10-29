@@ -307,7 +307,7 @@ void performContraction_2(int64_t*& mode_0_ptr,int64_t*& mode_0_idx,
             for (int64_t z = 0; z < n ; ++z) {
                 int64_t k = z;
 
-                while(k_buffer[z] != 0){
+                if(k_buffer[z] > 0){
                     for (int64_t r = 0; r < f1; ++r) {
 
                         for (int64_t s = 0; s < f2; ++s) {
@@ -324,7 +324,7 @@ void performContraction_2(int64_t*& mode_0_ptr,int64_t*& mode_0_idx,
                         }
                     }
 
-                    k_buffer[z]--;
+                    //k_buffer[z]--;
                 }
             }
         }
