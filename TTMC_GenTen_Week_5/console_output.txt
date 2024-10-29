@@ -1,0 +1,319 @@
+[shiva@gpuserver TTMC_GenTen_Week_5]$ ./script.sh
+Compiling ttmc_cpu.cpp...
+Run 1: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.1
+Time taken by contraction 1 for Run 1 : 2.08
+Time taken by contraction 2 for Run 1 : 0.58
+Run 2: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.1
+Time taken by contraction 1 for Run 2 : 1.53
+Time taken by contraction 2 for Run 2 : 0.58
+Run 3: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.1
+Time taken by contraction 1 for Run 3 : 4.32
+Time taken by contraction 2 for Run 3 : 0.97
+Run 4: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.1
+Time taken by contraction 1 for Run 4 : 1.35
+Time taken by contraction 2 for Run 4 : 0.58
+Run 5: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.1
+Time taken by contraction 1 for Run 5 : 1.51
+Time taken by contraction 2 for Run 5 : 0.59
+Run 6: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.1
+Time taken by contraction 1 for Run 6 : 1.56
+Time taken by contraction 2 for Run 6 : 0.58
+Run 7: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.1
+Time taken by contraction 1 for Run 7 : 2.03
+Time taken by contraction 2 for Run 7 : 0.58
+Run 8: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.1
+Time taken by contraction 1 for Run 8 : 1.76
+Time taken by contraction 2 for Run 8 : 0.60
+Run 9: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.1
+Time taken by contraction 1 for Run 9 : 5.63
+Time taken by contraction 2 for Run 9 : 0.59
+Run 10: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.1
+Time taken by contraction 1 for Run 10 : 2.00
+Time taken by contraction 2 for Run 10 : 0.59
+Total Time taken by contraction 1 for 10 runs : 23.77
+Total Time taken by contraction 2 for 10 runs : 6.24
+Density 0.1, Contraction 0: 
+Average Time taken by contraction 1 for 10 runs : 2.37
+Average Time taken by contraction 2 for 10 runs : .62
+Run 1: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.01
+Time taken by contraction 1 for Run 1 : 4.43
+Time taken by contraction 2 for Run 1 : 0.54
+Run 2: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.01
+Time taken by contraction 1 for Run 2 : 1.77
+Time taken by contraction 2 for Run 2 : 0.54
+Run 3: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.01
+Time taken by contraction 1 for Run 3 : 0.97
+Time taken by contraction 2 for Run 3 : 0.54
+Run 4: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.01
+Time taken by contraction 1 for Run 4 : 0.97
+Time taken by contraction 2 for Run 4 : 0.54
+Run 5: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.01
+Time taken by contraction 1 for Run 5 : 0.97
+Time taken by contraction 2 for Run 5 : 0.54
+Run 6: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.01
+Time taken by contraction 1 for Run 6 : 0.97
+Time taken by contraction 2 for Run 6 : 0.54
+Run 7: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.01
+Time taken by contraction 1 for Run 7 : 0.97
+Time taken by contraction 2 for Run 7 : 0.54
+Run 8: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.01
+Time taken by contraction 1 for Run 8 : 0.97
+Time taken by contraction 2 for Run 8 : 0.54
+Run 9: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.01
+Time taken by contraction 1 for Run 9 : 4.20
+Time taken by contraction 2 for Run 9 : 0.55
+Run 10: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.01
+Time taken by contraction 1 for Run 10 : 4.12
+Time taken by contraction 2 for Run 10 : 0.87
+Total Time taken by contraction 1 for 10 runs : 20.34
+Total Time taken by contraction 2 for 10 runs : 5.74
+Density 0.01, Contraction 0: 
+Average Time taken by contraction 1 for 10 runs : 2.03
+Average Time taken by contraction 2 for 10 runs : .57
+Run 1: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.001
+Time taken by contraction 1 for Run 1 : 0.17
+Time taken by contraction 2 for Run 1 : 0.09
+Run 2: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.001
+Time taken by contraction 1 for Run 2 : 0.17
+Time taken by contraction 2 for Run 2 : 0.09
+Run 3: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.001
+Time taken by contraction 1 for Run 3 : 0.17
+Time taken by contraction 2 for Run 3 : 0.09
+Run 4: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.001
+Time taken by contraction 1 for Run 4 : 0.16
+Time taken by contraction 2 for Run 4 : 0.09
+Run 5: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.001
+Time taken by contraction 1 for Run 5 : 0.17
+Time taken by contraction 2 for Run 5 : 0.09
+Run 6: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.001
+Time taken by contraction 1 for Run 6 : 0.16
+Time taken by contraction 2 for Run 6 : 0.09
+Run 7: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.001
+Time taken by contraction 1 for Run 7 : 0.17
+Time taken by contraction 2 for Run 7 : 0.09
+Run 8: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.001
+Time taken by contraction 1 for Run 8 : 0.17
+Time taken by contraction 2 for Run 8 : 0.09
+Run 9: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.001
+Time taken by contraction 1 for Run 9 : 0.16
+Time taken by contraction 2 for Run 9 : 0.09
+Run 10: ./ttmc_cpu 3 3000 3000 3000 2 2 0 -d 0.001
+Time taken by contraction 1 for Run 10 : 0.17
+Time taken by contraction 2 for Run 10 : 0.09
+Total Time taken by contraction 1 for 10 runs : 1.67
+Total Time taken by contraction 2 for 10 runs : .90
+Density 0.001, Contraction 0: 
+Average Time taken by contraction 1 for 10 runs : .16
+Average Time taken by contraction 2 for 10 runs : .09
+Run 1: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.1
+Time taken by contraction 1 for Run 1 : 2.84
+Time taken by contraction 2 for Run 1 : 0.59
+Run 2: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.1
+Time taken by contraction 1 for Run 2 : 1.53
+Time taken by contraction 2 for Run 2 : 0.58
+Run 3: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.1
+Time taken by contraction 1 for Run 3 : 1.76
+Time taken by contraction 2 for Run 3 : 0.59
+Run 4: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.1
+Time taken by contraction 1 for Run 4 : 2.22
+Time taken by contraction 2 for Run 4 : 0.62
+Run 5: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.1
+Time taken by contraction 1 for Run 5 : 6.60
+Time taken by contraction 2 for Run 5 : 0.59
+Run 6: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.1
+Time taken by contraction 1 for Run 6 : 6.63
+Time taken by contraction 2 for Run 6 : 0.58
+Run 7: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.1
+Time taken by contraction 1 for Run 7 : 5.80
+Time taken by contraction 2 for Run 7 : 0.58
+Run 8: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.1
+Time taken by contraction 1 for Run 8 : 5.69
+Time taken by contraction 2 for Run 8 : 0.59
+Run 9: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.1
+Time taken by contraction 1 for Run 9 : 3.77
+Time taken by contraction 2 for Run 9 : 1.12
+Run 10: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.1
+Time taken by contraction 1 for Run 10 : 3.87
+Time taken by contraction 2 for Run 10 : 0.58
+Total Time taken by contraction 1 for 10 runs : 40.71
+Total Time taken by contraction 2 for 10 runs : 6.42
+Density 0.1, Contraction 1: 
+Average Time taken by contraction 1 for 10 runs : 4.07
+Average Time taken by contraction 2 for 10 runs : .64
+Run 1: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.01
+Time taken by contraction 1 for Run 1 : 1.51
+Time taken by contraction 2 for Run 1 : 0.54
+Run 2: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.01
+Time taken by contraction 1 for Run 2 : 4.71
+Time taken by contraction 2 for Run 2 : 0.54
+Run 3: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.01
+Time taken by contraction 1 for Run 3 : 1.45
+Time taken by contraction 2 for Run 3 : 0.54
+Run 4: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.01
+Time taken by contraction 1 for Run 4 : 1.22
+Time taken by contraction 2 for Run 4 : 0.54
+Run 5: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.01
+Time taken by contraction 1 for Run 5 : 4.19
+Time taken by contraction 2 for Run 5 : 0.55
+Run 6: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.01
+Time taken by contraction 1 for Run 6 : 1.69
+Time taken by contraction 2 for Run 6 : 0.54
+Run 7: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.01
+Time taken by contraction 1 for Run 7 : 2.32
+Time taken by contraction 2 for Run 7 : 0.54
+Run 8: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.01
+Time taken by contraction 1 for Run 8 : 1.69
+Time taken by contraction 2 for Run 8 : 0.54
+Run 9: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.01
+Time taken by contraction 1 for Run 9 : 2.27
+Time taken by contraction 2 for Run 9 : 0.54
+Run 10: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.01
+Time taken by contraction 1 for Run 10 : 1.76
+Time taken by contraction 2 for Run 10 : 0.54
+Total Time taken by contraction 1 for 10 runs : 22.81
+Total Time taken by contraction 2 for 10 runs : 5.41
+Density 0.01, Contraction 1: 
+Average Time taken by contraction 1 for 10 runs : 2.28
+Average Time taken by contraction 2 for 10 runs : .54
+Run 1: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.001
+Time taken by contraction 1 for Run 1 : 0.17
+Time taken by contraction 2 for Run 1 : 0.09
+Run 2: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.001
+Time taken by contraction 1 for Run 2 : 0.17
+Time taken by contraction 2 for Run 2 : 0.09
+Run 3: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.001
+Time taken by contraction 1 for Run 3 : 0.17
+Time taken by contraction 2 for Run 3 : 0.09
+Run 4: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.001
+Time taken by contraction 1 for Run 4 : 0.17
+Time taken by contraction 2 for Run 4 : 0.09
+Run 5: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.001
+Time taken by contraction 1 for Run 5 : 0.17
+Time taken by contraction 2 for Run 5 : 0.09
+Run 6: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.001
+Time taken by contraction 1 for Run 6 : 0.17
+Time taken by contraction 2 for Run 6 : 0.09
+Run 7: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.001
+Time taken by contraction 1 for Run 7 : 0.17
+Time taken by contraction 2 for Run 7 : 0.09
+Run 8: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.001
+Time taken by contraction 1 for Run 8 : 0.17
+Time taken by contraction 2 for Run 8 : 0.09
+Run 9: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.001
+Time taken by contraction 1 for Run 9 : 0.17
+Time taken by contraction 2 for Run 9 : 0.09
+Run 10: ./ttmc_cpu 3 3000 3000 3000 2 2 1 -d 0.001
+Time taken by contraction 1 for Run 10 : 0.17
+Time taken by contraction 2 for Run 10 : 0.09
+Total Time taken by contraction 1 for 10 runs : 1.70
+Total Time taken by contraction 2 for 10 runs : .90
+Density 0.001, Contraction 1: 
+Average Time taken by contraction 1 for 10 runs : .17
+Average Time taken by contraction 2 for 10 runs : .09
+Run 1: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.1
+Time taken by contraction 1 for Run 1 : 4.66
+Time taken by contraction 2 for Run 1 : 0.42
+Run 2: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.1
+Time taken by contraction 1 for Run 2 : 4.60
+Time taken by contraction 2 for Run 2 : 0.42
+Run 3: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.1
+Time taken by contraction 1 for Run 3 : 1.50
+Time taken by contraction 2 for Run 3 : 0.41
+Run 4: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.1
+Time taken by contraction 1 for Run 4 : 5.89
+Time taken by contraction 2 for Run 4 : 0.41
+Run 5: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.1
+Time taken by contraction 1 for Run 5 : 2.69
+Time taken by contraction 2 for Run 5 : 0.42
+Run 6: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.1
+Time taken by contraction 1 for Run 6 : 1.63
+Time taken by contraction 2 for Run 6 : 0.41
+Run 7: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.1
+Time taken by contraction 1 for Run 7 : 2.10
+Time taken by contraction 2 for Run 7 : 0.40
+Run 8: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.1
+Time taken by contraction 1 for Run 8 : 5.19
+Time taken by contraction 2 for Run 8 : 0.42
+Run 9: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.1
+Time taken by contraction 1 for Run 9 : 1.55
+Time taken by contraction 2 for Run 9 : 0.41
+Run 10: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.1
+Time taken by contraction 1 for Run 10 : 6.28
+Time taken by contraction 2 for Run 10 : 0.40
+Total Time taken by contraction 1 for 10 runs : 36.09
+Total Time taken by contraction 2 for 10 runs : 4.12
+Density 0.1, Contraction 2: 
+Average Time taken by contraction 1 for 10 runs : 3.60
+Average Time taken by contraction 2 for 10 runs : .41
+Run 1: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.01
+Time taken by contraction 1 for Run 1 : 1.69
+Time taken by contraction 2 for Run 1 : 0.37
+Run 2: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.01
+Time taken by contraction 1 for Run 2 : 4.31
+Time taken by contraction 2 for Run 2 : 0.39
+Run 3: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.01
+Time taken by contraction 1 for Run 3 : 2.75
+Time taken by contraction 2 for Run 3 : 0.39
+Run 4: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.01
+Time taken by contraction 1 for Run 4 : 4.39
+Time taken by contraction 2 for Run 4 : 0.39
+Run 5: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.01
+Time taken by contraction 1 for Run 5 : 2.87
+Time taken by contraction 2 for Run 5 : 0.39
+Run 6: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.01
+Time taken by contraction 1 for Run 6 : 1.70
+Time taken by contraction 2 for Run 6 : 0.37
+Run 7: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.01
+Time taken by contraction 1 for Run 7 : 4.11
+Time taken by contraction 2 for Run 7 : 0.39
+Run 8: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.01
+Time taken by contraction 1 for Run 8 : 4.16
+Time taken by contraction 2 for Run 8 : 0.51
+Run 9: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.01
+Time taken by contraction 1 for Run 9 : 4.14
+Time taken by contraction 2 for Run 9 : 0.66
+Run 10: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.01
+Time taken by contraction 1 for Run 10 : 1.64
+Time taken by contraction 2 for Run 10 : 0.38
+Total Time taken by contraction 1 for 10 runs : 31.76
+Total Time taken by contraction 2 for 10 runs : 4.24
+Density 0.01, Contraction 2: 
+Average Time taken by contraction 1 for 10 runs : 3.17
+Average Time taken by contraction 2 for 10 runs : .42
+Run 1: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.001
+Time taken by contraction 1 for Run 1 : 0.16
+Time taken by contraction 2 for Run 1 : 0.11
+Run 2: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.001
+Time taken by contraction 1 for Run 2 : 0.17
+Time taken by contraction 2 for Run 2 : 0.11
+Run 3: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.001
+Time taken by contraction 1 for Run 3 : 0.17
+Time taken by contraction 2 for Run 3 : 0.11
+Run 4: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.001
+Time taken by contraction 1 for Run 4 : 0.17
+Time taken by contraction 2 for Run 4 : 0.11
+Run 5: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.001
+Time taken by contraction 1 for Run 5 : 0.17
+Time taken by contraction 2 for Run 5 : 0.11
+Run 6: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.001
+Time taken by contraction 1 for Run 6 : 0.17
+Time taken by contraction 2 for Run 6 : 0.11
+Run 7: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.001
+Time taken by contraction 1 for Run 7 : 0.17
+Time taken by contraction 2 for Run 7 : 0.11
+Run 8: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.001
+Time taken by contraction 1 for Run 8 : 0.17
+Time taken by contraction 2 for Run 8 : 0.11
+Run 9: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.001
+Time taken by contraction 1 for Run 9 : 0.17
+Time taken by contraction 2 for Run 9 : 0.11
+Run 10: ./ttmc_cpu 3 3000 3000 3000 2 2 2 -d 0.001
+Time taken by contraction 1 for Run 10 : 0.17
+Time taken by contraction 2 for Run 10 : 0.11
+Total Time taken by contraction 1 for 10 runs : 1.69
+Total Time taken by contraction 2 for 10 runs : 1.10
+Density 0.001, Contraction 2: 
+Average Time taken by contraction 1 for 10 runs : .16
+Average Time taken by contraction 2 for 10 runs : .11
+Results saved to results.csv
+[shiva@gpuserver TTMC_GenTen_Week_5]$ 

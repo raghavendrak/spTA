@@ -338,7 +338,20 @@ void performContraction_2(int64_t*& mode_0_ptr,int64_t*& mode_0_idx,
 }
 
 
-
+void writeMatrixToFile(const std::string& filename, int64_t rows, int64_t cols, double val) {
+    std::ofstream file(filename);
+    if (!file.is_open()) {
+        std::cerr << "Error: Unable to open file " << filename << std::endl;
+        return;
+    }
+    for (int64_t i = 0; i < rows; ++i) {
+        for (int64_t j = 0; j < cols; ++j) {
+            file << val << " ";
+        }
+        file << "\n";
+    }
+    file.close();
+}
 
 
 /*
@@ -407,6 +420,41 @@ int main(int argc, char* argv[]) {
         std::cerr << "Error: Contraction value must be 0, 1, or 2.\n";
         return 1;
     }
+
+
+
+    /* Creating the input_matrix_A.txt and input_matrix_B.txt files for better automation */
+
+    ///////////////////////////////////////////////////////////////////////
+
+    // Determine matrix dimensions based on contraction type
+    int64_t rows_A, cols_A = f1, rows_B, cols_B = f2;
+
+    if (contraction == 0) {
+        rows_A = dim_1;
+        rows_B = dim_2;
+    } else if (contraction == 1) {
+        rows_A = dim_0;
+        rows_B = dim_2;
+    } else if (contraction == 2) {
+        rows_A = dim_0;
+        rows_B = dim_1;
+    } else {
+        std::cerr << "Error: Invalid contraction type. Must be 0, 1, or 2." << std::endl;
+        return 1;
+    }
+
+    double val = 1.0;
+
+    // Write matrices to files
+    writeMatrixToFile("input_matrix_A.txt", rows_A, cols_A, val);
+    writeMatrixToFile("input_matrix_B.txt", rows_B, cols_B, val);
+
+    std::cout << "Matrices written to input_matrix_A.txt and input_matrix_B.txt with dimensions:\n";
+    std::cout << "Matrix A: " << rows_A << " x " << cols_A << "\n";
+    std::cout << "Matrix B: " << rows_B << " x " << cols_B << "\n";
+
+    ////////////////////////////////////////////////////////////////
 
     int64_t* my_tensor_indices = nullptr;
     double* my_tensor_values = nullptr;
