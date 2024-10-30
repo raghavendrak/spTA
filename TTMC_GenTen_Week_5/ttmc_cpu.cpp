@@ -79,11 +79,11 @@ void performContraction_1(int64_t*& mode_0_ptr, int64_t*& mode_0_idx,
 
                     // Iterate over the matrix dimensions 
                     for (int64_t r = 0; r < f1; ++r) {
-
+                        
+                        int64_t index_A = j * f1 + r;
                         for (int64_t s = 0; s < f2; ++s) {
 
                             // Compute linearized indices for matrices A, B based on the contraction string
-                            int64_t index_A = j * f1 + r;
                             int64_t index_B = k * f2 + s;
 
                             // For mode-1 linearized output 
@@ -113,11 +113,11 @@ void performContraction_1(int64_t*& mode_0_ptr, int64_t*& mode_0_idx,
 
                     // Iterate over the matrix dimensions 
                     for (int64_t r = 0; r < f1; ++r) {
-
+                        
+                        int64_t index_A = i * f1 + r;
                         for (int64_t s = 0; s < f2; ++s) {
 
                             // Compute linearized indices for matrices A, B based on the contraction string
-                            int64_t index_A = i * f1 + r;
                             int64_t index_B = k * f2 + s;
 
                             // For mode-1 linearized output 
@@ -146,11 +146,11 @@ void performContraction_1(int64_t*& mode_0_ptr, int64_t*& mode_0_idx,
 
                     // Iterate over the matrix dimensions 
                     for (int64_t r = 0; r < f1; ++r) {
-
+                        
+                        int64_t index_A = i * f1 + r;
                         for (int64_t s = 0; s < f2; ++s) {
 
                             // Compute linearized indices for matrices A, B based on the contraction string
-                            int64_t index_A = i * f1 + r;
                             int64_t index_B = j * f2 + s;
 
                             // For mode-1 linearized output
@@ -205,11 +205,10 @@ void performContraction_2(int64_t*& mode_0_ptr,int64_t*& mode_0_idx,
                 }
 
                 for (int64_t r = 0; r < f1; ++r) {
-
+                    
+                    // Compute linearized indices for matrices B based on the contraction string
+                    int64_t index_A = j * f1 + r;
                     for (int64_t s = 0; s < f2; ++s) {
-
-                        // Compute linearized indices for matrices B based on the contraction string
-                        int64_t index_A = j * f1 + r;
 
                         // For mode-1 linearized output
                         int64_t index_O = s * l * f1 + i * f1 + r;
@@ -253,11 +252,9 @@ void performContraction_2(int64_t*& mode_0_ptr,int64_t*& mode_0_idx,
 
                 for (int64_t r = 0; r < f1; ++r) {
 
+                    // Compute linearized indices for matrices A, B based on the contraction string
+                    int64_t index_A = i * f1 + r;
                     for (int64_t s = 0; s < f2; ++s) {
-
-                        // Compute linearized indices for matrices A, B based on the contraction string
-                        int64_t index_A = i * f1 + r;
-                        // int64_t index_B = k * f2 + s;
 
                         // For mode-1 linearized output 
                         int64_t index_O = s * m * f1 + r * m + j;
@@ -310,11 +307,10 @@ void performContraction_2(int64_t*& mode_0_ptr,int64_t*& mode_0_idx,
                 if(k_buffer[z] > 0){
                     for (int64_t r = 0; r < f1; ++r) {
 
+                        // Compute linearized indices for matrices A based on the contraction string
+                        int64_t index_A = i * f1 + r;
                         for (int64_t s = 0; s < f2; ++s) {
-
-                            // Compute linearized indices for matrices A based on the contraction string
-                            int64_t index_A = i * f1 + r;
-
+                    
                             // For mode-1 linearized output 
                             int64_t index_O = k * f1 * f2 + r * f2 + s;
 
@@ -323,8 +319,6 @@ void performContraction_2(int64_t*& mode_0_ptr,int64_t*& mode_0_idx,
                             arr_O[index_O] += buffer[index_buf] * arr_A[index_A] ;        
                         }
                     }
-
-                    //k_buffer[z]--;
                 }
             }
         }
@@ -464,7 +458,7 @@ int main(int argc, char* argv[]) {
     generate_tensor(argc, argv, &my_tensor_indices, &my_tensor_values, &total_indices, &total_values);
 
 
-    cout << "Order of the Tensor : " << order << endl;
+    cout << "\nOrder of the Tensor : " << order << endl;
     cout << "Dimension - 0 : " << dim_0 << endl;
     cout << "Dimension - 1 : " << dim_1 << endl;
     cout << "Dimension - 2 : " << dim_2 << endl;
