@@ -270,15 +270,14 @@ void performContraction_2(int64_t*& mode_0_ptr,int64_t*& mode_0_idx,
     }
     else if(contraction == 2){
         double* buffer = new double[n*f2];    // buffer for mode-k and mode-s
-        int64_t* k_buffer = new int64_t[n];   // buffer for k-indices
-
+        int64_t* k_buffer = new int64_t[n];  // buffer for k-indices
 
         // Traverse through CSF tensor pointer and indices arrays for all modes
         for (int64_t i_ptr = 0; i_ptr < mode_0_ptr[1]; ++i_ptr) {
             int64_t i = mode_0_idx[i_ptr] - 1;                          // Index in the mode 'i'
 
             memset(buffer, 0, n * f2 * sizeof(double));             // Set the entire memory block to 0
-            memset(k_buffer, 0, n * sizeof(int64_t));               // Set the entire memory block to 0
+            memset(k_buffer, 0, n * sizeof(int64_t));
             for (int64_t j_ptr = mode_1_ptr[i_ptr]; j_ptr < mode_1_ptr[i_ptr + 1]; ++j_ptr) {
                 int64_t j = mode_1_idx[j_ptr] - 1;                      // Index for 'j' mode in CSF
 
