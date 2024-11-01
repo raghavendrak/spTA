@@ -389,7 +389,7 @@ Aborted (core dumped)
 // argv[7] -> contraction choice [ 0 -> ijk,jr,ks→irs,  1 -> ijk,ir,ks→rjs, 2 -> ijk,ir,js→rsk ]
 
 // Command to run this program : 
-// ./ttmc_cpu 3 100 500 500 2 2 0 -d 0.01 
+// ./ttmc_cpu 3 2500 2500 2500 30 30 0 -d 0.01 -f 0.1 -c 0.5 -v 0.5 
 
 
 int main(int argc, char* argv[]) {
@@ -504,7 +504,12 @@ int main(int argc, char* argv[]) {
     get_mode_2_ptr(&mode_2_ptr, &size_mode_2_ptr);
     get_mode_2_idx(&mode_2_idx, &size_mode_2_idx);
 
-
+    cout << "Size of Mode 0 Pointer : " << size_mode_0_ptr << endl; 
+    cout << "Size of Mode 1 Pointer : " << size_mode_1_ptr << endl; 
+    cout << "Size of Mode 2 Pointer : " << size_mode_2_ptr << endl; 
+    cout << "Size of Mode 0 Indices : " << size_mode_0_idx << endl; 
+    cout << "Size of Mode 1 Indices : " << size_mode_1_idx << endl; 
+    cout << "Size of Mode 2 Indices : " << size_mode_2_idx << endl; 
     // Iterate through mode_0 pointers and indices
     // std::cout << "Mode 0 Pointer:\n";
     // for (int i = 0; i < size_mode_0_ptr; ++i) {

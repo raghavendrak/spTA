@@ -10,13 +10,16 @@ fi
 
 # Parameters
 order=3
-dim_0=3000
-dim_1=3000
-dim_2=3000
+dim_0=2500
+dim_1=2500
+dim_2=2500
 f1=30
 f2=30
-densities=(0.1 0.01 0.001)
-contractions=(0 1 2)
+densities=(0.01 0.001)
+contractions=(2)
+density_fiber=0.1
+cv_fib_per_slc=0.5
+cv_nz_per_fib=0.5
 num_executions=10
 
 # Function to run and time the program
@@ -28,10 +31,10 @@ run_program() {
 
     for ((i=1; i<=num_executions; i++))
     do
-        echo "Run $i: ./ttmc_cpu $order $dim_0 $dim_1 $dim_2 $f1 $f2 $contraction -d $density"
+        echo "Run $i: ./ttmc_cpu $order $dim_0 $dim_1 $dim_2 $f1 $f2 $contraction -d $density -f $density_fiber -c $cv_fib_per_slc -v $cv_nz_per_fib"
         
         # Capture the output from the program
-        output=$(./ttmc_cpu $order $dim_0 $dim_1 $dim_2 $f1 $f2 $contraction -d $density)
+        output=$(./ttmc_cpu $order $dim_0 $dim_1 $dim_2 $f1 $f2 $contraction -d $density -f $density_fiber -c $cv_fib_per_slc -v $cv_nz_per_fib)
         
         # Extract seconds_1 and seconds_2 values from output
         seconds_1=$(echo "$output" | grep "Time taken by contraction 1" | awk '{print $(NF-1)}')
