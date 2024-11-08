@@ -13,7 +13,7 @@ OUTPUT_FILE="results.csv"
 echo "Thread Block Size,Average Execution Time (seconds)" > $OUTPUT_FILE
 
 # Run for different thread block sizes and save the average results
-for block_size in 8 16 32 64; do
+for block_size in 8 16 32 64 128 256 512 1024; do
     total_time=0
     
     # Run the program 10 times and sum the execution times

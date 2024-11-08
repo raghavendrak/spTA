@@ -3,3 +3,7 @@ Thread Block Size,Average Execution Time (seconds)
 16,46.61
 32,46.62
 64,7.61
+128,8.79
+256,7.89
+512,7.77
+1024,7.82
