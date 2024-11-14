@@ -3,11 +3,16 @@
 #include <vector>
 #include <tuple>
 #include <sstream>
-#include <algorithm>
-#include "csr_data.h"
+#include <algorithm> 
+
+struct CSR {
+    std::vector<double> values;
+    std::vector<int> col_indices;
+    std::vector<int> row_pointers;
+};
 
 // Function to read Matrix Market file and convert to CSR
-void convertToCSR(const std::string &filename) {
+CSR convertToCSR(const std::string &filename) {
     std::ifstream file(filename);
     if (!file.is_open()) {
         throw std::runtime_error("Unable to open file");
@@ -27,11 +32,6 @@ void convertToCSR(const std::string &filename) {
     std::istringstream iss(line);
     iss >> rows >> cols >> non_zeros;
 
-    // Assign global variables
-    A_rows = rows;
-    A_cols = cols;
-    A_nonzeros = non_zeros;
-
     // Temporary storage for entries
     std::vector<std::tuple<int, int, double>> entries;
     int row, col;
@@ -40,38 +40,48 @@ void convertToCSR(const std::string &filename) {
     // Read non-zero entries
     while (file >> row >> col >> value) {
         entries.emplace_back(row - 1, col - 1, value); // Convert to 0-based indexing
+        // entries.emplace_back(row , col , value);
     }
 
     // Sort entries by row and column if necessary (optional)
     std::sort(entries.begin(), entries.end());
 
-    // Resize global vectors
-    values.reserve(non_zeros);
-    col_indices.reserve(non_zeros);
-    row_pointers.resize(rows + 1, 0);
+    // Initialize CSR structure
+    CSR csr;
+    csr.values.reserve(non_zeros);
+    csr.col_indices.reserve(non_zeros);
+    csr.row_pointers.resize(rows + 1, 0);
 
     // Fill CSR arrays
     int current_row = 0;
     for (const auto &[r, c, v] : entries) {
         while (current_row < r) {
-            row_pointers[++current_row] = values.size();
+            csr.row_pointers[++current_row] = csr.values.size();
         }
-        values.push_back(v);
-        col_indices.push_back(c);
+        csr.values.push_back(v);
+        csr.col_indices.push_back(c);
     }
-    row_pointers[rows] = values.size();
+    csr.row_pointers[rows] = csr.values.size();
+
+    return csr;
 }
 
-int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <MatrixMarketFile>" << std::endl;
-        return 1;
-    }
+// Function to display the CSR matrix
+void displayCSR(const CSR &csr) {
+    std::cout << "Values: ";
+    for (double v : csr.values) std::cout << v << " ";
+    std::cout << "\nColumn Indices: ";
+    for (int col : csr.col_indices) std::cout << col << " ";
+    std::cout << "\nRow Pointers: ";
+    for (int ptr : csr.row_pointers) std::cout << ptr << " ";
+    std::cout << std::endl;
+}
 
+int main() {
+    std::string filename = "mhda416.mtx"; // replace with your file name
     try {
-        std::string filename = argv[1];
-        convertToCSR(filename);
-        displayCSR(); // Display the CSR matrix (for verification)
+        CSR csr = convertToCSR(filename);
+        displayCSR(csr);
     } catch (const std::runtime_error &e) {
         std::cerr << e.what() << std::endl;
         return 1;
