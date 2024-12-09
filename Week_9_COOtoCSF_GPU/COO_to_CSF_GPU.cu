@@ -27,27 +27,33 @@ struct COOElement {
 int64_t *fiberStartFlags;
 COOElement *sortedCOO;
 
+
+__device__ inline int64_t atomicAddInt64(int64_t* address, int64_t val) {
+    return atomicAdd((unsigned long long*)address, (unsigned long long)val);
+}
+
+
 // Kernel to detect fibers and populate fiber start flags
-__global__ void detect_fibers(const COOElement* cooData, int64_t nnz, int order, int64_t* fiberStartFlags) {
+__global__ void detect_fibers(const COOElement* cooData, int64_t nnz, int order, int64_t* fiberStartFlags, int64_t* counts) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nnz) return;
 
     if (tid == 0) {
         for (int level = 0; level < order; ++level) {
             fiberStartFlags[order * tid + level] = 1;  // First element is always a fiber start
+            atomicAddInt64(count[level], 1);
         }
     } else {
         for (int level = 0; level < order; ++level) {
             if (cooData[tid].indices[level] != cooData[tid - 1].indices[level]) {
                 fiberStartFlags[order * tid + level] = 1;
+                atomicAddInt64(count[level], 1);
             }
         }
     }
 }
 
-__device__ inline int64_t atomicAddInt64(int64_t* address, int64_t val) {
-    return atomicAdd((unsigned long long*)address, (unsigned long long)val);
-}
+
 
 // Kernel to populate idx and ptr arrays
 __global__ void fill_idx_ptr(const COOElement* sortedCOO, int64_t nnz, int order,
@@ -56,7 +62,7 @@ __global__ void fill_idx_ptr(const COOElement* sortedCOO, int64_t nnz, int order
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= nnz) return;
 
-    if (level == order) {
+    if (level == order - 1) {
         vals[tid] = sortedCOO[tid].value;
     }
 
@@ -65,11 +71,13 @@ __global__ void fill_idx_ptr(const COOElement* sortedCOO, int64_t nnz, int order
     }
 
     if (level == 0) {
+        printf("Thread id : %d, count : %lld\n", tid, *count);
         if (fiberStartFlags[order * tid + level]) {
             int idxPosition = atomicAddInt64(&tempCounts[0], 1);
             idx[idxPosition] = sortedCOO[tid].indices[level];
             atomicAddInt64(count, 1);
         }
+        printf("Thread id : %d, count : %lld\n", tid, *count);
 
         if (tid == nnz - 1) {
             ptr[1] = *count;
@@ -123,25 +131,57 @@ void convertCOOtoCSF_GPU(const std::vector<COOElement>& cooData, int order,
     thrust::device_vector<COOElement> d_cooData(cooData);
     thrust::device_vector<int64_t> d_fiberStartFlags(order * nnz, 0);
     thrust::device_vector<double> d_vals(nnz);
+    thrust::device_vector<int64_t> d_counts(order, 0);
 
     // Sort the COO data lexicographically
     thrust::sort(thrust::device, d_cooData.begin(), d_cooData.end(), COOComparator(order));
+
+    // Now print sorted COO data
+    thrust::host_vector<COOElement> h_sortedCOO = d_cooData;
+
+    std::cout << "Sorted COO Data:" << std::endl;
+
+    for (const auto& elem : h_sortedCOO) {
+        for (int i = 0; i < order; ++i) std::cout << elem.indices[i] << " ";
+        std::cout << elem.value << std::endl;
+    }
 
     // Allocate idx and ptr arrays for each level
     std::vector<thrust::device_vector<int64_t>> d_idx(order);
     std::vector<thrust::device_vector<int64_t>> d_ptr(order);
 
-    for (int i = 0; i < order; ++i) {
-        d_idx[i].resize(nnz);  // Maximum size for idx
-        d_ptr[i].resize(nnz + 1);  // Maximum size for ptr
-    }
+    // for (int i = 0; i < order; ++i) {
+    //     d_idx[i].resize(nnz);  // Maximum size for idx
+    //     d_ptr[i].resize(nnz + 1);  // Maximum size for ptr
+    // }
 
     // Launch kernel to detect fibers
     int blockSize = 256;
     int numBlocks = (nnz + blockSize - 1) / blockSize;
 
     detect_fibers<<<numBlocks, blockSize>>>(thrust::raw_pointer_cast(d_cooData.data()), nnz, order,
-                                            thrust::raw_pointer_cast(d_fiberStartFlags.data()));
+                                            thrust::raw_pointer_cast(d_fiberStartFlags.data()), thrust::raw_pointer_cast(d_counts.data()));
+
+
+    
+    
+    thrust::host_vector<int64_t> h_fiberStartFlags = d_fiberStartFlags;
+    std::cout << "Fiber Start Flags:" << std::endl;
+
+    for (size_t i = 0; i < nnz; ++i) {
+        for (int j = 0; j < order; ++j) {
+            std::cout << h_fiberStartFlags[i * order + j] << " ";
+        }
+        std::cout << std::endl;
+    }
+
+    thrust::host_vector<int64_t> h_counts = d_counts;
+    std::cout << "Ptr and Idx sizes :" << std::endl;
+    for(int level = 0; level < order; i++){
+        d_idx[level].resize(h_counts[i]);
+        d_ptr[level].resize(h_counts[i]);
+        cout << d_ptr[level].size() << " " << d_idx[level].size() << endl;
+    }
 
     cudaDeviceSynchronize();
     cudaError_t err = cudaGetLastError();
@@ -149,6 +189,9 @@ void convertCOOtoCSF_GPU(const std::vector<COOElement>& cooData, int order,
         std::cerr << "CUDA error after detect_fibers: " << cudaGetErrorString(err) << std::endl;
         exit(-1);
     }
+
+    idx_gpu.resize(order);
+    ptr_gpu.resize(order);
 
     for (int level = 0; level < order; ++level) {
         // Temporary counters for idx and ptr positions
@@ -175,7 +218,18 @@ void convertCOOtoCSF_GPU(const std::vector<COOElement>& cooData, int order,
             exit(-1);
         }
 
-        cudaMemcpy(&h_count, d_count, sizeof(int64_t), cudaMemcpyDeviceToHost);
+        // Retrieve actual sizes from d_tempCounts
+        int64_t h_tempCounts[2];
+        cudaMemcpy(h_tempCounts, thrust::raw_pointer_cast(d_tempCounts.data()), 
+                2 * sizeof(int64_t), cudaMemcpyDeviceToHost);
+
+        // Resize idx and ptr vectors on the host
+        idx_gpu[level].resize(h_tempCounts[0]);
+        ptr_gpu[level].resize(h_tempCounts[1]+1);
+
+        // Copy the resized data from device to host
+        thrust::copy(d_idx[level].begin(), d_idx[level].begin() + h_tempCounts[0], idx_gpu[level].begin());
+        thrust::copy(d_ptr[level].begin(), d_ptr[level].begin() + h_tempCounts[1], ptr_gpu[level].begin());
         cudaFree(d_count);
     }
 
@@ -183,14 +237,14 @@ void convertCOOtoCSF_GPU(const std::vector<COOElement>& cooData, int order,
     vals_gpu.resize(nnz);
     thrust::copy(d_vals.begin(), d_vals.end(), vals_gpu.begin());
 
-    idx_gpu.resize(order);
-    ptr_gpu.resize(order);
-    for (int i = 0; i < order; ++i) {
-        idx_gpu[i].resize(d_idx[i].size());
-        ptr_gpu[i].resize(d_ptr[i].size());
-        thrust::copy(d_idx[i].begin(), d_idx[i].end(), idx_gpu[i].begin());
-        thrust::copy(d_ptr[i].begin(), d_ptr[i].end(), ptr_gpu[i].begin());
-    }
+    // idx_gpu.resize(order);
+    // ptr_gpu.resize(order);
+    // for (int i = 0; i < order; ++i) {
+    //     idx_gpu[i].resize(d_idx[i].size());
+    //     ptr_gpu[i].resize(d_ptr[i].size());
+    //     thrust::copy(d_idx[i].begin(), d_idx[i].end(), idx_gpu[i].begin());
+    //     thrust::copy(d_ptr[i].begin(), d_ptr[i].end(), ptr_gpu[i].begin());
+    // }
 }
 
 
