@@ -4,6 +4,8 @@
 #include <math.h>
 #include <unistd.h>
 #include <omp.h>
+#include "genten.h"
+#include "genten_gpu.h"
 
 #define ULLI unsigned long long int
 #define USHI unsigned short int 

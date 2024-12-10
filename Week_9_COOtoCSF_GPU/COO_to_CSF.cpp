@@ -99,7 +99,7 @@ void cooToCSF(const vector<COOElement>& cooData, int order) {
     }
 
     // Finalize pointers: the last value in all pointer vectors is the size of the corresponding index array
-    for (int level = 0; level < order; ++level) {
+    for (int level = 0; level < order; ++level){
         ptr[level].push_back(idx[level].size());  // Final entry to mark the end
     }
 
@@ -196,7 +196,6 @@ int main(int argc, char* argv[]) {
     // cout << endl;
 
     cooToCSF(cooData, order);
-
 
 
     return 0;
