@@ -323,73 +323,252 @@ void performContraction_gpu_1(
 ///////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////
-/* Start of Functions of GPU Method - 1 [5-for loops]*/
+/* Start of Functions of GPU Method - 1 [4-for loops]*/
 
 
 // Parallelizing across 'i_ptr' : 
+
+// __global__ void contractionKernel_4(
+//     int64_t* mode_0_ptr, int64_t* mode_0_idx,
+//     int64_t* mode_1_ptr, int64_t* mode_1_idx,
+//     int64_t* mode_2_ptr, int64_t* mode_2_idx,
+//     double* values, double* arr_A, double* arr_B,  
+//     double* arr_O, int64_t l, int64_t m, int64_t n, int64_t f1, int64_t f2, int contraction)
+// {
+//     // Compute thread index
+//     int64_t i_ptr = blockIdx.x * blockDim.x + threadIdx.x;
+
+//     if (i_ptr < mode_0_ptr[1]) {
+//         int64_t i = mode_0_idx[i_ptr] - 1;
+
+//         if (contraction == 0 || contraction == 1) {
+//             // double buffer[f2];
+//             // memset(buffer, 0, f2 * sizeof(double)); // Initialize buffer to zero
+//             double* buffer = (double*)malloc(f2 * sizeof(double));
+//             //if (buffer == nullptr) return; // Handle allocation failure
+
+//             for (int64_t j_ptr = mode_1_ptr[i_ptr]; j_ptr < mode_1_ptr[i_ptr + 1]; ++j_ptr) {
+//                 int64_t j = mode_1_idx[j_ptr] - 1;
+
+//                 // Reset buffer for every 'j'
+//                 memset(buffer, 0, f2 * sizeof(double));
+
+//                 for (int64_t k_ptr = mode_2_ptr[j_ptr]; k_ptr < mode_2_ptr[j_ptr + 1]; ++k_ptr) {
+//                     int64_t k = mode_2_idx[k_ptr] - 1;
+//                     double value = values[k_ptr];
+
+//                     for (int64_t s = 0; s < f2; ++s) {
+//                         int64_t index_B = k * f2 + s;
+//                         // buffer[s] += value * arr_B[index_B];
+//                         atomicAdd_double(&buffer[s], value * arr_B[index_B]);
+//                     }
+//                 }
+
+//                 for (int64_t r = 0; r < f1; ++r) {
+//                     int64_t index_A = 0;
+//                     if(contraction == 0){
+//                         index_A = j * f1 + r;
+//                     }
+//                     else if(contraction == 1){
+//                         index_A = i * f1 + r;
+//                     }
+//                     for (int64_t s = 0; s < f2; ++s) {
+//                         int64_t index_O = 0;
+//                         if(contraction == 0){
+//                             index_O = s * l * f1 + i * f1 + r;
+//                         }
+//                         else if(contraction == 1){
+//                             index_O = s * m * f1 + r * m + j;
+//                         }
+//                         atomicAdd_double(&arr_O[index_O], buffer[s] * arr_A[index_A]);
+//                     }
+//                 }
+//             }
+
+//             free(buffer);
+//         } 
+//     }
+// }
+
+
+
+
+
+
+
+
+
+
+
+
+// Parallelizing across 'j_ptr' : 
 
 __global__ void contractionKernel_4(
     int64_t* mode_0_ptr, int64_t* mode_0_idx,
     int64_t* mode_1_ptr, int64_t* mode_1_idx,
     int64_t* mode_2_ptr, int64_t* mode_2_idx,
     double* values, double* arr_A, double* arr_B,  
-    double* arr_O, int64_t l, int64_t m, int64_t n, int64_t f1, int64_t f2, int contraction)
+    double* arr_O, int64_t l, int64_t m, int64_t n, int64_t f1, int64_t f2, int contraction, double* buffer)
 {
     // Compute thread index
-    int64_t i_ptr = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t j_ptr = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if (i_ptr < mode_0_ptr[1]) {
-        int64_t i = mode_0_idx[i_ptr] - 1;
+    if(contraction == 0 || contraction == 1){
+        // Determine the range of valid j_ptr indices
+        if (j_ptr < mode_1_ptr[mode_0_ptr[1]]) {
+            // Find the corresponding i_ptr for the given j_ptr
+            int64_t i_ptr = -1;
+            for (int64_t p = 0; p < mode_0_ptr[1]; ++p) {
+                if (j_ptr >= mode_1_ptr[p] && j_ptr < mode_1_ptr[p + 1]) {
+                    i_ptr = p;
+                    break;
+                }
+            }
 
-        if (contraction == 0 || contraction == 1) {
-            // double buffer[f2];
-            // memset(buffer, 0, f2 * sizeof(double)); // Initialize buffer to zero
-            double* buffer = (double*)malloc(f2 * sizeof(double));
-            //if (buffer == nullptr) return; // Handle allocation failure
+            // Ensure a valid i_ptr was found
+            if (i_ptr == -1) return;
 
-            for (int64_t j_ptr = mode_1_ptr[i_ptr]; j_ptr < mode_1_ptr[i_ptr + 1]; ++j_ptr) {
+            if(i_ptr >= 0 && i_ptr < mode_0_ptr[1]){
+                int64_t i = mode_0_idx[i_ptr] - 1;
                 int64_t j = mode_1_idx[j_ptr] - 1;
 
-                // Reset buffer for every 'j'
-                memset(buffer, 0, f2 * sizeof(double));
+                // Allocate buffer on a per-thread basis
+                //double* buffer = (double*)malloc(f2 * sizeof(double));
+                if (buffer == nullptr) {// Handle allocation failure
+                    printf("Memory allocation failure \n");
+                    return;
+                } 
 
+                // Reset buffer
+                // memset(buffer, 0, f2 * sizeof(double));
+
+                // Process the k_ptr range associated with j_ptr
                 for (int64_t k_ptr = mode_2_ptr[j_ptr]; k_ptr < mode_2_ptr[j_ptr + 1]; ++k_ptr) {
                     int64_t k = mode_2_idx[k_ptr] - 1;
                     double value = values[k_ptr];
 
                     for (int64_t s = 0; s < f2; ++s) {
                         int64_t index_B = k * f2 + s;
-                        // buffer[s] += value * arr_B[index_B];
-                        atomicAdd_double(&buffer[s], value * arr_B[index_B]);
+                        // atomicAdd_double(&buffer[s], value * arr_B[index_B]);
+                        atomicAdd_double(&buffer[j_ptr * f2 + s], value * arr_B[index_B]);
                     }
                 }
 
+                // Perform the computation and update `arr_O`
                 for (int64_t r = 0; r < f1; ++r) {
                     int64_t index_A = 0;
-                    if(contraction == 0){
+                    if (contraction == 0){
                         index_A = j * f1 + r;
                     }
                     else if(contraction == 1){
                         index_A = i * f1 + r;
                     }
+
                     for (int64_t s = 0; s < f2; ++s) {
                         int64_t index_O = 0;
-                        if(contraction == 0){
+                        if (contraction == 0) {
                             index_O = s * l * f1 + i * f1 + r;
-                        }
-                        else if(contraction == 1){
+                        } else if (contraction == 1) {
                             index_O = s * m * f1 + r * m + j;
                         }
-                        atomicAdd_double(&arr_O[index_O], buffer[s] * arr_A[index_A]);
+                        // atomicAdd_double(&arr_O[index_O], buffer[s] * arr_A[index_A]);
+                        atomicAdd_double(&arr_O[index_O], buffer[j_ptr * f2 + s] * arr_A[index_A]);
                     }
                 }
-            }
 
-            free(buffer);
-        } 
+                // Free allocated buffer
+                // free(buffer);
+            }
+        }
     }
 }
 
+
+// Parallelizing across 'i_ptr' : 
+
+// __global__ void contractionKernel_for_second_contraction_part_1(
+//     int64_t* mode_0_ptr, int64_t* mode_0_idx,
+//     int64_t* mode_1_ptr, int64_t* mode_1_idx,
+//     int64_t* mode_2_ptr, int64_t* mode_2_idx,
+//     double* values, double* arr_A, double* arr_B,  
+//     double* arr_O, int64_t l, int64_t m, int64_t n, int64_t f1, int64_t f2, int contraction, double* buffer, int* k_buffer)
+// {
+//     // Compute thread index
+//     int64_t i_ptr = blockIdx.x * blockDim.x + threadIdx.x;
+
+//     if (i_ptr < mode_0_ptr[1]) {
+//         int64_t i = mode_0_idx[i_ptr] - 1;
+
+//         if (contraction == 2) {
+
+//             if (buffer == nullptr || k_buffer == nullptr) {
+//                 printf("Memory allocation failed for i_ptr = %lld\n", i_ptr);
+//                 return; // Exit if allocation fails
+//             }
+
+//             for (int64_t j_ptr = mode_1_ptr[i_ptr]; j_ptr < mode_1_ptr[i_ptr + 1]; ++j_ptr) {
+//                 int64_t j = mode_1_idx[j_ptr] - 1;
+
+//                 for (int64_t k_ptr = mode_2_ptr[j_ptr]; k_ptr < mode_2_ptr[j_ptr + 1]; ++k_ptr) {
+//                     int64_t k = mode_2_idx[k_ptr] - 1;
+//                     atomicAdd(&k_buffer[i_ptr * n + k], 1);
+//                     double value = values[k_ptr];
+                    
+//                     for (int64_t s = 0; s < f2; ++s) {
+//                         int64_t index_B = j * f2 + s;
+//                         int64_t index_buf = k * f2 + s;
+
+//                         if(index_B >= n * f2 || i_ptr * (n * f2) + index_buf >= n * f2 * mode_0_ptr[1]){
+//                             printf("Out of bound access ! \n");
+//                         }
+//                         atomicAdd_double(&buffer[i_ptr * (n * f2) + index_buf], value * arr_B[index_B]);
+//                     }
+//                 }
+//             }
+//         }
+//     }
+// }
+
+
+
+// __global__ void contractionKernel_for_second_contraction_part_2(
+//     int64_t* mode_0_ptr, int64_t* mode_0_idx,
+//     int64_t* mode_1_ptr, int64_t* mode_1_idx,
+//     int64_t* mode_2_ptr, int64_t* mode_2_idx,
+//     double* values, double* arr_A, double* arr_B,  
+//     double* arr_O, int64_t l, int64_t m, int64_t n, int64_t f1, int64_t f2, int contraction, double* buffer, int* k_buffer)
+// {
+//     // Compute thread index
+//     int64_t i_ptr = blockIdx.x * blockDim.x + threadIdx.x;
+
+//     if (i_ptr < mode_0_ptr[1]) {
+//         int64_t i = mode_0_idx[i_ptr] - 1;
+
+//         if (contraction == 2) {
+//             for (int64_t z = 0; z < n; ++z) {
+//                 int64_t k = z;
+//                 if (k_buffer[i_ptr * n + k] > 0) {
+//                     for (int64_t r = 0; r < f1; ++r) {
+//                         int64_t index_A = i * f1 + r;
+
+//                         for (int64_t s = 0; s < f2; ++s) {
+//                             int64_t index_O = k * f1 * f2 + r * f2 + s;
+//                             int64_t index_buf = k * f2 + s;
+//                             atomicAdd_double(&arr_O[index_O], buffer[i_ptr * n * f2 + index_buf] * arr_A[index_A]);
+//                         }
+//                     }
+//                 }
+//             }
+//         }
+//     }
+// }
+
+
+
+
+
+
+// Parallelizing across 'j_ptr' :
 
 
 __global__ void contractionKernel_for_second_contraction_part_1(
@@ -400,41 +579,43 @@ __global__ void contractionKernel_for_second_contraction_part_1(
     double* arr_O, int64_t l, int64_t m, int64_t n, int64_t f1, int64_t f2, int contraction, double* buffer, int* k_buffer)
 {
     // Compute thread index
-    int64_t i_ptr = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t j_ptr = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if (i_ptr < mode_0_ptr[1]) {
-        int64_t i = mode_0_idx[i_ptr] - 1;
-
-        if (contraction == 2) {
-
-            if (buffer == nullptr || k_buffer == nullptr) {
-                printf("Memory allocation failed for i_ptr = %lld\n", i_ptr);
-                return; // Exit if allocation fails
+    if (j_ptr < mode_1_ptr[mode_0_ptr[1]]) {
+        int64_t i_ptr = -1;
+        for (int64_t idx = 0; idx < mode_0_ptr[1]; ++idx) {
+            if (j_ptr >= mode_1_ptr[idx] && j_ptr < mode_1_ptr[idx + 1]) {
+                i_ptr = idx;
+                break;
             }
+        }
+        if (i_ptr < 0) return; // Out of bounds check
 
-            for (int64_t j_ptr = mode_1_ptr[i_ptr]; j_ptr < mode_1_ptr[i_ptr + 1]; ++j_ptr) {
-                int64_t j = mode_1_idx[j_ptr] - 1;
 
-                for (int64_t k_ptr = mode_2_ptr[j_ptr]; k_ptr < mode_2_ptr[j_ptr + 1]; ++k_ptr) {
-                    int64_t k = mode_2_idx[k_ptr] - 1;
-                    atomicAdd(&k_buffer[i_ptr * n + k], 1);
-                    double value = values[k_ptr];
-                    
-                    for (int64_t s = 0; s < f2; ++s) {
-                        int64_t index_B = j * f2 + s;
-                        int64_t index_buf = k * f2 + s;
+        if(i_ptr >= 0 && i_ptr < mode_0_ptr[1]){
+            // int64_t i = mode_0_idx[i_ptr] - 1;
+            int64_t j = mode_1_idx[j_ptr] - 1;
 
-                        if(index_B >= n * f2 || i_ptr * mode_0_ptr[1] + index_buf >= n * f2 * mode_0_ptr[1]){
-                            printf("Out of bound access ! \n");
-                        }
-                        atomicAdd_double(&buffer[i_ptr * (n * f2) + index_buf], value * arr_B[index_B]);
-                    }
+            for (int64_t k_ptr = mode_2_ptr[j_ptr]; k_ptr < mode_2_ptr[j_ptr + 1]; ++k_ptr) {
+                int64_t k = mode_2_idx[k_ptr] - 1;
+                atomicAdd(&k_buffer[j_ptr * n + k], 1);
+                // k_buffer[j_ptr * n + k] += 1;
+                double value = values[k_ptr];
+
+                for (int64_t s = 0; s < f2; ++s) {
+                    int64_t index_B = j * f2 + s;
+                    int64_t index_buf = k * f2 + s;
+
+                    // if (index_B >= n * f2 || j_ptr * (n * f2) + index_buf >= n * f2 * mode_1_ptr[mode_0_ptr[1]]) {
+                    //     printf("Out of bound access! \n");
+                    // }
+                    atomicAdd_double(&buffer[j_ptr * (n * f2) + index_buf], value * arr_B[index_B]);
+                    // buffer[j_ptr * (n * f2) + index_buf] += value * arr_B[index_B];
                 }
             }
         }
     }
 }
-
 
 
 __global__ void contractionKernel_for_second_contraction_part_2(
@@ -445,22 +626,33 @@ __global__ void contractionKernel_for_second_contraction_part_2(
     double* arr_O, int64_t l, int64_t m, int64_t n, int64_t f1, int64_t f2, int contraction, double* buffer, int* k_buffer)
 {
     // Compute thread index
-    int64_t i_ptr = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t j_ptr = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if (i_ptr < mode_0_ptr[1]) {
-        int64_t i = mode_0_idx[i_ptr] - 1;
+    if (j_ptr < mode_1_ptr[mode_0_ptr[1]]) {
+        int64_t i_ptr = -1;
+        for (int64_t idx = 0; idx < mode_0_ptr[1]; ++idx) {
+            if (j_ptr >= mode_1_ptr[idx] && j_ptr < mode_1_ptr[idx + 1]) {
+                i_ptr = idx;
+                break;
+            }
+        }
+        if (i_ptr < 0) return; // Out of bounds check
 
-        if (contraction == 2) {
+        if(i_ptr >= 0 && i_ptr < mode_0_ptr[1]){
+            int64_t i = mode_0_idx[i_ptr] - 1;
+
             for (int64_t z = 0; z < n; ++z) {
                 int64_t k = z;
-                if (k_buffer[i_ptr * n + k] > 0) {
+
+                if (k_buffer[j_ptr * n + k] > 0) {
                     for (int64_t r = 0; r < f1; ++r) {
                         int64_t index_A = i * f1 + r;
 
                         for (int64_t s = 0; s < f2; ++s) {
                             int64_t index_O = k * f1 * f2 + r * f2 + s;
                             int64_t index_buf = k * f2 + s;
-                            atomicAdd_double(&arr_O[index_O], buffer[i_ptr * n * f2 + index_buf] * arr_A[index_A]);
+
+                            atomicAdd_double(&arr_O[index_O], buffer[j_ptr * n * f2 + index_buf] * arr_A[index_A]);
                         }
                     }
                 }
@@ -486,8 +678,9 @@ void performContraction_gpu_2(
     // Allocate device memory
     int64_t *d_mode_0_ptr, *d_mode_0_idx, *d_mode_1_ptr, *d_mode_1_idx, *d_mode_2_ptr, *d_mode_2_idx;
     double *d_values, *d_arr_A, *d_arr_B, *d_arr_O;
-    double* buffer;
-    int* k_buffer;
+    double* buffer_for_contraction_0_1;
+    double* buffer_for_contraction_2;
+    int* k_buffer_for_contraction_2;
 
 
 
@@ -503,8 +696,17 @@ void performContraction_gpu_2(
     cudaMalloc(&d_arr_B, sizeof(double) * arr_B_size);
     cudaMalloc(&d_arr_O, sizeof(double) * arr_O_size);
 
-    cudaMalloc(&buffer, n * f2 * size_mode_0_idx * sizeof(double));
-    cudaMalloc(&k_buffer, n * size_mode_0_idx * sizeof(int));
+
+    // parallelising 'j_ptr' for contraction = 0 and contraction = 1 :
+    cudaMalloc(&buffer_for_contraction_0_1, f2 * size_mode_1_idx * sizeof(double));
+
+    // parallelising 'i_ptr' for contraction = 2 :
+    // cudaMalloc(&buffer_for_contraction_2, n * f2 * size_mode_0_idx * sizeof(double));
+    // cudaMalloc(&k_buffer_for_contraction_2, n * size_mode_0_idx * sizeof(int));
+
+    // parallelising 'j_ptr' for contraction = 2 :
+    cudaMalloc(&buffer_for_contraction_2, n * f2 * size_mode_1_idx * sizeof(double));
+    cudaMalloc(&k_buffer_for_contraction_2, n * size_mode_1_idx * sizeof(int));
 
     // Copy data to device
     cudaMemcpy(d_mode_0_ptr, mode_0_ptr, sizeof(int64_t) * size_mode_0_ptr, cudaMemcpyHostToDevice);
@@ -518,22 +720,46 @@ void performContraction_gpu_2(
     cudaMemcpy(d_arr_B, arr_B, sizeof(double) * arr_B_size, cudaMemcpyHostToDevice);
     cudaMemcpy(d_arr_O, arr_O, sizeof(double) * arr_O_size, cudaMemcpyHostToDevice);
 
-    cudaMemset(buffer, 0, n * f2 * size_mode_0_idx * sizeof(double));
-    cudaMemset(k_buffer, 0, n * size_mode_0_idx * sizeof(int));
+
+    // parallelising 'j_ptr' for contraction = 0 and contraction = 1 :
+    cudaMemset(buffer_for_contraction_0_1, 0, f2 * size_mode_1_idx * sizeof(double));
+
+
+    // parallelising 'i_ptr' for contraction = 2 :
+    // cudaMemset(buffer_for_contraction_2, 0, n * f2 * size_mode_0_idx * sizeof(double));
+    // cudaMemset(k_buffer_for_contraction_2, 0, n * size_mode_0_idx * sizeof(int));
+
+
+    // parallelising 'j_ptr' for contraction = 2 :
+    cudaMemset(buffer_for_contraction_2, 0, n * f2 * size_mode_1_idx * sizeof(double));
+    cudaMemset(k_buffer_for_contraction_2, 0, n * size_mode_1_idx * sizeof(int));
 
     // Launch kernel
     int threadsPerBlock = 256;
-    int blocksPerGrid = (size_mode_0_idx + threadsPerBlock - 1) / threadsPerBlock;
+
+    // parallelising 'i_ptr' :
+    // int blocksPerGrid = (size_mode_0_idx + threadsPerBlock - 1) / threadsPerBlock;
+
+    // parallelising 'j_ptr' :
+    int blocksPerGrid = (size_mode_1_idx + threadsPerBlock - 1) / threadsPerBlock;
 
     if(contraction == 0 || contraction == 1){
+        // parallelising 'i_ptr' :
+    
+        // contractionKernel_4<<<blocksPerGrid, threadsPerBlock>>>(
+        //     d_mode_0_ptr, d_mode_0_idx, d_mode_1_ptr, d_mode_1_idx, d_mode_2_ptr, d_mode_2_idx,
+        //     d_values, d_arr_A, d_arr_B, d_arr_O, l, m, n, f1, f2, contraction);
+
+
+        // parallelising 'i_ptr' :
         contractionKernel_4<<<blocksPerGrid, threadsPerBlock>>>(
             d_mode_0_ptr, d_mode_0_idx, d_mode_1_ptr, d_mode_1_idx, d_mode_2_ptr, d_mode_2_idx,
-            d_values, d_arr_A, d_arr_B, d_arr_O, l, m, n, f1, f2, contraction);
+            d_values, d_arr_A, d_arr_B, d_arr_O, l, m, n, f1, f2, contraction, buffer_for_contraction_0_1);
     }
     else if(contraction == 2){
         contractionKernel_for_second_contraction_part_1<<<blocksPerGrid, threadsPerBlock>>>(
             d_mode_0_ptr, d_mode_0_idx, d_mode_1_ptr, d_mode_1_idx, d_mode_2_ptr, d_mode_2_idx,
-            d_values, d_arr_A, d_arr_B, d_arr_O, l, m, n, f1, f2, contraction, buffer, k_buffer);
+            d_values, d_arr_A, d_arr_B, d_arr_O, l, m, n, f1, f2, contraction, buffer_for_contraction_2, k_buffer_for_contraction_2);
     }
 
     cudaDeviceSynchronize();
@@ -541,7 +767,7 @@ void performContraction_gpu_2(
     if(contraction == 2){
         contractionKernel_for_second_contraction_part_2<<<blocksPerGrid, threadsPerBlock>>>(
             d_mode_0_ptr, d_mode_0_idx, d_mode_1_ptr, d_mode_1_idx, d_mode_2_ptr, d_mode_2_idx,
-            d_values, d_arr_A, d_arr_B, d_arr_O, l, m, n, f1, f2, contraction, buffer, k_buffer);
+            d_values, d_arr_A, d_arr_B, d_arr_O, l, m, n, f1, f2, contraction, buffer_for_contraction_2, k_buffer_for_contraction_2);
     }
 
 
@@ -582,8 +808,9 @@ void performContraction_gpu_2(
     cudaFree(d_arr_B);
     cudaFree(d_arr_O);
 
-    cudaFree(buffer);
-    cudaFree(k_buffer);
+    cudaFree(buffer_for_contraction_0_1);
+    cudaFree(buffer_for_contraction_2);
+    cudaFree(k_buffer_for_contraction_2);
 }
 
 
