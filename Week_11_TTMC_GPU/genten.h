@@ -7,6 +7,7 @@
 #include <math.h>
 #include <unistd.h>
 #include <omp.h>
+#include <stdint.h>
 
 #define ULLI unsigned long long int
 #define USHI unsigned short int 
@@ -29,7 +30,7 @@ void print_vec(ULLI *array, int array_size);
 void print_vec_double(double *array, int array_size);
 
 // Tensor generation function prototype
-void generate_tensor(int argc, char *argv[], int64_t **my_tensor_indices, double **my_tensor_values, int64_t *total_indices, int64_t *total_values);
+void generate_tensor(int argc, char *argv[], uint64_t **my_tensor_indices, double **my_tensor_values, uint64_t *total_indices, uint64_t *total_values);
 
 #ifdef __cplusplus
 }

@@ -38,38 +38,38 @@ using namespace std;
 
 //int max_size = 100000; 
 
-int64_t* mode_0_pointer_csf;
-int64_t* mode_0_indices_csf;
-int64_t* mode_1_pointer_csf;
-int64_t* mode_1_indices_csf;
-int64_t* mode_2_pointer_csf;
-int64_t* mode_2_indices_csf;
+uint64_t* mode_0_pointer_csf;
+uint64_t* mode_0_indices_csf;
+uint64_t* mode_1_pointer_csf;
+uint64_t* mode_1_indices_csf;
+uint64_t* mode_2_pointer_csf;
+uint64_t* mode_2_indices_csf;
 
 int size_mode_0_pointer_csf = 0, size_mode_0_indices_csf = 0;
 int size_mode_1_pointer_csf = 0, size_mode_1_indices_csf = 0;
 int size_mode_2_pointer_csf = 0, size_mode_2_indices_csf = 0;
 
-void get_mode_0_ptr(int64_t** mode_0_ptr_ttmc, int* size_mode_0_ptr){
+void get_mode_0_ptr(uint64_t** mode_0_ptr_ttmc, int* size_mode_0_ptr){
     (*mode_0_ptr_ttmc) = mode_0_pointer_csf ;
     *size_mode_0_ptr = size_mode_0_pointer_csf;
 }
-void get_mode_0_idx(int64_t** mode_0_idx_ttmc, int* size_mode_0_idx){
+void get_mode_0_idx(uint64_t** mode_0_idx_ttmc, int* size_mode_0_idx){
     (*mode_0_idx_ttmc) = mode_0_indices_csf ;
     *size_mode_0_idx = size_mode_0_indices_csf ;
 }
-void get_mode_1_ptr(int64_t** mode_1_ptr_ttmc, int* size_mode_1_ptr){
+void get_mode_1_ptr(uint64_t** mode_1_ptr_ttmc, int* size_mode_1_ptr){
     (*mode_1_ptr_ttmc) = mode_1_pointer_csf ;
     *size_mode_1_ptr = size_mode_1_pointer_csf;
 }
-void get_mode_1_idx(int64_t** mode_1_idx_ttmc, int* size_mode_1_idx){
+void get_mode_1_idx(uint64_t** mode_1_idx_ttmc, int* size_mode_1_idx){
     (*mode_1_idx_ttmc) = mode_1_indices_csf ;
     *size_mode_1_idx = size_mode_1_indices_csf ;
 }
-void get_mode_2_ptr(int64_t** mode_2_ptr_ttmc, int* size_mode_2_ptr){
+void get_mode_2_ptr(uint64_t** mode_2_ptr_ttmc, int* size_mode_2_ptr){
     (*mode_2_ptr_ttmc) = mode_2_pointer_csf ;
     *size_mode_2_ptr = size_mode_2_pointer_csf;
 }
-void get_mode_2_idx(int64_t** mode_2_idx_ttmc, int* size_mode_2_idx){
+void get_mode_2_idx(uint64_t** mode_2_idx_ttmc, int* size_mode_2_idx){
     (*mode_2_idx_ttmc) = mode_2_indices_csf ;
     *size_mode_2_idx = size_mode_2_indices_csf ;
 }
@@ -77,23 +77,23 @@ void get_mode_2_idx(int64_t** mode_2_idx_ttmc, int* size_mode_2_idx){
 
 // Structure to hold the COO data
 struct COOElement {
-    vector<int64_t> indices; // Store indices for all modes
+    vector<uint64_t> indices; // Store indices for all modes
     double value;
 };
 
 
 // Function to convert COO to CSF format dynamically
-void cooToCSF(int64_t* my_tensor_indices, double* my_tensor_values, int order, int64_t  total_indices, int64_t  total_values) {
+void cooToCSF(uint64_t* my_tensor_indices, double* my_tensor_values, int order, uint64_t  total_indices, uint64_t  total_values) {
 
     vector<COOElement> cooData;
-    vector<int64_t> indices;
+    vector<uint64_t> indices;
 
 
-    int64_t count_idx = 0, count_val = 0;
+    uint64_t count_idx = 0, count_val = 0;
 
-    for(int64_t i = 0; i < total_indices; i++){
+    for(uint64_t i = 0; i < total_indices; i++){
         
-        int64_t index = my_tensor_indices[count_idx];
+        uint64_t index = my_tensor_indices[count_idx];
         count_idx++;
         indices.push_back(index);
         
@@ -109,12 +109,12 @@ void cooToCSF(int64_t* my_tensor_indices, double* my_tensor_values, int order, i
 
 
 
-    // int64_t nnz = cooData.size();
+    // uint64_t nnz = cooData.size();
     
     // CSF structure
-    vector<vector<int64_t>> idx(order); // `order` levels of indices
-    vector<vector<int64_t>> ptr(order); // `order` levels of pointers
-    vector<int64_t> vals;   // Store non-zero values
+    vector<vector<uint64_t>> idx(order); // `order` levels of indices
+    vector<vector<uint64_t>> ptr(order); // `order` levels of pointers
+    vector<uint64_t> vals;   // Store non-zero values
     
     // Initialize mode_0_ptr array with '0'
     ptr[0].push_back(0); 
@@ -132,7 +132,7 @@ void cooToCSF(int64_t* my_tensor_indices, double* my_tensor_values, int order, i
     });
     
     // Variables to track the previous indices at each level
-    vector<int64_t> prevIndices(order, -1);
+    vector<uint64_t> prevIndices(order, -1);
     
     // Loop over the sorted COO data
     for (const auto& elem : sortedCOO) {
@@ -167,12 +167,12 @@ void cooToCSF(int64_t* my_tensor_indices, double* my_tensor_values, int order, i
     for (int level = 0; level < order; ++level) {
         if(level == 0){
             size_mode_0_pointer_csf = ptr[level].size();
-            mode_0_pointer_csf = new int64_t [size_mode_0_pointer_csf];
+            mode_0_pointer_csf = new uint64_t [size_mode_0_pointer_csf];
             
             size_mode_0_indices_csf = idx[level].size();
-            mode_0_indices_csf = new int64_t [size_mode_0_indices_csf];
+            mode_0_indices_csf = new uint64_t [size_mode_0_indices_csf];
 
-            int64_t i = 0;
+            uint64_t i = 0;
             for (auto val : ptr[level]) {
                 mode_0_pointer_csf[i] = val;
                 i++;
@@ -186,12 +186,12 @@ void cooToCSF(int64_t* my_tensor_indices, double* my_tensor_values, int order, i
         }
         else if(level == 1){
             size_mode_1_pointer_csf = ptr[level].size();
-            mode_1_pointer_csf = new int64_t [size_mode_1_pointer_csf];
+            mode_1_pointer_csf = new uint64_t [size_mode_1_pointer_csf];
             
             size_mode_1_indices_csf = idx[level].size();
-            mode_1_indices_csf = new int64_t [size_mode_1_indices_csf];
+            mode_1_indices_csf = new uint64_t [size_mode_1_indices_csf];
             
-            int64_t i = 0;
+            uint64_t i = 0;
             for (auto val : ptr[level]) {
                 mode_1_pointer_csf[i] = val;
                 i++;
@@ -205,12 +205,12 @@ void cooToCSF(int64_t* my_tensor_indices, double* my_tensor_values, int order, i
         }
         else if(level == 2){
             size_mode_2_pointer_csf = ptr[level].size();
-            mode_2_pointer_csf = new int64_t [size_mode_2_pointer_csf];
+            mode_2_pointer_csf = new uint64_t [size_mode_2_pointer_csf];
             
             size_mode_2_indices_csf = idx[level].size();
-            mode_2_indices_csf = new int64_t [size_mode_2_indices_csf];
+            mode_2_indices_csf = new uint64_t [size_mode_2_indices_csf];
 
-            int64_t i = 0;
+            uint64_t i = 0;
             for (auto val : ptr[level]) {
                 mode_2_pointer_csf[i] = val;
                 i++;

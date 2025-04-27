@@ -4,6 +4,7 @@
 #include <math.h>
 #include <unistd.h>
 #include <omp.h>
+#include <stdint.h>
 
 #define ULLI unsigned long long int
 #define USHI unsigned short int 
@@ -34,7 +35,7 @@ void printusage();
 
 
 
-void generate_tensor(int argc, char *argv[], int64_t **my_tensor_indices, double **my_tensor_values, int64_t *total_indices, int64_t *total_values)
+void generate_tensor(int argc, char *argv[], uint64_t **my_tensor_indices, double **my_tensor_values, uint64_t *total_indices, uint64_t *total_values)
 {
 	double time_start = omp_get_wtime();
 
@@ -945,7 +946,7 @@ void generate_tensor(int argc, char *argv[], int64_t **my_tensor_indices, double
 	// int *my_tensor_memory = (int *) malloc(nnz * (order + 1) * sizeof(int)); // Allocate COO in memory
 	
 
-	*my_tensor_indices = (int64_t *) malloc(nnz * (order) * sizeof(int64_t)); // Allocate COO in memory
+	*my_tensor_indices = (uint64_t *) malloc(nnz * (order) * sizeof(uint64_t)); // Allocate COO in memory
 	*my_tensor_values = (double *) malloc(nnz * sizeof(double)); // Allocate COO in memory
     *total_indices = nnz * order; // Set the size
 	*total_values = nnz;
@@ -957,7 +958,7 @@ void generate_tensor(int argc, char *argv[], int64_t **my_tensor_indices, double
 		// fprintf(fptr, "%d %d %d ", ind_0[n]+1, ind_1[n]+1, ind_2[n]+1);
 		for (int i = 0; i < order; i++){
 			// fprintf(fptr, "%d ", ind[i][n]+1);
-			(*my_tensor_indices)[count_idx] = (int64_t)(ind[i][n] + 1);
+			(*my_tensor_indices)[count_idx] = (uint64_t)(ind[i][n] + 1);
 			count_idx++;
 		}
 		(*my_tensor_values)[count_val] = (double)((rand() % 9 + 1.0) / 10.0);
