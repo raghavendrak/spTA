@@ -111,6 +111,11 @@ bool compare_matrices(double*& C1, double*& C2, int rows, int cols, double toler
   for (int i = 0; i < rows * cols; ++i) {
     if (std::fabs(C1[i] - C2[i]) > tolerance) {
       std::cout << " NOT matching at i : " << i << endl;
+      for(int j = i; j < i + 10; ++j){
+        if(j < rows * cols){
+          std::cout << "C1[i] = " << C1[j] << " C2[i] = " << C2[j] << endl;
+        }
+      }
       return false;
     }
   }
@@ -463,7 +468,7 @@ __global__ void GPU_5loop_contraction_kernel_0(
   uint64_t i, j, k, index_A, index_B, index_O;
   double value;
   if ((i_ptr >= 0 && i_ptr < mode_0_ptr[1]) && 
-      (j_ptr >= 0 && j_ptr < size_mode_1_idx) ) 
+      ( j_ptr < size_mode_1_idx) ) 
   {
     for (uint64_t k_ptr = mode_2_ptr[j_ptr]; k_ptr < mode_2_ptr[j_ptr + 1]; ++k_ptr) {
     
@@ -576,66 +581,6 @@ void performContraction_gpu_1(
   cudaFree(d_arr_B);
   cudaFree(d_arr_O);
 }
-  
-/*
-{
-  // Allocate device memory
-  uint64_t *d_mode_0_ptr, *d_mode_0_idx, *d_mode_1_ptr, *d_mode_1_idx, *d_mode_2_ptr, *d_mode_2_idx;
-  double *d_values, *d_arr_A, *d_arr_B, *d_arr_O;
-
-  cudaCheckError(cudaMalloc(&d_mode_0_ptr, sizeof(uint64_t) * size_mode_0_ptr));
-  cudaCheckError(cudaMalloc(&d_mode_0_idx, sizeof(uint64_t) * size_mode_0_idx));
-  cudaCheckError(cudaMalloc(&d_mode_1_ptr, sizeof(uint64_t) * size_mode_1_ptr));
-  cudaCheckError(cudaMalloc(&d_mode_1_idx, sizeof(uint64_t) * size_mode_1_idx));
-  cudaCheckError(cudaMalloc(&d_mode_2_ptr, sizeof(uint64_t) * size_mode_2_ptr));
-  cudaCheckError(cudaMalloc(&d_mode_2_idx, sizeof(uint64_t) * size_mode_2_idx));
-  cudaCheckError(cudaMalloc(&d_values, sizeof(double) * total_values));
-  cudaCheckError(cudaMalloc(&d_arr_A, sizeof(double) * arr_A_size));
-  cudaCheckError(cudaMalloc(&d_arr_B, sizeof(double) * arr_B_size));
-  cudaCheckError(cudaMalloc(&d_arr_O, sizeof(double) * arr_O_size));
-
-  // Copy data from host to device
-  cudaCheckError(cudaMemcpy(d_mode_0_ptr, mode_0_ptr, sizeof(uint64_t) * size_mode_0_ptr, cudaMemcpyHostToDevice));
-  cudaCheckError(cudaMemcpy(d_mode_0_idx, mode_0_idx, sizeof(uint64_t) * size_mode_0_idx, cudaMemcpyHostToDevice));
-  cudaCheckError(cudaMemcpy(d_mode_1_ptr, mode_1_ptr, sizeof(uint64_t) * size_mode_1_ptr, cudaMemcpyHostToDevice));
-  cudaCheckError(cudaMemcpy(d_mode_1_idx, mode_1_idx, sizeof(uint64_t) * size_mode_1_idx, cudaMemcpyHostToDevice));
-  cudaCheckError(cudaMemcpy(d_mode_2_ptr, mode_2_ptr, sizeof(uint64_t) * size_mode_2_ptr, cudaMemcpyHostToDevice));
-  cudaCheckError(cudaMemcpy(d_mode_2_idx, mode_2_idx, sizeof(uint64_t) * size_mode_2_idx, cudaMemcpyHostToDevice));
-  cudaCheckError(cudaMemcpy(d_values, values, sizeof(double) * total_values, cudaMemcpyHostToDevice));
-  cudaCheckError(cudaMemcpy(d_arr_A, arr_A, sizeof(double) * arr_A_size, cudaMemcpyHostToDevice));
-  cudaCheckError(cudaMemcpy(d_arr_B, arr_B, sizeof(double) * arr_B_size, cudaMemcpyHostToDevice));
-  cudaCheckError(cudaMemcpy(d_arr_O, arr_O, sizeof(double) * arr_O_size, cudaMemcpyHostToDevice));
-
-  // Kernel launch parameters
-  int threadsPerBlock = 256;
-  int blocksPerGrid = (size_mode_1_idx + threadsPerBlock - 1) / threadsPerBlock;
-
-  // Launch appropriate kernel based on contraction type
-  GPU_5loop_contraction_kernel_0<<<blocksPerGrid, threadsPerBlock>>>(
-      d_mode_0_ptr, d_mode_0_idx, d_mode_1_ptr, d_mode_1_idx, d_mode_2_ptr, d_mode_2_idx,
-      d_values, d_arr_A, d_arr_B, d_arr_O, dim_0, dim_1, dim_2, r1, r2, contraction);
-
-  // Check for launch errors
-  cudaCheckError(cudaGetLastError());
-  cudaCheckError(cudaDeviceSynchronize());
-
-  // Copy results back to host
-  cudaCheckError(cudaMemcpy(arr_O, d_arr_O, sizeof(double) * arr_O_size, cudaMemcpyDeviceToHost));
-
-  // Free device memory
-  cudaCheckError(cudaFree(d_mode_0_ptr));
-  cudaCheckError(cudaFree(d_mode_0_idx));
-  cudaCheckError(cudaFree(d_mode_1_ptr));
-  cudaCheckError(cudaFree(d_mode_1_idx));
-  cudaCheckError(cudaFree(d_mode_2_ptr));
-  cudaCheckError(cudaFree(d_mode_2_idx));
-  cudaCheckError(cudaFree(d_values));
-  cudaCheckError(cudaFree(d_arr_A));
-  cudaCheckError(cudaFree(d_arr_B));
-  cudaCheckError(cudaFree(d_arr_O));
-}
-  */
-
 
 /*End of host function for GPU 5 loop Method*/
 /////////////////////////////////////////////////////////////////////
@@ -843,14 +788,6 @@ void performContraction_gpu_2(
   cudaMalloc(&d_arr_B, sizeof(double) * arr_B_size);
   cudaMalloc(&d_arr_O, sizeof(double) * arr_O_size);
 
-
-  // parallelising 'j_ptr' for contraction = 0 and contraction = 1 :
-  cudaMalloc(&buffer_for_contraction_0_1, f2 * size_mode_1_idx * sizeof(double));
-
-  // parallelising 'j_ptr' for contraction = 2 :
-  cudaMalloc(&buffer_for_contraction_2, n * f2 * size_mode_1_idx * sizeof(double));
-  cudaMalloc(&k_buffer_for_contraction_2, n * size_mode_1_idx * sizeof(int));
-
   // Copy data to device
   cudaMemcpy(d_mode_0_ptr, mode_0_ptr, sizeof(uint64_t) * size_mode_0_ptr, cudaMemcpyHostToDevice);
   cudaMemcpy(d_mode_0_idx, mode_0_idx, sizeof(uint64_t) * size_mode_0_idx, cudaMemcpyHostToDevice);
@@ -863,41 +800,42 @@ void performContraction_gpu_2(
   cudaMemcpy(d_arr_B, arr_B, sizeof(double) * arr_B_size, cudaMemcpyHostToDevice);
   cudaMemcpy(d_arr_O, arr_O, sizeof(double) * arr_O_size, cudaMemcpyHostToDevice);
 
-
-  // parallelising 'j_ptr' for contraction = 0 and contraction = 1 :
-  cudaMemset(buffer_for_contraction_0_1, 0, f2 * size_mode_1_idx * sizeof(double));
-
-
-  // parallelising 'j_ptr' for contraction = 2 :
-  cudaMemset(buffer_for_contraction_2, 0, n * f2 * size_mode_1_idx * sizeof(double));
-  cudaMemset(k_buffer_for_contraction_2, 0, n * size_mode_1_idx * sizeof(int));
-
   // Launch kernel
   int threadsPerBlock = 256;
-
+  
   // parallelising 'j_ptr' :
   int blocksPerGrid = (size_mode_1_idx + threadsPerBlock - 1) / threadsPerBlock;
-
+  
   if(contraction == 0 || contraction == 1){
-
+    // parallelising 'j_ptr' for contraction = 0 and contraction = 1 :
+    cudaMalloc(&buffer_for_contraction_0_1, f2 * size_mode_1_idx * sizeof(double));
+    // parallelising 'j_ptr' for contraction = 0 and contraction = 1 :
+    cudaMemset(buffer_for_contraction_0_1, 0, f2 * size_mode_1_idx * sizeof(double));
+    
     // parallelising 'i_ptr' :
     contractionKernel_4<<<blocksPerGrid, threadsPerBlock>>>(
-        d_mode_0_ptr, d_mode_0_idx, d_mode_1_ptr, d_mode_1_idx, d_mode_2_ptr, d_mode_2_idx,
-        d_values, d_arr_A, d_arr_B, d_arr_O, l, m, n, f1, f2, contraction, buffer_for_contraction_0_1);
-  }
-  else if(contraction == 2){
-    contractionKernel_for_second_contraction_part_1<<<blocksPerGrid, threadsPerBlock>>>(
+      d_mode_0_ptr, d_mode_0_idx, d_mode_1_ptr, d_mode_1_idx, d_mode_2_ptr, d_mode_2_idx,
+      d_values, d_arr_A, d_arr_B, d_arr_O, l, m, n, f1, f2, contraction, buffer_for_contraction_0_1);
+    }
+    else if(contraction == 2){
+      // parallelising 'j_ptr' for contraction = 2 :
+      cudaMalloc(&buffer_for_contraction_2, n * f2 * size_mode_1_idx * sizeof(double));
+      cudaMalloc(&k_buffer_for_contraction_2, n * size_mode_1_idx * sizeof(int));
+      
+      // parallelising 'j_ptr' for contraction = 2 :
+      cudaMemset(buffer_for_contraction_2, 0, n * f2 * size_mode_1_idx * sizeof(double));
+      cudaMemset(k_buffer_for_contraction_2, 0, n * size_mode_1_idx * sizeof(int));
+
+      contractionKernel_for_second_contraction_part_1<<<blocksPerGrid, threadsPerBlock>>>(
         d_mode_0_ptr, d_mode_0_idx, d_mode_1_ptr, d_mode_1_idx, d_mode_2_ptr, d_mode_2_idx,
         d_values, d_arr_A, d_arr_B, d_arr_O, l, m, n, f1, f2, contraction, buffer_for_contraction_2, k_buffer_for_contraction_2);
-  }
-
-  cudaDeviceSynchronize();
-
-  if(contraction == 2){
-    contractionKernel_for_second_contraction_part_2<<<blocksPerGrid, threadsPerBlock>>>(
-        d_mode_0_ptr, d_mode_0_idx, d_mode_1_ptr, d_mode_1_idx, d_mode_2_ptr, d_mode_2_idx,
-        d_values, d_arr_A, d_arr_B, d_arr_O, l, m, n, f1, f2, contraction, buffer_for_contraction_2, k_buffer_for_contraction_2);
-  }
+        cudaDeviceSynchronize();
+        contractionKernel_for_second_contraction_part_2<<<blocksPerGrid, threadsPerBlock>>>(
+          d_mode_0_ptr, d_mode_0_idx, d_mode_1_ptr, d_mode_1_idx, d_mode_2_ptr, d_mode_2_idx,
+          d_values, d_arr_A, d_arr_B, d_arr_O, l, m, n, f1, f2, contraction, buffer_for_contraction_2, k_buffer_for_contraction_2);
+    }
+        
+    cudaDeviceSynchronize();
 
 
   // Copy results back to host
@@ -918,9 +856,401 @@ void performContraction_gpu_2(
   cudaFree(buffer_for_contraction_0_1);
   cudaFree(buffer_for_contraction_2);
   cudaFree(k_buffer_for_contraction_2);
+  // cudaDeviceSynchronize();
 }
 
 /*End of host function for GPU 4 loop Method*/
+/////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////
+/*start of device function for GPU 4 loop Method using STREAMS*/
+__global__ void GPU_4loop_streams(
+  // uint64_t* mode_1_ptr,
+  uint64_t* mode_1_idx,
+  uint64_t* mode_2_ptr, uint64_t* mode_2_idx,
+  double* values, double* arr_A, double* arr_B,  
+  double* arr_O, uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, int ncm,
+  int size_mode_0_ptr, int size_mode_1_ptr, int size_mode_2_ptr,
+  int size_mode_0_idx, int size_mode_1_idx, int size_mode_2_idx, uint64_t i, uint64_t j_ptr_offset
+)
+{
+  extern __shared__ double buf[];
+  uint64_t j, j_ptr, k, k_ptr, k_ptr_offset, index_A, index_B, index_O ;
+  int r, s, r_offset, s_offset, WARP_SIZE = 32;
+  double value, A_val;
+  unsigned mask;
+
+  j_ptr = j_ptr_offset + blockIdx.x;
+  j = mode_1_idx[j_ptr];
+  // uint64_t nnz_k = mode_2_ptr[j_ptr+1] - mode_2_ptr[j_ptr];
+  
+  int buf_index = threadIdx.y * blockDim.x + threadIdx.x;
+
+  //NOTE; WORKS ONLY IF f2 < 1024
+  if(buf_index < f2){
+    buf[buf_index] = 0.0;
+  }
+  __syncthreads();
+  
+  // parallelize s across warps
+  // block dimesion is 32 x 32. 
+  // hence, each row of thread block will form a warp 
+  // each column of thread block(a warp) picks a k, thus a nonzero of input tensor
+  for(k_ptr_offset = mode_2_ptr[j_ptr]; k_ptr_offset < mode_2_ptr[j_ptr + 1]; k_ptr_offset += blockDim.x){
+    k_ptr =  k_ptr_offset + threadIdx.x;
+    if(k_ptr < mode_2_ptr[j_ptr + 1]){
+      
+      value = values[k_ptr];
+      k = mode_2_idx[k_ptr];
+      
+      //Each thread in a warp picks a 's'
+      for(s_offset = 0; s_offset < f2; s_offset += blockDim.y){
+        s = s_offset + threadIdx.y;
+        if(s < f2){
+          mask = __activemask();
+          index_B = k * f2 + s;
+          double prod_val = value * arr_B[index_B];
+
+          for(int shuffle_offset = WARP_SIZE/2; shuffle_offset > 0; shuffle_offset>>=1){
+            prod_val += __shfl_down_sync(mask, prod_val, shuffle_offset);
+          }
+          if(threadIdx.x == 0) buf[s] += prod_val;
+          //atomicAdd(&buf[s], value * arr_B[index_B] );
+        }
+      }
+    }
+  }
+  __syncthreads();
+  
+  //////////////////////////////////////////////////////////////////////////////////
+  // parallelize 'r' across warps
+  // block dimesion is 32 x 32. 
+  // hence, each row of thread block will form a warp 
+  // each row of thread block(a warp) picks a 'r'
+  if(ncm == 0){
+    for(r_offset = 0; r_offset < f1; r_offset += blockDim.y){
+      r = r_offset + threadIdx.y;
+      if(r < f1){
+        index_A = j * f1 + r;
+        A_val = arr_A[index_A];
+        //Each thread in a warp picks a 's'
+        for(s_offset = 0; s_offset < f2; s_offset += blockDim.x){
+          s = s_offset + threadIdx.x;
+          if(s < f2){
+            index_O = i * f1 * f2 + r * f2  + s;
+            //atomic add is required since different threadblocks in the same stream has same i
+            atomicAdd(&arr_O[index_O], buf[s] * A_val);
+          }
+        }
+        
+      }
+    }
+  }
+  else if(ncm == 1){
+    for(r_offset = 0; r_offset < f1; r_offset += blockDim.y){
+      r = r_offset + threadIdx.y;
+      if(r < f1){
+        index_A = i * f1 + r;
+        A_val = arr_A[index_A];
+        //Each thread in a warp picks a 's'
+        for(s_offset = 0; s_offset < f2; s_offset += blockDim.x){
+          s = s_offset + threadIdx.x;
+          if(s < f2){
+            index_O = j * f1 * f2 + r * f2  + s;
+            //atomic add is required since different threadblocks in the same stream has same i
+            atomicAdd(&arr_O[index_O], buf[s] * A_val);
+          }
+        }
+        
+      }
+    }
+  }
+  // __syncthreads();
+}
+
+__global__ void GPU_4loop_streams_ncm_2_part_1(
+  // uint64_t* mode_1_ptr,
+  uint64_t* mode_1_idx,
+  uint64_t* mode_2_ptr, uint64_t* mode_2_idx,
+  double* values, double* arr_A, double* arr_B,  
+  double* arr_O, uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, int ncm,
+  int size_mode_0_ptr, int size_mode_1_ptr, int size_mode_2_ptr,
+  int size_mode_0_idx, int size_mode_1_idx, int size_mode_2_idx, uint64_t i, uint64_t j_ptr_offset,
+  double* buffer_for_ncm_2, bool* k_index_buffer
+)
+{ 
+  //shared memory will not be enough for 2d dense buf[k,s] of type double
+  // for e.g. dim_k = 1024, dim_s = 32, the required memory is 32*8*1024 = 256kb
+  uint64_t j, j_ptr, k, k_ptr, k_ptr_offset, index_B ;
+  int  s, s_offset, buf_index;// WARP_SIZE = 32;
+  double value;
+  // unsigned mask;
+
+  j_ptr = j_ptr_offset + blockIdx.x;
+  j = mode_1_idx[j_ptr];
+  
+  // parallelize s across warps
+  // block dimesion is 32 x 32. 
+  // hence, each row of thread block will form a warp 
+  // each column of thread block(a warp) picks a k, thus a nonzero of input tensor
+  for(k_ptr_offset = mode_2_ptr[j_ptr]; k_ptr_offset < mode_2_ptr[j_ptr + 1]; k_ptr_offset += blockDim.x){
+    k_ptr =  k_ptr_offset + threadIdx.x;
+    if(k_ptr < mode_2_ptr[j_ptr + 1]){
+      
+      value = values[k_ptr];
+      k = mode_2_idx[k_ptr];
+      //since each column in threadblock has same k, threads from first column is enough to note that k
+      if(threadIdx.y == 0) k_index_buffer[k] = true;
+      
+      //Each thread in a warp picks a 's'
+      for(s_offset = 0; s_offset < f2; s_offset += blockDim.y){
+        s = s_offset + threadIdx.y;
+        if(s < f2){
+          index_B = j * f2 + s;
+          buf_index = k * f2 + s;
+          double prod_val = value * arr_B[index_B];
+          
+          //warp shuffle cannot be used here because either k or s is changing along the both block dimension
+          // mask = __activemask();
+          // for(int shuffle_offset = WARP_SIZE/2; shuffle_offset > 0; shuffle_offset>>=1){
+          //   prod_val += __shfl_down_sync(mask, prod_val, shuffle_offset);
+          // }
+          // if(threadIdx.x == 0) 
+          atomicAdd(&buffer_for_ncm_2[buf_index], prod_val);
+          //atomicAdd(&buf[s], value * arr_B[index_B] );
+        }
+      }
+    }
+  }
+  // __syncthreads(); won't work because synchronization across blocks is required 
+  
+  //////////////////////////////////////////////////////////////////////////////////
+  
+}
+
+// __global__ void pick_non_zero_Ks(){
+  
+// }
+
+__global__ void GPU_4loop_streams_ncm_2_part_2(
+  uint64_t* mode_1_idx,
+  uint64_t* mode_2_ptr, uint64_t* mode_2_idx,
+  double* values, double* arr_A, double* arr_B,  
+  double* arr_O, uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, int ncm,
+  int size_mode_0_ptr, int size_mode_1_ptr, int size_mode_2_ptr,
+  int size_mode_0_idx, int size_mode_1_idx, int size_mode_2_idx, uint64_t i, uint64_t j_ptr_offset,
+  double* buffer_for_ncm_2, bool* k_index_buffer
+)
+{
+  uint64_t  k,  index_A, index_O ;
+  int r, s, r_offset, s_offset, buf_index;
+  double  A_val;
+  k = blockIdx.x;
+  if(k_index_buffer[k]){
+    // parallelize 'r' across warps
+    // block dimesion is 32 x 32. 
+    // hence, each row of thread block will form a warp 
+    // each row of thread block(a warp) picks a 'r'
+
+    // if(threadIdx.x == 0 && threadIdx.y == 0) printf("k = %d", k);
+    for(r_offset = 0; r_offset < f1; r_offset += blockDim.y){
+      r = r_offset + threadIdx.y;
+      if(r < f1){
+        index_A = i * f1 + r;
+        A_val = arr_A[index_A];
+        //Each thread in a warp picks a 's'
+        for(s_offset = 0; s_offset < f2; s_offset += blockDim.x){
+          s = s_offset + threadIdx.x;
+          if(s < f2){
+            index_O = k * f1 * f2 + r * f2  + s;
+            buf_index = k * f2 + s;
+            //atomic add is required since different threadblocks in the same stream has same i
+            atomicAdd(&arr_O[index_O], buffer_for_ncm_2[buf_index] * A_val);
+          }
+        }
+      }
+    }
+  }
+}
+/*End of device function for GPU 4 loop Method using STREAMS*/
+/////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////
+/*Start of host function for GPU 4 loop Method using STREAMS*/
+void GPU_4loop_host_func(
+  uint64_t* mode_0_ptr, uint64_t* mode_0_idx,
+  uint64_t* mode_1_ptr, uint64_t* mode_1_idx,
+  uint64_t* mode_2_ptr, uint64_t* mode_2_idx,
+  double* values, double* arr_A, double* arr_B,  
+  double* arr_O, uint64_t arr_A_size, uint64_t arr_B_size, uint64_t arr_O_size, int contraction, 
+  uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, uint64_t total_values,
+  int size_mode_0_ptr, int size_mode_1_ptr, int size_mode_2_ptr,
+  int size_mode_0_idx, int size_mode_1_idx, int size_mode_2_idx)
+  {
+    // Allocate device memory
+    // uint64_t *d_mode_0_ptr, *d_mode_0_idx, *d_mode_1_ptr;
+    uint64_t *d_mode_1_idx, *d_mode_2_ptr, *d_mode_2_idx;
+    double *d_values, *d_arr_A, *d_arr_B, *d_arr_O;
+    // double* buffer_for_contraction_0_1;
+    // double* buffer_for_contraction_2;
+    // int* k_buffer_for_contraction_2;
+  
+    // cudaMalloc(&d_mode_0_ptr, sizeof(uint64_t) * size_mode_0_ptr);
+    // cudaMalloc(&d_mode_0_idx, sizeof(uint64_t) * size_mode_0_idx);
+    // cudaMalloc(&d_mode_1_ptr, sizeof(uint64_t) * size_mode_1_ptr);
+    cudaMalloc(&d_mode_1_idx, sizeof(uint64_t) * size_mode_1_idx);
+    cudaMalloc(&d_mode_2_ptr, sizeof(uint64_t) * size_mode_2_ptr);
+    cudaMalloc(&d_mode_2_idx, sizeof(uint64_t) * size_mode_2_idx);
+    cudaMalloc(&d_values, sizeof(double) * total_values);
+    cudaMalloc(&d_arr_A, sizeof(double) * arr_A_size);
+    cudaMalloc(&d_arr_B, sizeof(double) * arr_B_size);
+    cudaMalloc(&d_arr_O, sizeof(double) * arr_O_size);
+  
+  
+    // // parallelising 'j_ptr' for contraction = 0 and contraction = 1 :
+    // cudaMalloc(&buffer_for_contraction_0_1, f2 * size_mode_1_idx * sizeof(double));
+  
+    // // parallelising 'j_ptr' for contraction = 2 :
+    // cudaMalloc(&buffer_for_contraction_2, n * f2 * size_mode_1_idx * sizeof(double));
+    // cudaMalloc(&k_buffer_for_contraction_2, n * size_mode_1_idx * sizeof(int));
+  
+    // Copy data to device
+    // cudaMemcpy(d_mode_0_ptr, mode_0_ptr, sizeof(uint64_t) * size_mode_0_ptr, cudaMemcpyHostToDevice);
+    // cudaMemcpy(d_mode_0_idx, mode_0_idx, sizeof(uint64_t) * size_mode_0_idx, cudaMemcpyHostToDevice);
+    // cudaMemcpy(d_mode_1_ptr, mode_1_ptr, sizeof(uint64_t) * size_mode_1_ptr, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_mode_1_idx, mode_1_idx, sizeof(uint64_t) * size_mode_1_idx, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_mode_2_ptr, mode_2_ptr, sizeof(uint64_t) * size_mode_2_ptr, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_mode_2_idx, mode_2_idx, sizeof(uint64_t) * size_mode_2_idx, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_values, values, sizeof(double) * total_values, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_arr_A, arr_A, sizeof(double) * arr_A_size, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_arr_B, arr_B, sizeof(double) * arr_B_size, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_arr_O, arr_O, sizeof(double) * arr_O_size, cudaMemcpyHostToDevice);
+    
+    
+    // // parallelising 'j_ptr' for contraction = 0 and contraction = 1 :
+    // cudaMemset(buffer_for_contraction_0_1, 0, f2 * size_mode_1_idx * sizeof(double));
+    
+    
+    // // parallelising 'j_ptr' for contraction = 2 :
+    // cudaMemset(buffer_for_contraction_2, 0, n * f2 * size_mode_1_idx * sizeof(double));
+    // cudaMemset(k_buffer_for_contraction_2, 0, n * size_mode_1_idx * sizeof(int));
+    
+    // Stream setup
+    uint64_t i, itr, j_ptr_offset;
+    // uint64_t NUM_STREAMS = size_mode_0_idx;
+    uint64_t NUM_STREAMS = 4; //increasing beyond 4 doesn't improve performance
+    
+    cudaStream_t streams[NUM_STREAMS];
+    for (itr = 0; itr < NUM_STREAMS; ++itr) {
+      cudaStreamCreate(&streams[itr]);
+    }
+    
+    // uint64_t mode_1_idx_offset, mode_2_ptr_offset, mode_2_idx_offset, mode_1_idx_num_elements;
+    // Launch kernels
+    if (contraction == 0 || contraction == 1) {
+      cout << "No. of streams = " << NUM_STREAMS <<endl;
+      for (uint64_t i_ptr = 0; i_ptr < mode_0_ptr[1]; ++i_ptr) {
+        i = mode_0_idx[i_ptr];
+        j_ptr_offset = mode_1_ptr[i_ptr];
+        
+        // int blocksPerGrid = mode_1_ptr[i_ptr + 1] - mode_1_ptr[i_ptr];
+        dim3 gridDim(mode_1_ptr[i_ptr + 1] - mode_1_ptr[i_ptr]);
+        dim3 blockDim(32, 32);
+        int sharedMemBytes = f2 * sizeof(double);
+        
+        // mode_1_idx_offset = mode_1_ptr[i_ptr] ;
+        // mode_1_idx_num_elements = mode_1_ptr[i_ptr + 1] - mode_1_ptr[i_ptr];
+        // mode_2_ptr_offset = mode_2
+        // mode_2_idx_offset;
+        // cudaMemcpyAsync(d_mode_1_idx + mode_1_idx_offset, mode_1_idx + mode_1_idx_offset, sizeof(uint64_t) * mode_1_idx_num_elements, cudaMemcpyHostToDevice, streams[i_ptr%NUM_STREAMS]);
+        // cudaMemcpyAsync(d_mode_2_ptr + mode_2_ptr_offset, mode_2_ptr + mode_2_ptr_offset, sizeof(uint64_t) * mode_2_ptr_num_elements, cudaMemcpyHostToDevice);
+        // cudaMemcpyAsync(d_mode_2_idx + mode_2_idx_offset, mode_2_idx + mode_2_idx_offset, sizeof(uint64_t) * mode_2_idx_num_elememts, cudaMemcpyHostToDevice);
+        // cudaMemcpyAsync(d_values + mode_2_idx_offset, values + mode_2_idx_offset, sizeof(double) * mode_2_idx_num_elememts, cudaMemcpyHostToDevice);
+        
+        //TO-DO: Instead, use cudaStreamQuery to find idle streams and then assign work. will it improve performance? No I think
+        GPU_4loop_streams<<<gridDim, blockDim, sharedMemBytes, streams[i_ptr%NUM_STREAMS]>>>(
+          // d_mode_1_ptr, 
+          d_mode_1_idx, d_mode_2_ptr, d_mode_2_idx,
+          d_values, d_arr_A, d_arr_B, d_arr_O, l, m, n, f1, f2, contraction,
+          size_mode_0_ptr, size_mode_1_ptr, size_mode_2_ptr,
+          size_mode_0_idx, size_mode_1_idx, size_mode_2_idx,
+          i, j_ptr_offset
+        );
+        cudaGetLastError();  // Check launch err;
+      }
+    }
+    else if(contraction == 2){
+      double* buffer_for_ncm_2;
+      bool* k_index_buffer;
+      
+      NUM_STREAMS = 1;
+      cout << "No. of streams = " << NUM_STREAMS <<endl;
+
+      cudaMalloc(&buffer_for_ncm_2, n * f2 * NUM_STREAMS * sizeof(double));
+      cudaMalloc(&k_index_buffer, n * NUM_STREAMS * sizeof(bool));
+      
+      // cudaMemset(buffer_for_ncm_2 , 0, n * f2  * NUM_STREAMS * sizeof(double));
+      // cudaMemset(k_index_buffer, 0, n  * NUM_STREAMS * sizeof(bool));
+
+      
+      for (uint64_t i_ptr = 0; i_ptr < mode_0_ptr[1]; ++i_ptr) {
+        i = mode_0_idx[i_ptr];
+        j_ptr_offset = mode_1_ptr[i_ptr];
+        
+        cudaMemset(buffer_for_ncm_2 + n * f2 * (i_ptr % NUM_STREAMS), 0, n * f2  * sizeof(double));
+        cudaMemset(k_index_buffer + n * (i_ptr % NUM_STREAMS), 0, n  * sizeof(bool));
+        
+        dim3 gridDim(mode_1_ptr[i_ptr + 1] - mode_1_ptr[i_ptr]);
+        dim3 blockDim(32, 32);
+
+        GPU_4loop_streams_ncm_2_part_1<<<gridDim, blockDim, 0, streams[i_ptr%NUM_STREAMS]>>>(
+          d_mode_1_idx, d_mode_2_ptr, d_mode_2_idx,
+          d_values, d_arr_A, d_arr_B, d_arr_O, l, m, n, f1, f2, contraction,
+          size_mode_0_ptr, size_mode_1_ptr, size_mode_2_ptr,
+          size_mode_0_idx, size_mode_1_idx, size_mode_2_idx,
+          i, j_ptr_offset, buffer_for_ncm_2 + n * f2 * (i_ptr % NUM_STREAMS), k_index_buffer + n * (i_ptr % NUM_STREAMS)
+        );
+        // cudaDeviceSynchronize();
+        
+        gridDim.x = n; //TO-DO: have to be optimized
+        GPU_4loop_streams_ncm_2_part_2<<<gridDim, blockDim, 0, streams[i_ptr%NUM_STREAMS]>>>(
+          d_mode_1_idx, d_mode_2_ptr, d_mode_2_idx,
+          d_values, d_arr_A, d_arr_B, d_arr_O, l, m, n, f1, f2, contraction,
+          size_mode_0_ptr, size_mode_1_ptr, size_mode_2_ptr,
+          size_mode_0_idx, size_mode_1_idx, size_mode_2_idx,
+          i, j_ptr_offset, buffer_for_ncm_2 + n * (i_ptr % NUM_STREAMS), k_index_buffer + n * (i_ptr % NUM_STREAMS)
+        );
+        cudaGetLastError();  // Check launch err;
+        // cudaStreamSynchronize(streams[i_ptr % NUM_STREAMS]);
+      }
+      
+    }
+
+  // Sync and destroy streams
+  for ( itr = 0; itr < NUM_STREAMS; ++itr) {
+    cudaStreamSynchronize(streams[itr]);
+    cudaStreamDestroy(streams[itr]);
+  }
+
+  
+    // Copy results back to host
+    cudaMemcpy(arr_O, d_arr_O, sizeof(double) * arr_O_size, cudaMemcpyDeviceToHost);
+  
+    // Free device memory
+    // cudaFree(d_mode_0_ptr);
+    // cudaFree(d_mode_0_idx);
+    // cudaFree(d_mode_1_ptr);
+    cudaFree(d_mode_1_idx);
+    cudaFree(d_mode_2_ptr);
+    cudaFree(d_mode_2_idx);
+    cudaFree(d_values);
+    cudaFree(d_arr_A);
+    cudaFree(d_arr_B);
+    cudaFree(d_arr_O);
+  
+    // cudaFree(buffer_for_contraction_0_1);
+    // cudaFree(buffer_for_contraction_2);
+    // cudaFree(k_buffer_for_contraction_2);
+  }
+/*End of host function for GPU 4 loop Method using STREAMS*/
 /////////////////////////////////////////////////////////////////////
 int main(int argc, char** argv){
   if (argc < 3) {
@@ -949,7 +1279,7 @@ int main(int argc, char** argv){
     return 1;
   }
   std::cout <<"The Tensor is of dimension: " << dim_0 << "x" << dim_1 << "x" << dim_2 << endl;
-  std::cout << "The column dimensions of output factor matrices  (r1 and r2) will be : " << r1 << r2 << endl;
+  std::cout << "The column dimensions of output factor matrices  (r1 and r2) will be : " << r1 << " and " << r2 << endl;
   if(ncm == 0){
     cout << "Your Contraction Choice : ijk,jr,ks→irs" << endl; 
   }
@@ -1027,16 +1357,40 @@ int main(int argc, char** argv){
   get_mode_2_ptr(&mode_2_ptr, &size_mode_2_ptr);
   get_mode_2_idx(&mode_2_idx, &size_mode_2_idx);
 
-  decrementArray(mode_0_idx, size_mode_0_idx);
-  decrementArray(mode_1_idx, size_mode_1_idx);
-  decrementArray(mode_2_idx, size_mode_2_idx);
-
   cout << "Size of Mode 0 Pointer : " << size_mode_0_ptr << endl; 
   cout << "Size of Mode 1 Pointer : " << size_mode_1_ptr << endl; 
   cout << "Size of Mode 2 Pointer : " << size_mode_2_ptr << endl; 
   cout << "Size of Mode 0 Indices : " << size_mode_0_idx << endl; 
   cout << "Size of Mode 1 Indices : " << size_mode_1_idx << endl; 
   cout << "Size of Mode 2 Indices : " << size_mode_2_idx << endl; 
+
+  ////////////////////////////////////////////////////////////////
+  //convert 1-based indexing of genten to zero-based indexing
+  decrementArray(mode_0_idx, size_mode_0_idx);
+  decrementArray(mode_1_idx, size_mode_1_idx);
+  decrementArray(mode_2_idx, size_mode_2_idx);
+  
+  ////////////////////////////////////////////////////////////////
+  // pinned memory for streams
+  size_t ptr_size_0 = sizeof(uint64_t) * size_mode_0_ptr;
+  size_t idx_size_0 = sizeof(uint64_t) * size_mode_0_idx;
+  size_t ptr_size_1 = sizeof(uint64_t) * size_mode_1_ptr;
+  size_t idx_size_1 = sizeof(uint64_t) * size_mode_1_idx;
+  size_t ptr_size_2 = sizeof(uint64_t) * size_mode_2_ptr;
+  size_t idx_size_2 = sizeof(uint64_t) * size_mode_2_idx;
+  size_t val_size   = sizeof(double)   * total_values;
+  
+  // Register host memory
+  cudaHostRegister(mode_0_ptr, ptr_size_0, cudaHostRegisterDefault);
+  cudaHostRegister(mode_0_idx, idx_size_0, cudaHostRegisterDefault);
+  cudaHostRegister(mode_1_ptr, ptr_size_1, cudaHostRegisterDefault);
+  cudaHostRegister(mode_1_idx, idx_size_1, cudaHostRegisterDefault);
+  cudaHostRegister(mode_2_ptr, ptr_size_2, cudaHostRegisterDefault);
+  cudaHostRegister(mode_2_idx, idx_size_2, cudaHostRegisterDefault);
+  cudaHostRegister(values,     val_size,   cudaHostRegisterDefault);
+  ////////////////////////////////////////////////////////////////
+
+
 
   //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -1076,23 +1430,23 @@ int main(int argc, char** argv){
   output_sizes[2] = r1 * r2 * dim_2;
 
   uint64_t arr_O_size = output_sizes[ncm];
-
+  // /*
   //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-  double* arr_O_1 = allocate_aligned_array(arr_O_size); 
+  // double* arr_O_1 = allocate_aligned_array(arr_O_size); 
 
-  auto start_1 = high_resolution_clock::now();
+  // auto start_1 = high_resolution_clock::now();
   
-  // Performing TTMC contraction using CPU - 5 for loops
-  performContraction_cpu_1(mode_0_ptr, mode_0_idx, mode_1_ptr, mode_1_idx, mode_2_ptr, mode_2_idx, 
-                    values, arr_A, arr_B, arr_O_1, arr_A_size, arr_B_size, arr_O_size, ncm, l, m, n, r1, r2);
+  // // Performing TTMC contraction using CPU - 5 for loops
+  // performContraction_cpu_1(mode_0_ptr, mode_0_idx, mode_1_ptr, mode_1_idx, mode_2_ptr, mode_2_idx, 
+  //                   values, arr_A, arr_B, arr_O_1, arr_A_size, arr_B_size, arr_O_size, ncm, l, m, n, r1, r2);
 
-  auto end_1 = high_resolution_clock::now();
-  auto duration_1 = duration_cast<microseconds>(end_1 - start_1);
-  double seconds_1 = duration_1.count() / 1e6; // Convert microseconds to seconds
+  // auto end_1 = high_resolution_clock::now();
+  // auto duration_1 = duration_cast<microseconds>(end_1 - start_1);
+  // double seconds_1 = duration_1.count() / 1e6; // Convert microseconds to seconds
 
-  // Output time taken with 2 decimal places
-  cout << fixed << setprecision(2); // Set fixed-point notation and precision
-  cout << "Time taken by CPU Method - 1 [5-for loop] i.e. contraction 1 : " << seconds_1 << " seconds" << endl;
+  // // Output time taken with 2 decimal places
+  // cout << fixed << setprecision(2); // Set fixed-point notation and precision
+  // cout << "Time taken by CPU Method - 1 [5-for loop] i.e. contraction 1 : " << seconds_1 << " seconds" << endl;
 
   //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
   // Performing TTMC contraction using 4 for loops
@@ -1115,13 +1469,13 @@ int main(int argc, char** argv){
   cout << fixed << setprecision(2); // Set fixed-point notation and precision
   cout << "Time taken by CPU Method - 2 [4-for loop] i.e. contraction 2 : " << seconds_2 << " seconds" << endl;
   
-  bool correct_cpu_1_cpu_2 = compare_matrices(arr_O_1, arr_O_2, 1, arr_O_size);
+  // bool correct_cpu_1_cpu_2 = compare_matrices(arr_O_1, arr_O_2, 1, arr_O_size);
   
-  if (correct_cpu_1_cpu_2) {
-    std::cout << "Output tensors from CPU Method-1[5-for loops] and CPU Method-2[4-for loops] are same." << std::endl;
-  } else {
-    std::cout << "Output tensors from CPU Method-1[5-for loops] and CPU Method-2[4-for loops] are not same." << std::endl;
-  }
+  // if (correct_cpu_1_cpu_2) {
+  //   std::cout << "Output tensors from CPU Method-1[5-for loops] and CPU Method-2[4-for loops] are same." << std::endl;
+  // } else {
+  //   std::cout << "Output tensors from CPU Method-1[5-for loops] and CPU Method-2[4-for loops] are not same." << std::endl;
+  // }
 
   //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
   double* arr_O_3 = allocate_aligned_array(arr_O_size); 
@@ -1143,14 +1497,43 @@ int main(int argc, char** argv){
   cout << fixed << setprecision(2); // Set fixed-point notation and precision
   cout << "Time taken by GPU Method - 1 [5-for loop] i.e. contraction 3 : " << seconds_3 << " seconds" << endl;
 
-  bool correct_cpu_1_gpu_1 = compare_matrices(arr_O_1, arr_O_3, 1, arr_O_size);
+  bool correct_cpu_2_gpu_1 = compare_matrices(arr_O_2, arr_O_3, 1, arr_O_size);
 
-  if (correct_cpu_1_gpu_1) {
+  if (correct_cpu_2_gpu_1) {
       std::cout << "Output tensors from CPU Method-1[5-for loops] and GPU Method-1[5-for loops] are same." << std::endl;
   } else {
       std::cout << "Output tensors from CPU Method-1[5-for loops] and GPU Method-1[5-for loops] are not same." << std::endl;
   }
-  
+  // */
+  //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+  // //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+  // double* arr_O_3_dummy = allocate_aligned_array(arr_O_size); 
+
+  // // Record start time
+  // auto start_3_dummy = high_resolution_clock::now();
+
+  // // Performing TTMC contraction using GPU - 5 for loops
+  // performContraction_gpu_1(mode_0_ptr, mode_0_idx, mode_1_ptr, mode_1_idx, mode_2_ptr, mode_2_idx, 
+  //                     values, arr_A, arr_B, arr_O_3_dummy, arr_A_size, arr_B_size, arr_O_size, ncm, l, m, n, r1, r2, total_values,
+  //                     size_mode_0_ptr, size_mode_1_ptr, size_mode_2_ptr, size_mode_0_idx, size_mode_1_idx, size_mode_2_idx);
+
+  // // Record end time
+  // auto end_3_dummy = high_resolution_clock::now();
+  // auto duration_3_dummy = duration_cast<microseconds>(end_3_dummy - start_3_dummy);
+  // double seconds_3_dummy = duration_3_dummy.count() / 1e6; // Convert microseconds to seconds
+
+  // // Output time taken with 2 decimal places
+  // cout << fixed << setprecision(2); // Set fixed-point notation and precision
+  // cout << "Time taken by GPU Method - 1 [5-for loop] i.e. contraction 3 : " << seconds_3_dummy << " seconds" << endl;
+
+  // bool correct_cpu_2_gpu_1_dummy = compare_matrices(arr_O_2, arr_O_3_dummy, 1, arr_O_size);
+
+  // if (correct_cpu_2_gpu_1) {
+  //     std::cout << "Output tensors from CPU Method-1[5-for loops] and GPU Method-1[5-for loops] are same." << std::endl;
+  // } else {
+  //     std::cout << "Output tensors from CPU Method-1[5-for loops] and GPU Method-1[5-for loops] are not same." << std::endl;
+  // }
+  // // */
   //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
   double* arr_O_4 =  allocate_aligned_array(arr_O_size); 
   // Record start time
@@ -1170,7 +1553,7 @@ int main(int argc, char** argv){
   cout << fixed << setprecision(2); // Set fixed-point notation and precision
   cout << "Time taken by GPU Method - 2 [4-for loop] i.e. contraction 4 : " << seconds_4 << " seconds" << endl;
   
-  bool correct_cpu_2_gpu_2 = compare_matrices(arr_O_1, arr_O_4, 1, arr_O_size);
+  bool correct_cpu_2_gpu_2 = compare_matrices(arr_O_2, arr_O_4, 1, arr_O_size);
   
   if (correct_cpu_2_gpu_2) {
     std::cout << "Output tensors from CPU Method-2[4-for loops] and GPU Method-2[4-for loops] are same." << std::endl;
@@ -1178,7 +1561,41 @@ int main(int argc, char** argv){
     std::cout << "Output tensors from CPU Method-2[4-for loops] and GPU Method-2[4-for loops] are not same." << std::endl;
   }
   //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+  //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+  double* arr_O_5 =  allocate_aligned_array(arr_O_size); 
+  // Record start time
+  auto start_5 = high_resolution_clock::now();
+  
+  // Performing TTMC contraction using GPU - 4 for loops
+  GPU_4loop_host_func(mode_0_ptr, mode_0_idx, mode_1_ptr, mode_1_idx, mode_2_ptr, mode_2_idx, 
+    values, arr_A, arr_B, arr_O_5, arr_A_size, arr_B_size, arr_O_size, ncm, l, m, n, r1, r2, total_values,
+    size_mode_0_ptr, size_mode_1_ptr, size_mode_2_ptr, size_mode_0_idx, size_mode_1_idx, size_mode_2_idx);
+    
+  // Record end time
+  auto end_5 = high_resolution_clock::now();
+  auto duration_5 = duration_cast<microseconds>(end_5 - start_5);
+  double seconds_5 = duration_5.count() / 1e6; // Convert microseconds to seconds
+  
+  // Output time taken with 2 decimal places
+  cout << fixed << setprecision(2); // Set fixed-point notation and precision
+  cout << "Time taken by GPU Method - 3 [4-for loop] i.e. streams: " << seconds_5 << " seconds" << endl;
+  
+  bool correct_cpu_2_gpu_3 = compare_matrices(arr_O_2, arr_O_5, 1, arr_O_size);
+  
+  if (correct_cpu_2_gpu_3) {
+    std::cout << "Output tensors from CPU Method-2[4-for loops] and GPU Method-3[4-for loops using streams] are same." << std::endl;
+  } else {
+    std::cout << "Output tensors from CPU Method-2[4-for loops] and GPU Method-3[4-for loops using streams] are not same." << std::endl;
+  }
+  //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+  cudaHostUnregister(mode_0_ptr);
+  cudaHostUnregister(mode_0_idx);
+  cudaHostUnregister(mode_1_ptr);
+  cudaHostUnregister(mode_1_idx);
+  cudaHostUnregister(mode_2_ptr);
+  cudaHostUnregister(mode_2_idx);
+  cudaHostUnregister(values);
 
 
 
@@ -1193,8 +1610,8 @@ int main(int argc, char** argv){
 
   std::free(arr_A);
   std::free(arr_B);
-  std::free(arr_O_1);
-  std::free(arr_O_2);
-  std::free(arr_O_3);
-  std::free(arr_O_4);
+  // std::free(arr_O_1);
+  // std::free(arr_O_2);
+  // std::free(arr_O_3);
+  // std::free(arr_O_4);
 }
