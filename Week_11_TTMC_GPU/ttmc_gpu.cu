@@ -9,8 +9,6 @@
 #include <chrono> 
 #include <iomanip> 
 #include <cuda_runtime.h>
-#include "genten.h"      // Include the header for genten
-#include "COO_to_CSF.h"
 
 #include <cstdlib>  // for std::aligned_alloc, std::free, size_t
 #include <cstring>  // for std::memset
@@ -19,6 +17,197 @@
 using namespace std;
 using namespace std::chrono;
 
+// Struct to hold CSF tensor data (from CSF_reader.cpp)
+struct CSFTensor {
+    int order;  // Number of modes
+    vector<vector<uint64_t>> ptrs;  // Pointers for each mode
+    vector<vector<uint64_t>> idxs;  // Indices for each mode
+    vector<double> values;  // Non-zero values
+    vector<uint64_t> dimensions; // Dimensions of each mode
+    vector<int> modeOrdering; // Original mode ordering
+    
+    // Initialize with given order
+    CSFTensor(int n) : order(n), ptrs(n), idxs(n), dimensions(n), modeOrdering(n) {
+        for (int i = 0; i < n; i++) {
+            modeOrdering[i] = i; // Default ordering
+        }
+    }
+};
+
+// Function to read a CSF tensor from file (from CSF_reader.cpp)
+CSFTensor readCSFTensor(const string& filename) {
+    ifstream inFile(filename);
+    if (!inFile) {
+        throw runtime_error("Unable to open input file: " + filename);
+    }
+    
+    string line;
+    int order = 0;
+    CSFTensor* tensor = nullptr;
+    
+    // Read each line
+    while (getline(inFile, line)) {
+        // Skip empty lines
+        if (line.empty()) continue;
+        
+        // Handle comments (detect tensor order, mode ordering, and dimensions if present)
+        if (line[0] == '#') {
+            if (line.find("Tensor order:") != string::npos) {
+                istringstream iss(line.substr(line.find(":") + 1));
+                iss >> order;
+                cout << "Found tensor order: " << order << endl;
+                tensor = new CSFTensor(order);
+            }
+            else if (line.find("Mode ordering:") != string::npos) {
+                if (tensor == nullptr) {
+                    cerr << "Error: Mode ordering found before tensor order" << endl;
+                    throw runtime_error("Invalid CSF file format");
+                }
+                istringstream iss(line.substr(line.find(":") + 1));
+                int mode;
+                int idx = 0;
+                while (iss >> mode && idx < tensor->order) {
+                    tensor->modeOrdering[idx++] = mode;
+                }
+                cout << "Found mode ordering: ";
+                for (int i = 0; i < tensor->order; i++) {
+                    cout << tensor->modeOrdering[i] << " ";
+                }
+                cout << endl;
+            }
+            else if (line.find("Dimensions:") != string::npos) {
+                if (tensor == nullptr) {
+                    cerr << "Error: Dimensions found before tensor order" << endl;
+                    throw runtime_error("Invalid CSF file format");
+                }
+                istringstream iss(line.substr(line.find(":") + 1));
+                uint64_t dim;
+                int idx = 0;
+                while (iss >> dim && idx < tensor->order) {
+                    tensor->dimensions[idx++] = dim;
+                }
+                cout << "Found tensor dimensions: ";
+                for (int i = 0; i < tensor->order; i++) {
+                    cout << tensor->dimensions[i] << " ";
+                }
+                cout << endl;
+            }
+            continue;
+        }
+        
+        // Parse data lines
+        istringstream iss(line);
+        string label;
+        
+        // Read until the colon
+        getline(iss, label, ':');
+        
+        // If we haven't found the order yet, try to determine it
+        if (tensor == nullptr) {
+            if (label.find("mode_") == 0 && label.find("_ptr") != string::npos) {
+                int modeIdx = stoi(label.substr(5, label.find("_ptr") - 5));
+                order = max(order, modeIdx + 1);
+            }
+        }
+        
+        // Ensure we have a tensor object
+        if (tensor == nullptr && order > 0) {
+            tensor = new CSFTensor(order);
+        } else if (tensor == nullptr) {
+            throw runtime_error("Could not determine tensor order from file");
+        }
+        
+        // Parse based on label
+        if (label.find("mode_") == 0) {
+            int modeIdx = stoi(label.substr(5, label.find("_", 5) - 5));
+            
+            if (label.find("_ptr") != string::npos) {
+                // Parse mode pointers
+                uint64_t val;
+                while (iss >> val) {
+                    tensor->ptrs[modeIdx].push_back(val);
+                }
+                cout << "Read " << tensor->ptrs[modeIdx].size() << " pointers for mode " << modeIdx << endl;
+            } else if (label.find("_idx") != string::npos) {
+                // Parse mode indices
+                uint64_t val;
+                while (iss >> val) {
+                    tensor->idxs[modeIdx].push_back(val);
+                }
+                cout << "Read " << tensor->idxs[modeIdx].size() << " indices for mode " << modeIdx << endl;
+            }
+        } else if (label == "values") {
+            // Parse values
+            double val;
+            while (iss >> val) {
+                tensor->values.push_back(val);
+            }
+            cout << "Read " << tensor->values.size() << " non-zero values" << endl;
+        }
+    }
+    
+    inFile.close();
+    
+    if (tensor == nullptr) {
+        throw runtime_error("Failed to parse CSF tensor from file");
+    }
+    
+    CSFTensor result = *tensor;
+    delete tensor;
+    return result;
+}
+
+// Modified version of getCSFArrays to handle separate arrays for each mode
+void getCSFArrays(const CSFTensor& tensor, 
+                 uint64_t** mode_0_ptr, uint64_t** mode_0_idx,
+                 uint64_t** mode_1_ptr, uint64_t** mode_1_idx,
+                 uint64_t** mode_2_ptr, uint64_t** mode_2_idx,
+                 double** values, int* order) {
+    // Set the order
+    *order = tensor.order;
+    
+    if (tensor.order != 3) {
+        throw runtime_error("Only 3rd order tensors are supported");
+    }
+    
+    // Copy pointers and indices for each mode
+    *mode_0_ptr = new uint64_t[tensor.ptrs[0].size()];
+    *mode_0_idx = new uint64_t[tensor.idxs[0].size()];
+    *mode_1_ptr = new uint64_t[tensor.ptrs[1].size()];
+    *mode_1_idx = new uint64_t[tensor.idxs[1].size()];
+    *mode_2_ptr = new uint64_t[tensor.ptrs[2].size()];
+    *mode_2_idx = new uint64_t[tensor.idxs[2].size()];
+    
+    // Copy data for mode 0
+    for (size_t i = 0; i < tensor.ptrs[0].size(); i++) {
+        (*mode_0_ptr)[i] = tensor.ptrs[0][i];
+    }
+    for (size_t i = 0; i < tensor.idxs[0].size(); i++) {
+        (*mode_0_idx)[i] = tensor.idxs[0][i];
+    }
+    
+    // Copy data for mode 1
+    for (size_t i = 0; i < tensor.ptrs[1].size(); i++) {
+        (*mode_1_ptr)[i] = tensor.ptrs[1][i];
+    }
+    for (size_t i = 0; i < tensor.idxs[1].size(); i++) {
+        (*mode_1_idx)[i] = tensor.idxs[1][i];
+    }
+    
+    // Copy data for mode 2
+    for (size_t i = 0; i < tensor.ptrs[2].size(); i++) {
+        (*mode_2_ptr)[i] = tensor.ptrs[2][i];
+    }
+    for (size_t i = 0; i < tensor.idxs[2].size(); i++) {
+        (*mode_2_idx)[i] = tensor.idxs[2][i];
+    }
+    
+    // Copy values
+    *values = new double[tensor.values.size()];
+    for (size_t i = 0; i < tensor.values.size(); i++) {
+        (*values)[i] = tensor.values[i];
+    }
+}
 
 //////////////////////////////////////////////////////////
 // Helper macro for checking CUDA errors
@@ -76,8 +265,19 @@ void readMatrix(const string& filename, uint64_t& rows, uint64_t& cols, double*&
 
 /* End of Function for reading a matrix from .txt file*/
 /////////////////////////////////////////////////////
+void generate_matrix( uint64_t rows, uint64_t cols, unsigned int seed,  double*& arr) {
+  // Allocate memory for the matrix
+  arr = new double[rows * cols];
 
+  // Initialize random number generator with seed
+  std::mt19937 gen(seed);
+  std::uniform_real_distribution<double> dist(0.0, 1.0);
 
+  // Fill matrix with random values
+  for (uint64_t i = 0; i < rows * cols; i++) {
+    arr[i] = dist(gen);
+  }
+}
 //////////////////////////////////////////////////////////
 /* Start of Function for writing a matrix from .txt file*/
 
@@ -553,7 +753,7 @@ void performContraction_gpu_1(
 
   // Kernel launch parameters
   int threadsPerBlock = 256;
-  int blocksPerGrid = (size_mode_2_idx + threadsPerBlock - 1) / threadsPerBlock;
+  int blocksPerGrid = (size_mode_1_idx + threadsPerBlock - 1) / threadsPerBlock;
 
   // Launch appropriate kernel based on contraction type
   GPU_5loop_contraction_kernel_0<<<blocksPerGrid, threadsPerBlock>>>(
@@ -1016,7 +1216,6 @@ __global__ void GPU_4loop_streams_ncm_2_part_1(
           // }
           // if(threadIdx.x == 0) 
           atomicAdd(&buffer_for_ncm_2[buf_index], prod_val);
-          //atomicAdd(&buf[s], value * arr_B[index_B] );
         }
       }
     }
@@ -1027,8 +1226,19 @@ __global__ void GPU_4loop_streams_ncm_2_part_1(
   
 }
 
-// __global__ void pick_non_zero_Ks(){
-  
+// __global__ void pick_non_zero_Ks(bool* k_index_buffer, uint64_t* output_indices, int N) {
+//     int idx = blockIdx.x * blockDim.x + threadIdx.x;
+//     if (idx >= N) return;
+//     if(threadIdx.x == 0 && blockIdx.x == 0){
+//       __shared__ uint64_t counter = 0;
+//     }
+//     __syncthreads();
+
+//     if (k_index_buffer[idx]) {
+//       // Atomically get next free slot
+//       int out_idx = atomicAdd(counter, 1);
+//       output_indices[out_idx] = idx;
+//     }
 // }
 
 __global__ void GPU_4loop_streams_ncm_2_part_2(
@@ -1187,6 +1397,9 @@ void GPU_4loop_host_func(
       cudaMalloc(&buffer_for_ncm_2, n * f2 * NUM_STREAMS * sizeof(double));
       cudaMalloc(&k_index_buffer, n * NUM_STREAMS * sizeof(bool));
       
+      // cudaMalloc(&k_indices, n * NUM_STREAMS * sizeof(uint64_t));
+      // cudaMalloc(&counter,  NUM_STREAMS * sizeof(uint64_t));
+      
       // cudaMemset(buffer_for_ncm_2 , 0, n * f2  * NUM_STREAMS * sizeof(double));
       // cudaMemset(k_index_buffer, 0, n  * NUM_STREAMS * sizeof(bool));
 
@@ -1208,8 +1421,10 @@ void GPU_4loop_host_func(
           size_mode_0_idx, size_mode_1_idx, size_mode_2_idx,
           i, j_ptr_offset, buffer_for_ncm_2 + n * f2 * (i_ptr % NUM_STREAMS), k_index_buffer + n * (i_ptr % NUM_STREAMS)
         );
+
         // cudaDeviceSynchronize();
-        
+        // pick_non_zero_Ks(k_index_buffer + n * (i_ptr % NUM_STREAMS), k_indices + n * (i_ptr % NUM_STREAMS),  n)
+
         gridDim.x = n; //TO-DO: have to be optimized
         GPU_4loop_streams_ncm_2_part_2<<<gridDim, blockDim, 0, streams[i_ptr%NUM_STREAMS]>>>(
           d_mode_1_idx, d_mode_2_ptr, d_mode_2_idx,
@@ -1253,26 +1468,36 @@ void GPU_4loop_host_func(
 /*End of host function for GPU 4 loop Method using STREAMS*/
 /////////////////////////////////////////////////////////////////////
 int main(int argc, char** argv){
-  if (argc < 3) {
-    std::cerr << "Usage: " << argv[0] << "order <dim_0> <dim_1> <dim_2> <rank_1> <rank_2> <ncm>" << endl;
-    std::cerr << "order = Order of the tensor" << endl; //It is required for the genten to generate the tensor with specified order
-    std::cerr << "dim_0 = Dimension 0, dim_1 = Dimension 1, dim_2 = Dimension 2, " << endl;
-    std::cerr << "rank_1 = rank of 1st factor matrix (default = 30) \n rank_2 = rank of 2nd factor matrix (default = 30)" << endl;
+  if (argc < 2) {
+    std::cerr << "Usage: " << argv[0] << " <csf_file> [rank_1] [rank_2] [ncm]" << endl;
+    std::cerr << "csf_file = Path to CSF tensor file" << endl;
+    std::cerr << "rank_1 = rank of 1st factor matrix (default = 30)" << endl;
+    std::cerr << "rank_2 = rank of 2nd factor matrix (default = 30)" << endl;
     std::cerr << "ncm = Non Contracting Mode (default = 0)" << endl;
-    std::cerr << "" << endl;
-    std::cerr << "" << endl;
     return 1;
   }
 
   int default_rank = 30;
-  int order = atoi(argv[1]);
-  uint64_t dim_0 = atoi(argv[2]);
-  uint64_t dim_1 = atoi(argv[3]);
-  uint64_t dim_2 = atoi(argv[4]);
-
-  uint64_t r1 = (argc > 4) ? atoi(argv[5]) : default_rank;
-  uint64_t r2 = (argc > 5) ? atoi(argv[6]) : default_rank;
-  int ncm = (argc > 6) ? atoi(argv[7]) : 0;
+  string csf_file = argv[1];
+  
+  // Read the CSF tensor from file
+  CSFTensor tensor = readCSFTensor(csf_file);
+  
+  // Input tensor dimensions from the CSF file
+  if (tensor.dimensions.empty() || tensor.dimensions.size() != 3) {
+    cerr << "Error: CSF file must contain 3-dimensional tensor with dimensions information" << endl;
+    return 1;
+  }
+  
+  // Get dimensions from CSF file
+  uint64_t dim_0 = tensor.dimensions[0];
+  uint64_t dim_1 = tensor.dimensions[1];
+  uint64_t dim_2 = tensor.dimensions[2];
+  
+  // Get command-line arguments
+  uint64_t r1 = (argc > 2) ? atoi(argv[2]) : default_rank;
+  uint64_t r2 = (argc > 3) ? atoi(argv[3]) : default_rank;
+  int ncm = (argc > 4) ? atoi(argv[4]) : 0;
 
   if(ncm < 0 || ncm > 2){
     std::cerr << "Error: Contraction value must be 0, 1, or 2.\n";
@@ -1291,6 +1516,48 @@ int main(int argc, char** argv){
   }
   //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+  // Input tensor dimensions (l * m * n)
+  uint64_t l = dim_0;
+  uint64_t m = dim_1;
+  uint64_t n = dim_2;
+
+  // Get pointers and indices for all modes
+  uint64_t* mode_0_ptr = nullptr;
+  uint64_t* mode_0_idx = nullptr;
+  uint64_t* mode_1_ptr = nullptr;
+  uint64_t* mode_1_idx = nullptr;
+  uint64_t* mode_2_ptr = nullptr;
+  uint64_t* mode_2_idx = nullptr;
+  double* values = nullptr;
+  int order = 0;
+
+  // Convert CSFTensor to raw arrays
+  getCSFArrays(tensor, &mode_0_ptr, &mode_0_idx, &mode_1_ptr, &mode_1_idx, &mode_2_ptr, &mode_2_idx, &values, &order);
+
+  // Check if the order matches our expectation
+  if (order != 3) {
+    std::cerr << "Error: Expected a 3rd order tensor, but got order " << order << endl;
+    return 1;
+  }
+
+  int size_mode_0_ptr = tensor.ptrs[0].size();
+  int size_mode_0_idx = tensor.idxs[0].size();
+  int size_mode_1_ptr = tensor.ptrs[1].size();
+  int size_mode_1_idx = tensor.idxs[1].size();
+  int size_mode_2_ptr = tensor.ptrs[2].size();
+  int size_mode_2_idx = tensor.idxs[2].size();
+  uint64_t total_values = tensor.values.size();
+
+  cout << "Size of Mode 0 Pointer : " << size_mode_0_ptr << endl; 
+  cout << "Size of Mode 1 Pointer : " << size_mode_1_ptr << endl; 
+  cout << "Size of Mode 2 Pointer : " << size_mode_2_ptr << endl; 
+  cout << "Size of Mode 0 Indices : " << size_mode_0_idx << endl; 
+  cout << "Size of Mode 1 Indices : " << size_mode_1_idx << endl; 
+  cout << "Size of Mode 2 Indices : " << size_mode_2_idx << endl; 
+  cout << "Total non-zero values  : " << total_values << endl;
+
+  //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
   uint64_t rows_A, cols_A = r1, rows_B, cols_B = r2;
 
   if (ncm == 0) {
@@ -1304,6 +1571,7 @@ int main(int argc, char** argv){
     rows_B = dim_1;
   }
   unsigned int A_seed = 1, B_seed = 2;
+  /*
   // Write matrices to files
   writeMatrixToFile("input_matrix_A.txt", rows_A, cols_A, A_seed);
   writeMatrixToFile("input_matrix_B.txt", rows_B, cols_B, B_seed);
@@ -1313,7 +1581,7 @@ int main(int argc, char** argv){
   std::cout << "Matrix B: " << rows_B << " x " << cols_B << "\n";
 
   
-  
+ 
   //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
   uint64_t* my_tensor_indices = nullptr;
   double* my_tensor_values = nullptr;
@@ -1363,12 +1631,12 @@ int main(int argc, char** argv){
   cout << "Size of Mode 0 Indices : " << size_mode_0_idx << endl; 
   cout << "Size of Mode 1 Indices : " << size_mode_1_idx << endl; 
   cout << "Size of Mode 2 Indices : " << size_mode_2_idx << endl; 
-
+  */
   ////////////////////////////////////////////////////////////////
-  //convert 1-based indexing of genten to zero-based indexing
-  decrementArray(mode_0_idx, size_mode_0_idx);
-  decrementArray(mode_1_idx, size_mode_1_idx);
-  decrementArray(mode_2_idx, size_mode_2_idx);
+  // We don't need to decrement indices since they're already 0-based in the CSF file
+  // decrementArray(mode_0_idx, size_mode_0_idx);
+  // decrementArray(mode_1_idx, size_mode_1_idx);
+  // decrementArray(mode_2_idx, size_mode_2_idx);
   
   ////////////////////////////////////////////////////////////////
   // pinned memory for streams
@@ -1418,8 +1686,8 @@ int main(int argc, char** argv){
     arr_B_rows = dim_1;
   }
 
-  readMatrix("input_matrix_A.txt", arr_A_rows, r1, arr_A);
-  readMatrix("input_matrix_B.txt", arr_B_rows, r2, arr_B);
+  generate_matrix(arr_A_rows, r1, A_seed, arr_A);
+  generate_matrix(arr_B_rows, r2, B_seed, arr_B);
 
   uint64_t arr_A_size = arr_A_rows * r1;
   uint64_t arr_B_size = arr_B_rows * r2;
@@ -1442,11 +1710,11 @@ int main(int argc, char** argv){
 
   // auto end_1 = high_resolution_clock::now();
   // auto duration_1 = duration_cast<microseconds>(end_1 - start_1);
-  // double seconds_1 = duration_1.count() / 1e6; // Convert microseconds to seconds
+  // double seconds_1 = duration_1.count() /1e3;
 
   // // Output time taken with 2 decimal places
   // cout << fixed << setprecision(2); // Set fixed-point notation and precision
-  // cout << "Time taken by CPU Method - 1 [5-for loop] i.e. contraction 1 : " << seconds_1 << " seconds" << endl;
+  // cout << "Time taken by CPU Method - 1 [5-for loop] i.e. contraction 1 : " << seconds_1 << "microseconds" << endl;
 
   //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
   // Performing TTMC contraction using 4 for loops
@@ -1463,11 +1731,11 @@ int main(int argc, char** argv){
   // Record end time
   auto end_2 = high_resolution_clock::now();
   auto duration_2 = duration_cast<microseconds>(end_2 - start_2);
-  double seconds_2 = duration_2.count() / 1e6; // Convert microseconds to seconds
+  double seconds_2 = duration_2.count() /1e3;
   
   // Output time taken with 2 decimal places
   cout << fixed << setprecision(2); // Set fixed-point notation and precision
-  cout << "Time taken by CPU Method - 2 [4-for loop] i.e. contraction 2 : " << seconds_2 << " seconds" << endl;
+  cout << "Time taken by CPU Method - 2 [4-for loop] i.e. contraction 2 : " << seconds_2 << "microseconds" << endl;
   
   // bool correct_cpu_1_cpu_2 = compare_matrices(arr_O_1, arr_O_2, 1, arr_O_size);
   
@@ -1491,11 +1759,11 @@ int main(int argc, char** argv){
   // Record end time
   auto end_3 = high_resolution_clock::now();
   auto duration_3 = duration_cast<microseconds>(end_3 - start_3);
-  double seconds_3 = duration_3.count() / 1e6; // Convert microseconds to seconds
+  double seconds_3 = duration_3.count() /1e3;
 
   // Output time taken with 2 decimal places
   cout << fixed << setprecision(2); // Set fixed-point notation and precision
-  cout << "Time taken by GPU Method - 1 [5-for loop] i.e. contraction 3 : " << seconds_3 << " seconds" << endl;
+  cout << "Time taken by GPU Method - 1 [5-for loop] i.e. contraction 3 : " << seconds_3 << "microseconds" << endl;
 
   bool correct_cpu_2_gpu_1 = compare_matrices(arr_O_2, arr_O_3, 1, arr_O_size);
 
@@ -1520,11 +1788,11 @@ int main(int argc, char** argv){
   // // Record end time
   // auto end_3_dummy = high_resolution_clock::now();
   // auto duration_3_dummy = duration_cast<microseconds>(end_3_dummy - start_3_dummy);
-  // double seconds_3_dummy = duration_3_dummy.count() / 1e6; // Convert microseconds to seconds
+  // double seconds_3_dummy = duration_3_dummy.count() /1e3;
 
   // // Output time taken with 2 decimal places
   // cout << fixed << setprecision(2); // Set fixed-point notation and precision
-  // cout << "Time taken by GPU Method - 1 [5-for loop] i.e. contraction 3 : " << seconds_3_dummy << " seconds" << endl;
+  // cout << "Time taken by GPU Method - 1 [5-for loop] i.e. contraction 3 : " << seconds_3_dummy << "microseconds" << endl;
 
   // bool correct_cpu_2_gpu_1_dummy = compare_matrices(arr_O_2, arr_O_3_dummy, 1, arr_O_size);
 
@@ -1547,11 +1815,11 @@ int main(int argc, char** argv){
   // Record end time
   auto end_4 = high_resolution_clock::now();
   auto duration_4 = duration_cast<microseconds>(end_4 - start_4);
-  double seconds_4 = duration_4.count() / 1e6; // Convert microseconds to seconds
+  double seconds_4 = duration_4.count() /1e3;
   
   // Output time taken with 2 decimal places
   cout << fixed << setprecision(2); // Set fixed-point notation and precision
-  cout << "Time taken by GPU Method - 2 [4-for loop] i.e. contraction 4 : " << seconds_4 << " seconds" << endl;
+  cout << "Time taken by GPU Method - 2 [4-for loop] i.e. contraction 4 : " << seconds_4 << "microseconds" << endl;
   
   bool correct_cpu_2_gpu_2 = compare_matrices(arr_O_2, arr_O_4, 1, arr_O_size);
   
@@ -1574,11 +1842,11 @@ int main(int argc, char** argv){
   // Record end time
   auto end_5 = high_resolution_clock::now();
   auto duration_5 = duration_cast<microseconds>(end_5 - start_5);
-  double seconds_5 = duration_5.count() / 1e6; // Convert microseconds to seconds
+  double seconds_5 = duration_5.count() /1e3;
   
   // Output time taken with 2 decimal places
   cout << fixed << setprecision(2); // Set fixed-point notation and precision
-  cout << "Time taken by GPU Method - 3 [4-for loop] i.e. streams: " << seconds_5 << " seconds" << endl;
+  cout << "Time taken by GPU Method - 3 [4-for loop] i.e. streams: " << seconds_5 << "microseconds" << endl;
   
   bool correct_cpu_2_gpu_3 = compare_matrices(arr_O_2, arr_O_5, 1, arr_O_size);
   
@@ -1597,21 +1865,19 @@ int main(int argc, char** argv){
   cudaHostUnregister(mode_2_idx);
   cudaHostUnregister(values);
 
-
-
-  delete[] my_tensor_indices; 
-  delete[] my_tensor_values; 
+  // Free allocated memory
   delete[] mode_0_ptr;
   delete[] mode_0_idx;
   delete[] mode_1_ptr;
   delete[] mode_1_idx;
   delete[] mode_2_ptr;
   delete[] mode_2_idx;
+  delete[] values;
 
   std::free(arr_A);
   std::free(arr_B);
-  // std::free(arr_O_1);
-  // std::free(arr_O_2);
-  // std::free(arr_O_3);
-  // std::free(arr_O_4);
+  std::free(arr_O_2);
+  std::free(arr_O_3);
+  std::free(arr_O_4);
+  std::free(arr_O_5);
 }
