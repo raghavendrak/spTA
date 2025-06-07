@@ -127,14 +127,14 @@ CSFTensor readCSFTensor(const string& filename) {
                 while (iss >> val) {
                     tensor->ptrs[modeIdx].push_back(val);
                 }
-                cout << "Read " << tensor->ptrs[modeIdx].size() << " pointers for mode " << modeIdx << endl;
+                //cout << "Read " << tensor->ptrs[modeIdx].size() << " pointers for mode " << modeIdx << endl;
             } else if (label.find("_idx") != string::npos) {
                 // Parse mode indices
                 uint64_t val;
                 while (iss >> val) {
                     tensor->idxs[modeIdx].push_back(val);
                 }
-                cout << "Read " << tensor->idxs[modeIdx].size() << " indices for mode " << modeIdx << endl;
+                //cout << "Read " << tensor->idxs[modeIdx].size() << " indices for mode " << modeIdx << endl;
             }
         } else if (label == "values") {
             // Parse values
@@ -142,7 +142,7 @@ CSFTensor readCSFTensor(const string& filename) {
             while (iss >> val) {
                 tensor->values.push_back(val);
             }
-            cout << "Read " << tensor->values.size() << " non-zero values" << endl;
+            //cout << "Read " << tensor->values.size() << " non-zero values" << endl;
         }
     }
     
@@ -206,7 +206,8 @@ void getCSFArrays(const CSFTensor& tensor,
     *values = new double[tensor.values.size()];
     for (size_t i = 0; i < tensor.values.size(); i++) {
         (*values)[i] = tensor.values[i];
-    }
+    }    
+    
 }
 
 //////////////////////////////////////////////////////////
@@ -222,48 +223,7 @@ do {                                                                            
 } while (0)
 //////////////////////////////////////////////////////////
 
-//////////////////////////////////////////////////////////
-// Function to decrement each element by 1 to convert tensor from 1 based indexing to 0 based indexing
-void decrementArray(uint64_t* arr, uint64_t size) {
-  for (uint64_t i = 0; i < size; ++i) {
-      arr[i] -= 1;
-  }
-}
-//////////////////////////////////////////////////////////
 
-
-//////////////////////////////////////////////////////////
-/* Start of Function for reading a matrix from .txt file*/
-
-// Function to read a matrix from a file 
-void readMatrix(const string& filename, uint64_t& rows, uint64_t& cols, double*& arr) {
-  ifstream file(filename);
-  if (!file.is_open()) {
-    throw runtime_error("Unable to open matrix file: " + filename);
-  }
-
-  // Read the entire file into a vector
-  arr = new double[rows * cols];
-  double value;
-  
-  uint64_t count = 0;
-  while (file >> value) {
-    if (count < rows * cols) {
-      arr[count++] = value;
-    } else {
-      throw runtime_error("More values in the file than expected.");
-    }
-  }
-  
-  // Close the file
-  file.close();
-
-  if (count % cols != 0) {
-    throw runtime_error("Mismatch between total number of elements and specified column count.");
-  }
-}
-
-/* End of Function for reading a matrix from .txt file*/
 /////////////////////////////////////////////////////
 void generate_matrix( uint64_t rows, uint64_t cols, unsigned int seed,  double*& arr) {
   // Allocate memory for the matrix
@@ -278,32 +238,7 @@ void generate_matrix( uint64_t rows, uint64_t cols, unsigned int seed,  double*&
     arr[i] = dist(gen);
   }
 }
-//////////////////////////////////////////////////////////
-/* Start of Function for writing a matrix from .txt file*/
-
-void writeMatrixToFile(const std::string& filename, uint64_t rows, uint64_t cols, unsigned int seed) {
-  std::ofstream file(filename);
-  if (!file.is_open()) {
-    std::cerr << "Error: Unable to open file " << filename << std::endl;
-    return;
-  }
-
-  std::mt19937 gen(seed); // Mersenne Twister RNG seeded with 'seed'
-  std::uniform_real_distribution<double> dist(0.0, 1.0); // Uniform distribution in [0, 1)
-
-  for (uint64_t i = 0; i < rows; ++i) {
-    for (uint64_t j = 0; j < cols; ++j) {
-      file << dist(gen) << " ";
-    }
-    file << "\n";
-  }
-
-  file.close();
-}
-/* End of Function for writing a matrix from .txt file*/
-////////////////////////////////////////////////////////
-
-
+/////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////
 /* Start of Function for comparing the results of various contractions*/
 bool compare_matrices(double*& C1, double*& C2, int rows, int cols, double tolerance = 1e-6)
@@ -818,7 +753,9 @@ __global__ void contractionKernel_4(
         // Allocate buffer on a per-thread basis
         //double* buffer = (double*)malloc(f2 * sizeof(double));
         if (buffer == nullptr) {// Handle allocation failure
-          printf("Memory allocation failure \n");
+          if(blockIdx.x == 0 && threadIdx.x == 0){
+            printf("Memory allocation failure \n");
+          }
           return;
         } 
 
@@ -1091,30 +1028,30 @@ __global__ void GPU_4loop_streams(
   }
   __syncthreads();
   
-  // parallelize s across warps
+  // parallelize k across warps
   // block dimesion is 32 x 32. 
   // hence, each row of thread block will form a warp 
-  // each column of thread block(a warp) picks a k, thus a nonzero of input tensor
-  for(k_ptr_offset = mode_2_ptr[j_ptr]; k_ptr_offset < mode_2_ptr[j_ptr + 1]; k_ptr_offset += blockDim.x){
-    k_ptr =  k_ptr_offset + threadIdx.x;
+  // each row of thread block(a warp) picks a k, thus a nonzero of input tensor
+  for(k_ptr_offset = mode_2_ptr[j_ptr]; k_ptr_offset < mode_2_ptr[j_ptr + 1]; k_ptr_offset += blockDim.y){
+    k_ptr =  k_ptr_offset + threadIdx.y;
     if(k_ptr < mode_2_ptr[j_ptr + 1]){
       
       value = values[k_ptr];
       k = mode_2_idx[k_ptr];
       
       //Each thread in a warp picks a 's'
-      for(s_offset = 0; s_offset < f2; s_offset += blockDim.y){
-        s = s_offset + threadIdx.y;
+      for(s_offset = 0; s_offset < f2; s_offset += blockDim.x){
+        s = s_offset + threadIdx.x;
         if(s < f2){
-          mask = __activemask();
+          // mask = __activemask();
           index_B = k * f2 + s;
-          double prod_val = value * arr_B[index_B];
+          // double prod_val = value * arr_B[index_B];
 
-          for(int shuffle_offset = WARP_SIZE/2; shuffle_offset > 0; shuffle_offset>>=1){
-            prod_val += __shfl_down_sync(mask, prod_val, shuffle_offset);
-          }
-          if(threadIdx.x == 0) buf[s] += prod_val;
-          //atomicAdd(&buf[s], value * arr_B[index_B] );
+          // for(int shuffle_offset = WARP_SIZE/2; shuffle_offset > 0; shuffle_offset>>=1){
+          //   prod_val += __shfl_down_sync(mask, prod_val, shuffle_offset);
+          // }
+          // if(threadIdx.x == 0) buf[s] += prod_val;
+          atomicAdd(&buf[s], value * arr_B[index_B] );
         }
       }
     }
@@ -1503,7 +1440,7 @@ int main(int argc, char** argv){
     std::cerr << "Error: Contraction value must be 0, 1, or 2.\n";
     return 1;
   }
-  std::cout <<"The Tensor is of dimension: " << dim_0 << "x" << dim_1 << "x" << dim_2 << endl;
+  // std::cout <<"The Tensor is of dimension: " << dim_0 << "x" << dim_1 << "x" << dim_2 << endl;
   std::cout << "The column dimensions of output factor matrices  (r1 and r2) will be : " << r1 << " and " << r2 << endl;
   if(ncm == 0){
     cout << "Your Contraction Choice : ijk,jr,ks→irs" << endl; 
@@ -1539,7 +1476,7 @@ int main(int argc, char** argv){
     std::cerr << "Error: Expected a 3rd order tensor, but got order " << order << endl;
     return 1;
   }
-
+  
   int size_mode_0_ptr = tensor.ptrs[0].size();
   int size_mode_0_idx = tensor.idxs[0].size();
   int size_mode_1_ptr = tensor.ptrs[1].size();
@@ -1558,85 +1495,8 @@ int main(int argc, char** argv){
 
   //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-  uint64_t rows_A, cols_A = r1, rows_B, cols_B = r2;
-
-  if (ncm == 0) {
-    rows_A = dim_1;
-    rows_B = dim_2;
-  } else if (ncm == 1) {
-    rows_A = dim_0;
-    rows_B = dim_2;
-  } else if (ncm == 2) {
-    rows_A = dim_0;
-    rows_B = dim_1;
-  }
+  
   unsigned int A_seed = 1, B_seed = 2;
-  /*
-  // Write matrices to files
-  writeMatrixToFile("input_matrix_A.txt", rows_A, cols_A, A_seed);
-  writeMatrixToFile("input_matrix_B.txt", rows_B, cols_B, B_seed);
-
-  std::cout << "Matrices written to input_matrix_A.txt and input_matrix_B.txt with dimensions:\n";
-  std::cout << "Matrix A: " << rows_A << " x " << cols_A << "\n";
-  std::cout << "Matrix B: " << rows_B << " x " << cols_B << "\n";
-
-  
- 
-  //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-  uint64_t* my_tensor_indices = nullptr;
-  double* my_tensor_values = nullptr;
-  uint64_t total_indices = 0;
-  uint64_t total_values = 0;
-  
-  generate_tensor(argc, argv, &my_tensor_indices, &my_tensor_values, &total_indices, &total_values);
-  
-  std::cout << "\nOrder of the Tensor : " << order << endl;
-  std::cout << "Dimension - 0 : " << dim_0 << endl;
-  std::cout << "Dimension - 1 : " << dim_1 << endl;
-  std::cout << "Dimension - 2 : " << dim_2 << endl;
-  std::cout << "Total size of my_tensor_indices : " << total_indices<< endl;
-  std::cout << "Total size of my_tensor_values : " << total_values << endl;
-
-  cooToCSF(my_tensor_indices, my_tensor_values, order, total_indices, total_values);
-
-  // Input tensor dimensions (l * m * n)
-  uint64_t l, m, n;
-
-  l = dim_0;
-  m = dim_1;
-  n = dim_2;
-
-  uint64_t* mode_0_ptr = nullptr;
-  uint64_t* mode_0_idx = nullptr;
-  uint64_t* mode_1_ptr = nullptr;
-  uint64_t* mode_1_idx = nullptr;
-  uint64_t* mode_2_ptr = nullptr;
-  uint64_t* mode_2_idx = nullptr;
-  double* values = my_tensor_values;
-
-  int size_mode_0_ptr = 0, size_mode_0_idx = 0;
-  int size_mode_1_ptr = 0, size_mode_1_idx = 0;
-  int size_mode_2_ptr = 0, size_mode_2_idx = 0;
-
-  get_mode_0_ptr(&mode_0_ptr, &size_mode_0_ptr);
-  get_mode_0_idx(&mode_0_idx, &size_mode_0_idx);
-  get_mode_1_ptr(&mode_1_ptr, &size_mode_1_ptr);
-  get_mode_1_idx(&mode_1_idx, &size_mode_1_idx);
-  get_mode_2_ptr(&mode_2_ptr, &size_mode_2_ptr);
-  get_mode_2_idx(&mode_2_idx, &size_mode_2_idx);
-
-  cout << "Size of Mode 0 Pointer : " << size_mode_0_ptr << endl; 
-  cout << "Size of Mode 1 Pointer : " << size_mode_1_ptr << endl; 
-  cout << "Size of Mode 2 Pointer : " << size_mode_2_ptr << endl; 
-  cout << "Size of Mode 0 Indices : " << size_mode_0_idx << endl; 
-  cout << "Size of Mode 1 Indices : " << size_mode_1_idx << endl; 
-  cout << "Size of Mode 2 Indices : " << size_mode_2_idx << endl; 
-  */
-  ////////////////////////////////////////////////////////////////
-  // We don't need to decrement indices since they're already 0-based in the CSF file
-  // decrementArray(mode_0_idx, size_mode_0_idx);
-  // decrementArray(mode_1_idx, size_mode_1_idx);
-  // decrementArray(mode_2_idx, size_mode_2_idx);
   
   ////////////////////////////////////////////////////////////////
   // pinned memory for streams
@@ -1658,10 +1518,6 @@ int main(int argc, char** argv){
   cudaHostRegister(values,     val_size,   cudaHostRegisterDefault);
   ////////////////////////////////////////////////////////////////
 
-
-
-  //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
   double* arr_A = nullptr;
   double* arr_B = nullptr;
 
@@ -1670,18 +1526,12 @@ int main(int argc, char** argv){
 
 
   if (ncm == 0) {
-    arr_A = allocate_aligned_array(dim_1 * r1);
-    arr_B = allocate_aligned_array(dim_2 * r2);
     arr_A_rows = dim_1;
     arr_B_rows = dim_2;
   } else if (ncm == 1) {
-    arr_A = allocate_aligned_array(dim_0 * r1);
-    arr_B = allocate_aligned_array(dim_2 * r2);
     arr_A_rows = dim_0;
     arr_B_rows = dim_2;
   } else if (ncm == 2) {
-    arr_A = allocate_aligned_array(dim_0 * r1);
-    arr_B = allocate_aligned_array(dim_1 * r2);
     arr_A_rows = dim_0;
     arr_B_rows = dim_1;
   }
@@ -1714,7 +1564,7 @@ int main(int argc, char** argv){
 
   // // Output time taken with 2 decimal places
   // cout << fixed << setprecision(2); // Set fixed-point notation and precision
-  // cout << "Time taken by CPU Method - 1 [5-for loop] i.e. contraction 1 : " << seconds_1 << "microseconds" << endl;
+  // cout << "Time taken by CPU Method - 1 [5-for loop] i.e. contraction 1 : " << seconds_1 << " milliseconds" << endl;
 
   //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
   // Performing TTMC contraction using 4 for loops
@@ -1735,7 +1585,7 @@ int main(int argc, char** argv){
   
   // Output time taken with 2 decimal places
   cout << fixed << setprecision(2); // Set fixed-point notation and precision
-  cout << "Time taken by CPU Method - 2 [4-for loop] i.e. contraction 2 : " << seconds_2 << "microseconds" << endl;
+  cout << "Time taken by CPU Method - 2 [4-for loop] i.e. contraction 2 : " << seconds_2 << " milliseconds" << endl;
   
   // bool correct_cpu_1_cpu_2 = compare_matrices(arr_O_1, arr_O_2, 1, arr_O_size);
   
@@ -1750,7 +1600,6 @@ int main(int argc, char** argv){
 
   // Record start time
   auto start_3 = high_resolution_clock::now();
-
   // Performing TTMC contraction using GPU - 5 for loops
   performContraction_gpu_1(mode_0_ptr, mode_0_idx, mode_1_ptr, mode_1_idx, mode_2_ptr, mode_2_idx, 
                       values, arr_A, arr_B, arr_O_3, arr_A_size, arr_B_size, arr_O_size, ncm, l, m, n, r1, r2, total_values,
@@ -1763,7 +1612,7 @@ int main(int argc, char** argv){
 
   // Output time taken with 2 decimal places
   cout << fixed << setprecision(2); // Set fixed-point notation and precision
-  cout << "Time taken by GPU Method - 1 [5-for loop] i.e. contraction 3 : " << seconds_3 << "microseconds" << endl;
+  cout << "Time taken by GPU Method - 1 [5-for loop] i.e. contraction 3 : " << seconds_3 << " milliseconds" << endl;
 
   bool correct_cpu_2_gpu_1 = compare_matrices(arr_O_2, arr_O_3, 1, arr_O_size);
 
@@ -1772,36 +1621,7 @@ int main(int argc, char** argv){
   } else {
       std::cout << "Output tensors from CPU Method-1[5-for loops] and GPU Method-1[5-for loops] are not same." << std::endl;
   }
-  // */
-  //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-  // //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-  // double* arr_O_3_dummy = allocate_aligned_array(arr_O_size); 
-
-  // // Record start time
-  // auto start_3_dummy = high_resolution_clock::now();
-
-  // // Performing TTMC contraction using GPU - 5 for loops
-  // performContraction_gpu_1(mode_0_ptr, mode_0_idx, mode_1_ptr, mode_1_idx, mode_2_ptr, mode_2_idx, 
-  //                     values, arr_A, arr_B, arr_O_3_dummy, arr_A_size, arr_B_size, arr_O_size, ncm, l, m, n, r1, r2, total_values,
-  //                     size_mode_0_ptr, size_mode_1_ptr, size_mode_2_ptr, size_mode_0_idx, size_mode_1_idx, size_mode_2_idx);
-
-  // // Record end time
-  // auto end_3_dummy = high_resolution_clock::now();
-  // auto duration_3_dummy = duration_cast<microseconds>(end_3_dummy - start_3_dummy);
-  // double seconds_3_dummy = duration_3_dummy.count() /1e3;
-
-  // // Output time taken with 2 decimal places
-  // cout << fixed << setprecision(2); // Set fixed-point notation and precision
-  // cout << "Time taken by GPU Method - 1 [5-for loop] i.e. contraction 3 : " << seconds_3_dummy << "microseconds" << endl;
-
-  // bool correct_cpu_2_gpu_1_dummy = compare_matrices(arr_O_2, arr_O_3_dummy, 1, arr_O_size);
-
-  // if (correct_cpu_2_gpu_1) {
-  //     std::cout << "Output tensors from CPU Method-1[5-for loops] and GPU Method-1[5-for loops] are same." << std::endl;
-  // } else {
-  //     std::cout << "Output tensors from CPU Method-1[5-for loops] and GPU Method-1[5-for loops] are not same." << std::endl;
-  // }
-  // // */
+  free(arr_O_3);
   //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
   double* arr_O_4 =  allocate_aligned_array(arr_O_size); 
   // Record start time
@@ -1819,7 +1639,7 @@ int main(int argc, char** argv){
   
   // Output time taken with 2 decimal places
   cout << fixed << setprecision(2); // Set fixed-point notation and precision
-  cout << "Time taken by GPU Method - 2 [4-for loop] i.e. contraction 4 : " << seconds_4 << "microseconds" << endl;
+  cout << "Time taken by GPU Method - 2 [4-for loop] i.e. contraction 4 : " << seconds_4 << " milliseconds" << endl;
   
   bool correct_cpu_2_gpu_2 = compare_matrices(arr_O_2, arr_O_4, 1, arr_O_size);
   
@@ -1828,6 +1648,7 @@ int main(int argc, char** argv){
   } else {
     std::cout << "Output tensors from CPU Method-2[4-for loops] and GPU Method-2[4-for loops] are not same." << std::endl;
   }
+  free(arr_O_4);
   //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
   //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
   double* arr_O_5 =  allocate_aligned_array(arr_O_size); 
@@ -1846,7 +1667,7 @@ int main(int argc, char** argv){
   
   // Output time taken with 2 decimal places
   cout << fixed << setprecision(2); // Set fixed-point notation and precision
-  cout << "Time taken by GPU Method - 3 [4-for loop] i.e. streams: " << seconds_5 << "microseconds" << endl;
+  cout << "Time taken by GPU Method - 3 [4-for loop] i.e. streams: " << seconds_5 << " milliseconds" << endl;
   
   bool correct_cpu_2_gpu_3 = compare_matrices(arr_O_2, arr_O_5, 1, arr_O_size);
   
@@ -1855,6 +1676,7 @@ int main(int argc, char** argv){
   } else {
     std::cout << "Output tensors from CPU Method-2[4-for loops] and GPU Method-3[4-for loops using streams] are not same." << std::endl;
   }
+  free(arr_O_5);
   //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
   cudaHostUnregister(mode_0_ptr);
@@ -1877,7 +1699,7 @@ int main(int argc, char** argv){
   std::free(arr_A);
   std::free(arr_B);
   std::free(arr_O_2);
-  std::free(arr_O_3);
-  std::free(arr_O_4);
-  std::free(arr_O_5);
+  // std::free(arr_O_3);
+  // std::free(arr_O_4);
+  // std::free(arr_O_5);
 }
