@@ -45,57 +45,73 @@ def parse_log_file(log_file_path):
     with open(log_file_path, 'r') as f:
         content = f.read()
         
-    # Extract contraction choice from the first dataset section
+    # Extract contraction choice from the beginning of the file
     contraction_match = re.search(r"Your Contraction Choice : (.*?)\n", content)
     if contraction_match:
         contraction_choice = contraction_match.group(1)
         
-    # Split the content by dataset sections
-    dataset_sections = re.split(r"Contraction results for (.*?)\n", content)[1:]
+    # Split the content by separator lines
+    sections = re.split(r"---------------------------------\n", content)
     
-    # Process each dataset section
-    for i in range(0, len(dataset_sections), 2):
-        if i+1 >= len(dataset_sections):
-            break
+    # Dictionary to store timing information by dataset name
+    dataset_timings = {}
+    
+    # Process each section
+    for section in sections:
+        if not section.strip():
+            continue
             
-        dataset_name = dataset_sections[i].strip()
-        section_content = dataset_sections[i+1]
+        # Extract dataset name
+        dataset_match = re.search(r"Running contraction on (.*?)\.\.\.?", section)
+        if not dataset_match:
+            continue
+            
+        dataset_name = dataset_match.group(1).strip()
         
         # Extract base dataset name without path and extension
         base_name = os.path.basename(dataset_name)
         base_name = os.path.splitext(base_name)[0]
         
-        # Initialize timing dict for this dataset
-        dataset_result = {
-            'name': base_name,
-            'cpu_4loop': None,
-            'gpu_5loop': None,  # baseline
-            'gpu_4loop': None,
-            'gpu_4loop_streams': None
-        }
+        # Initialize dataset result if first time seeing this dataset
+        if base_name not in dataset_timings:
+            dataset_timings[base_name] = {
+                'name': base_name,
+                'cpu_4loop': None,
+                'gpu_5loop': None,
+                'gpu_4loop': None,
+                'gpu_4loop_streams': None
+            }
         
-        # Extract timing information using regex patterns
-        cpu_4loop_match = re.search(r"Time taken by CPU Method - 2 \[4-for loop\] i.e. contraction 2 : (\d+\.\d+)", section_content)
+        # Check for CPU reference time
+        cpu_4loop_match = re.search(r"Method: CPU 4-loop \(reference\), Time: (\d+(?:\.\d+)?) ms", section)
         if cpu_4loop_match:
-            dataset_result['cpu_4loop'] = float(cpu_4loop_match.group(1))
-            
-        gpu_5loop_match = re.search(r"Time taken by GPU Method - 1 \[5-for loop\] i.e. contraction 3 : (\d+\.\d+)", section_content)
+            dataset_timings[base_name]['cpu_4loop'] = float(cpu_4loop_match.group(1))
+        
+        # Check for GPU 5-loop time
+        gpu_5loop_match = re.search(r"Method: GPU 5-loop, Time: (\d+(?:\.\d+)?) ms", section)
         if gpu_5loop_match:
-            dataset_result['gpu_5loop'] = float(gpu_5loop_match.group(1))
-            
-        gpu_4loop_match = re.search(r"Time taken by GPU Method - 2 \[4-for loop\] i.e. contraction 4 : (\d+\.\d+)", section_content)
+            dataset_timings[base_name]['gpu_5loop'] = float(gpu_5loop_match.group(1))
+        
+        # Check for GPU 4-loop time
+        gpu_4loop_match = re.search(r"Method: GPU 4-loop, Time: (\d+(?:\.\d+)?) ms", section)
         if gpu_4loop_match:
-            dataset_result['gpu_4loop'] = float(gpu_4loop_match.group(1))
-            
-        gpu_4loop_streams_match = re.search(r"Time taken by GPU Method - 3 \[4-for loop\] i.e. streams: (\d+\.\d+)", section_content)
+            dataset_timings[base_name]['gpu_4loop'] = float(gpu_4loop_match.group(1))
+        
+        # Check for GPU 4-loop streams time
+        gpu_4loop_streams_match = re.search(r"Method: GPU 4-loop streams, Time: (\d+(?:\.\d+)?) ms", section)
         if gpu_4loop_streams_match:
-            dataset_result['gpu_4loop_streams'] = float(gpu_4loop_streams_match.group(1))
-            
-        if (dataset_result['cpu_4loop'] is None) and (dataset_result['gpu_5loop'] is None) and (dataset_result['gpu_4loop'] is None) and (dataset_result['gpu_4loop_streams'] is None):
+            dataset_timings[base_name]['gpu_4loop_streams'] = float(gpu_4loop_streams_match.group(1))
+    
+    # Convert dictionary to list
+    for base_name, timings in dataset_timings.items():
+        if (timings['cpu_4loop'] is None and 
+            timings['gpu_5loop'] is None and 
+            timings['gpu_4loop'] is None and 
+            timings['gpu_4loop_streams'] is None):
             print(f"Skipping dataset {base_name} because it has no timing data")
             continue
-        
-        results.append(dataset_result)
+            
+        results.append(timings)
         
     return results, contraction_choice
 
@@ -103,8 +119,13 @@ def calculate_speedups(results, baseline_method='gpu_4loop'):
     """Calculate speedup for each method with specified baseline"""
     
     for dataset in results:
-        # Skip datasets with no baseline timing
+        # Skip datasets with no baseline timing or handle them specially
         if dataset[baseline_method] is None:
+            # Initialize all speedups to None since we can't calculate them without the baseline
+            dataset['cpu_4loop_speedup'] = None
+            dataset['gpu_5loop_speedup'] = None
+            dataset['gpu_4loop_speedup'] = None
+            dataset['gpu_4loop_streams_speedup'] = None
             continue
             
         baseline = dataset[baseline_method]
@@ -137,23 +158,57 @@ def calculate_speedups(results, baseline_method='gpu_4loop'):
             
     return results
 
-def plot_speedups(results, baseline_method='gpu_4loop', contraction_choice=None, output_file=None, y_max=10):
-    """Create a bar plot showing speedups for all datasets"""
+def plot_speedups(results, baseline_method='gpu_4loop', contraction_choice=None, output_file=None, y_max=10, skip_methods=None):
+    """Create a bar plot showing speedups for all datasets
     
-    # Extract data for plotting
-    datasets = [r['name'] for r in results]
-    cpu_4loop_speedups = [r.get('cpu_4loop_speedup', np.nan) for r in results]
-    gpu_5loop_speedups = [r.get('gpu_5loop_speedup', np.nan) for r in results]
-    gpu_4loop_speedups = [r.get('gpu_4loop_speedup', np.nan) for r in results]
-    gpu_4loop_streams_speedups = [r.get('gpu_4loop_streams_speedup', np.nan) for r in results]
+    Parameters:
+    -----------
+    results : list
+        List of dictionaries containing timing and speedup data for each dataset
+    baseline_method : str
+        Method used as baseline for speedup calculations
+    contraction_choice : str
+        Contraction operation used in the benchmark
+    output_file : str
+        Path to save the output plot image
+    y_max : float
+        Maximum value for y-axis
+    skip_methods : list
+        List of method names to skip in the plot (e.g., ['cpu_4loop', 'gpu_5loop'])
+    """
     
-    # Convert any None to NaN for plotting
-    cpu_4loop_speedups = [s if s is not None else np.nan for s in cpu_4loop_speedups]
-    gpu_5loop_speedups = [s if s is not None else np.nan for s in gpu_5loop_speedups]
-    gpu_4loop_speedups = [s if s is not None else np.nan for s in gpu_4loop_speedups]
-    gpu_4loop_streams_speedups = [s if s is not None else np.nan for s in gpu_4loop_streams_speedups]
+    # Initialize skip_methods if not provided
+    if skip_methods is None:
+        skip_methods = []
+    
+    # Filter results to only include datasets with the baseline method available
+    filtered_results = [r for r in results if r[baseline_method] is not None]
+    
+    if not filtered_results:
+        print("No datasets have the baseline method available for plotting")
+        return
     
     # Get the method labels
+    all_method_keys = ['cpu_4loop', 'gpu_5loop', 'gpu_4loop', 'gpu_4loop_streams']
+    
+    # Filter out methods that should be skipped
+    method_keys = [method for method in all_method_keys if method not in skip_methods and method != baseline_method]
+    # Always include baseline method even if it's in skip_methods
+    method_keys.append(baseline_method)
+    # Remove duplicates and maintain order
+    method_keys = list(dict.fromkeys(method_keys))
+    
+    # Extract data for plotting (only for methods we're not skipping)
+    datasets = [r['name'] for r in filtered_results]
+    
+    # Extract speedups only for methods we want to plot
+    speedup_data = []
+    for method in method_keys:
+        speedup_key = f"{method}_speedup"
+        speedups = [r.get(speedup_key, np.nan) for r in filtered_results]
+        speedups = [s if s is not None else np.nan for s in speedups]
+        speedup_data.append(speedups)
+    
     method_names = {
         'cpu_4loop': 'CPU 4-loop',
         'gpu_5loop': 'GPU 5-loop', 
@@ -172,14 +227,23 @@ def plot_speedups(results, baseline_method='gpu_4loop', contraction_choice=None,
     
     # Create bars with appropriate labels
     bar_colors = ['blue', 'red', 'green', 'purple']
-    bar_positions = [-bar_width*1.5, -bar_width*0.5, bar_width*0.5, bar_width*1.5]
-    speedup_data = [cpu_4loop_speedups, gpu_5loop_speedups, gpu_4loop_speedups, gpu_4loop_streams_speedups]
-    method_keys = ['cpu_4loop', 'gpu_5loop', 'gpu_4loop', 'gpu_4loop_streams']
     
-    for i, (method, data, pos, color) in enumerate(zip(method_keys, speedup_data, bar_positions, bar_colors)):
+    # Calculate positions based on number of methods being plotted
+    num_methods = len(method_keys)
+    if num_methods <= 1:
+        bar_positions = [0]  # Only baseline
+    else:
+        # Calculate positions to center the bars
+        total_width = bar_width * (num_methods - 1)
+        start_pos = -total_width / 2
+        bar_positions = [start_pos + i * bar_width for i in range(num_methods)]
+    
+    # Create bars for each method
+    for i, (method, data, pos) in enumerate(zip(method_keys, speedup_data, bar_positions)):
         label = method_names[method]
         if method == baseline_method:
             label = baseline_label
+        color = bar_colors[i % len(bar_colors)]  # Cycle through colors if needed
         ax.bar(x + pos, data, bar_width, label=label, color=color)
     
     # Add horizontal line at y=1
@@ -218,13 +282,14 @@ def plot_speedups(results, baseline_method='gpu_4loop', contraction_choice=None,
     ax.grid(True, axis='y', linestyle='--', alpha=0.5)
     
     # Add memory error notations
-    for i, dataset in enumerate(results):
-        methods = ['cpu_4loop_speedup', 'gpu_5loop_speedup', 'gpu_4loop_speedup', 'gpu_4loop_streams_speedup']
-        positions = [i - bar_width*1.5, i - bar_width*0.5, i + bar_width*0.5, i + bar_width*1.5]
+    for i, dataset in enumerate(filtered_results):
+        positions = bar_positions
         
-        for method, pos in zip(methods, positions):
-            if method in dataset and dataset[method] is None:
-                ax.text(pos, 0.05, 'Mem Error', ha='center', va='bottom', rotation=90, 
+        for method_idx, method in enumerate(method_keys):
+            speedup_key = f"{method}_speedup"
+            pos = positions[method_idx]
+            if speedup_key in dataset and dataset[speedup_key] is None:
+                ax.text(i + pos, 0.05, 'Mem Error', ha='center', va='bottom', rotation=90, 
                         fontsize=8, color='red')
     
     # Set a fixed y-axis limit as requested
@@ -249,6 +314,8 @@ def main():
                         help='Method to use as the baseline for speedup calculation')
     parser.add_argument('-y', '--y-max', type=float, default=10.0,
                         help='Maximum value for the y-axis (default: 10.0)')
+    parser.add_argument('-s', '--skip', nargs='+', choices=['cpu_4loop', 'gpu_5loop', 'gpu_4loop', 'gpu_4loop_streams'],
+                        help='Methods to skip in the plot (e.g., -s cpu_4loop gpu_5loop)')
     args = parser.parse_args()
     
     # Parse log file
@@ -276,6 +343,9 @@ def main():
     
     print(f"\nUsing {method_names[baseline_method]} as baseline")
     
+    if args.skip:
+        print(f"Skipping methods: {', '.join(args.skip)}")
+    
     print("\nPerformance Summary:")
     print("-" * 100)
     print(f"{'Dataset':<25} {'CPU 4-loop':<15} {'GPU 5-loop':<15} {'GPU 4-loop':<15} {'GPU 4-loop Strm':<15}")
@@ -289,13 +359,22 @@ def main():
         
         print(f"{r['name']:<25} {cpu:<15} {gpu5:<15} {gpu4:<15} {gpu4s:<15}")
     
-    # Print speedup summary
-    print(f"\nSpeedup Summary (relative to {method_names[baseline_method]}):")
+    print("\nSpeedup Summary (relative to {}):".format(method_names[baseline_method]))
     print("-" * 100)
     print(f"{'Dataset':<25} {'CPU 4-loop':<15} {'GPU 5-loop':<15} {'GPU 4-loop':<15} {'GPU 4-loop Strm':<15}")
     print("-" * 100)
     
     for r in results:
+        # Skip datasets with no baseline timing
+        if baseline_method in r and r[baseline_method] is None:
+            continue
+            
+        # Ensure all speedup keys exist
+        speedup_keys = ['cpu_4loop_speedup', 'gpu_5loop_speedup', 'gpu_4loop_speedup', 'gpu_4loop_streams_speedup']
+        for key in speedup_keys:
+            if key not in r:
+                r[key] = None
+                
         cpu = f"{r['cpu_4loop_speedup']:.2f}x" if r['cpu_4loop_speedup'] is not None else "N/A"
         gpu5 = f"{r['gpu_5loop_speedup']:.2f}x" if r['gpu_5loop_speedup'] is not None else "N/A"
         gpu4 = f"{r['gpu_4loop_speedup']:.2f}x" if r['gpu_4loop_speedup'] is not None else "N/A"
@@ -303,8 +382,11 @@ def main():
         
         print(f"{r['name']:<25} {cpu:<15} {gpu5:<15} {gpu4:<15} {gpu4s:<15}")
     
-    # Create and save/show the plot
-    plot_speedups(results, baseline_method, contraction_choice, args.output, args.y_max)
+    # Create and save the speedup plot
+    if args.output:
+        plot_speedups(results, baseline_method, contraction_choice, args.output, args.y_max, args.skip)
+    else:
+        plot_speedups(results, baseline_method, contraction_choice, None, args.y_max, args.skip)
 
 if __name__ == "__main__":
     main() 
