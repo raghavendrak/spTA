@@ -186,6 +186,7 @@ int main(int argc, char* argv[]) {
     string csf_file;
     uint64_t rank1 = 30, rank2 = 30;
     int ncm = 0;
+    bool verify = false;  // Default: don't verify results
     
     // Parse command line arguments
     for (int i = 1; i < argc; i++) {
@@ -198,6 +199,8 @@ int main(int argc, char* argv[]) {
             rank2 = atoi(argv[++i]);
         } else if ((arg == "-n" || arg == "--ncm") && i + 1 < argc) {
             ncm = atoi(argv[++i]);
+        } else if (arg == "--verify") {
+            verify = true;
         } else if (csf_file.empty()) {
             csf_file = arg;
         }
@@ -210,6 +213,7 @@ int main(int argc, char* argv[]) {
         cerr << "  -r1 <rank>         Set first factor matrix rank (default 30)" << endl;
         cerr << "  -r2 <rank>         Set second factor matrix rank (default 30)" << endl;
         cerr << "  -n, --ncm <mode>   Set contraction mode (0, 1, or 2, default 0)" << endl;
+        cerr << "  --verify           Verify results against reference implementation" << endl;
         return 1;
     }
     
@@ -264,9 +268,14 @@ int main(int argc, char* argv[]) {
             cout << "Output dimensions: " << out_dim1 << " x " << out_dim2 << endl;
         }
         
-        // Allocate output arrays
+        // Allocate output array
         double* arr_O = allocate_aligned_array(arr_O_size);
-        double* ref_O = allocate_aligned_array(arr_O_size);
+        double* ref_O = nullptr;
+        
+        if (verify) {
+            // Only allocate reference array if verification is needed
+            ref_O = allocate_aligned_array(arr_O_size);
+        }
         
         // Run this implementation (GPU 5-loop) first
         if (verbose) {
@@ -289,35 +298,46 @@ int main(int argc, char* argv[]) {
         auto end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
         
-        // Now run reference implementation (CPU 4-loop) for validation
-        if (verbose) {
-            cout << "Running reference implementation (CPU 4-loop)..." << endl;
+        bool valid = true;
+        double ref_duration = 0.0;
+        
+        if (verify) {
+            // Now run reference implementation (CPU 4-loop) for validation
+            if (verbose) {
+                cout << "Running reference implementation (CPU 4-loop)..." << endl;
+            }
+            auto ref_start = std::chrono::high_resolution_clock::now();
+            
+            performContraction_cpu_2(
+                mode_0_ptr, mode_0_idx,
+                mode_1_ptr, mode_1_idx,
+                mode_2_ptr, mode_2_idx,
+                values, arr_A, arr_B, ref_O,
+                arr_A_size, arr_B_size, arr_O_size, ncm,
+                tensor.dimensions[0], tensor.dimensions[1], tensor.dimensions[2], rank1, rank2
+            );
+            
+            auto ref_end = std::chrono::high_resolution_clock::now();
+            ref_duration = std::chrono::duration_cast<std::chrono::microseconds>(ref_end - ref_start).count();
+            
+            // Validate results using compare_results from matrix_utils.h
+            valid = compare_results(arr_O, ref_O, arr_O_size);
         }
-        auto ref_start = std::chrono::high_resolution_clock::now();
-        
-        performContraction_cpu_2(
-            mode_0_ptr, mode_0_idx,
-            mode_1_ptr, mode_1_idx,
-            mode_2_ptr, mode_2_idx,
-            values, arr_A, arr_B, ref_O,
-            arr_A_size, arr_B_size, arr_O_size, ncm,
-            tensor.dimensions[0], tensor.dimensions[1], tensor.dimensions[2], rank1, rank2
-        );
-        
-        auto ref_end = std::chrono::high_resolution_clock::now();
-        auto ref_duration = std::chrono::duration_cast<std::chrono::microseconds>(ref_end - ref_start).count();
-        
-        // Validate results using compare_results from matrix_utils.h
-        bool valid = compare_results(arr_O, ref_O, arr_O_size);
         
         // Report results
         if (verbose) {
             cout << "GPU 5-loop execution time: " << duration / 1000.0 << " ms" << endl;
-            cout << "Reference execution time: " << ref_duration / 1000.0 << " ms" << endl;
-            cout << "Speedup over reference: " << (double)ref_duration / duration << "x" << endl;
-            cout << "Result validation: " << (valid ? "PASSED" : "FAILED") << endl;
+            if (verify) {
+                cout << "Reference execution time: " << ref_duration / 1000.0 << " ms" << endl;
+                cout << "Speedup over reference: " << (double)ref_duration / duration << "x" << endl;
+                cout << "Result validation: " << (valid ? "PASSED" : "FAILED") << endl;
+            }
         } else {
-            cout << "Method: GPU 5-loop, Time: " << duration / 1000.0 << " ms, Validation: " << (valid ? "PASSED" : "FAILED") << endl;
+            if (verify) {
+                cout << "Method: GPU 5-loop, Time: " << duration / 1000.0 << " ms, Validation: " << (valid ? "PASSED" : "FAILED") << endl;
+            } else {
+                cout << "Method: GPU 5-loop, Time: " << duration / 1000.0 << " ms" << endl;
+            }
         }
         
         // Clean up
@@ -331,7 +351,7 @@ int main(int argc, char* argv[]) {
         delete[] arr_A;
         delete[] arr_B;
         free(arr_O);
-        free(ref_O);
+        if (ref_O) free(ref_O);
         
         return valid ? 0 : 1;
     }
