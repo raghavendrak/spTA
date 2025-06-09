@@ -18,6 +18,12 @@
 # 5. Run only a specific contraction type (0, 1, or 2):
 #    ./run_contractions.sh --ncm 1
 #
+# 6. Run with result verification:
+#    ./run_contractions.sh --verify
+#
+# 7. Run with all options:
+#    ./run_contractions.sh /path/to/file.csf -v --verbose -r1 30 -r2 60 --ncm 1 --verify
+#
 # Note: Script requires NVIDIA GPU and CUDA toolkit to be installed
 # as it compiles and runs the CUDA-based implementations
 
@@ -72,6 +78,8 @@ RANK_2=30
 NCM="" # Empty means run all contraction types
 VERBOSE=false
 CSF_FILE=""
+VERIFY=false  # Default: don't verify results
+RUNS=1        # Default: run each method once
 
 # Parse command-line arguments
 while [[ $# -gt 0 ]]; do
@@ -92,6 +100,14 @@ while [[ $# -gt 0 ]]; do
         -v|--verbose)
             VERBOSE=true
             shift
+            ;;
+        --verify)
+            VERIFY=true
+            shift
+            ;;
+        --runs)
+            RUNS="$2"
+            shift 2
             ;;
         *.csf)
             # If argument ends with .csf, it's a CSF file
@@ -118,6 +134,12 @@ echo "Using factor ranks: R1=$RANK_1, R2=$RANK_2"
 if [ "$VERBOSE" = true ]; then
     echo "Verbose mode enabled"
 fi
+if [ "$VERIFY" = true ]; then
+    echo "Result verification enabled (first run only)"
+fi
+if [ $RUNS -gt 1 ]; then
+    echo "Running each method $RUNS times"
+fi
 
 # Initialize logs for all contraction types if NCM is empty
 initialize_logs() {
@@ -127,6 +149,7 @@ initialize_logs() {
             echo "Tensor contraction results" > "$log_file"
             echo "Timestamp: $(date)" >> "$log_file"
             echo "Using factor matrix ranks: R1=$RANK_1, R2=$RANK_2" >> "$log_file"
+            echo "Number of runs per method: $RUNS" >> "$log_file"
             echo "---------------------------------" >> "$log_file"
         done
     else
@@ -134,6 +157,7 @@ initialize_logs() {
         echo "Tensor contraction results" > "$log_file"
         echo "Timestamp: $(date)" >> "$log_file"
         echo "Using factor matrix ranks: R1=$RANK_1, R2=$RANK_2" >> "$log_file"
+        echo "Number of runs per method: $RUNS" >> "$log_file"
         echo "---------------------------------" >> "$log_file"
     fi
 }
@@ -143,7 +167,7 @@ run_contractions() {
     local csf_file="$1"
     local base_name=$(basename "$csf_file")
     
-    echo "Running contractions on $csf_file..." 
+    echo "Running contractions on $csf_file..."
     
     # Run all contraction methods
     for method in ${method_numbers[@]}; do
@@ -152,13 +176,19 @@ run_contractions() {
         if [ -f "$executable" ]; then
             echo "  Running method v${method}..."
             
+            # Build the command with appropriate options
+            local cmd_options=()
+            
+            # Add rank options
+            cmd_options+=("-r1" "$RANK_1" "-r2" "$RANK_2")
+            
             # If NCM is specified, run only that contraction type
             # Otherwise, run all three contraction types (0, 1, 2)
             if [ -n "$NCM" ]; then
                 # Run only the specified contraction type
                 local log_file="TTMC_ncm_${NCM}.log"
                 echo "Running contraction on $csf_file..." >> "$log_file"
-
+                
                 if [ "$NCM" == 0 ]; then
                     echo "Your Contraction Choice : ijk,jr,ks→irs" >> "$log_file"
                 elif [ "$NCM" == 1 ]; then
@@ -166,29 +196,57 @@ run_contractions() {
                 elif [ "$NCM" == 2 ]; then
                     echo "Your Contraction Choice : ijk,ir,js→rsk" >> "$log_file"
                 fi
-                # echo "    Running contraction type $NCM..."
+                
+                # Add NCM option
+                cmd_options+=("-n" "$NCM")
                 
                 # Add verbose flag if needed
                 if [ "$VERBOSE" = true ]; then
-                    ./$executable "$csf_file" -r1 "$RANK_1" -r2 "$RANK_2" -n "$NCM" -v >> "$log_file" 2>&1
-                else
-                    ./$executable "$csf_file" -r1 "$RANK_1" -r2 "$RANK_2" -n "$NCM" >> "$log_file" 2>&1
+                    cmd_options+=("-v")
                 fi
+                
+                # Run the executable multiple times if requested
+                for run in $(seq 1 $RUNS); do
+                    echo "Run $run/$RUNS of method v${method}..." >> "$log_file"
+                    
+                    # Only verify on first run
+                    local run_options=("${cmd_options[@]}")
+                    if [ "$VERIFY" = true ] && [ $run -eq 1 ]; then
+                        run_options+=("--verify")
+                    fi
+                    
+                    # Run the executable with all options
+                    ./$executable "$csf_file" "${run_options[@]}" >> "$log_file" 2>&1
+                done
                 
                 echo "---------------------------------" >> "$log_file"
             else
                 # Run all three contraction types
                 for ncm in 0 1 2; do
                     local log_file="TTMC_ncm_${ncm}.log"
-                    # echo "    Running contraction type $ncm..."
                     echo "Running contraction type $ncm on $csf_file..." >> "$log_file"
+                    
+                    # Add NCM option
+                    local ncm_cmd_options=("${cmd_options[@]}" "-n" "$ncm")
                     
                     # Add verbose flag if needed
                     if [ "$VERBOSE" = true ]; then
-                        ./$executable "$csf_file" -r1 "$RANK_1" -r2 "$RANK_2" -n "$ncm" -v >> "$log_file" 2>&1
-                    else
-                        ./$executable "$csf_file" -r1 "$RANK_1" -r2 "$RANK_2" -n "$ncm" >> "$log_file" 2>&1
+                        ncm_cmd_options+=("-v")
                     fi
+                    
+                    # Run the executable multiple times if requested
+                    for run in $(seq 1 $RUNS); do
+                        echo "Run $run/$RUNS of method v${method}..." >> "$log_file"
+                        
+                        # Only verify on first run
+                        local run_options=("${ncm_cmd_options[@]}")
+                        if [ "$VERIFY" = true ] && [ $run -eq 1 ]; then
+                            run_options+=("--verify")
+                        fi
+                        
+                        # Run the executable with all options
+                        ./$executable "$csf_file" "${run_options[@]}" >> "$log_file" 2>&1
+                    done
                     
                     echo "---------------------------------" >> "$log_file"
                 done
