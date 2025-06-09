@@ -31,7 +31,8 @@ process_tensor() {
     
     # Run preprocessor.py on the .tns file
     echo "  Running preprocessor..."
-    python preprocesor.py "$tns_file"
+    #comment below line if your COO file already have tensor order and tensor dimensions written
+    # python preprocesor.py "$tns_file"
     if [ $? -ne 0 ]; then
         echo "  Error preprocessing $tns_file"
         return
