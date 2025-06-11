@@ -22,14 +22,14 @@ void generate_matrix(uint64_t rows, uint64_t cols, unsigned int seed, double*& a
 }
 
 // Function to compare two matrices
-bool compare_matrices(double*& C1, double*& C2, int rows, int cols, double tolerance = 1e-6)
+bool compare_results(double*& C1, double*& C2, uint64_t size,  double tolerance = 1e-6)
 {
-  for (int i = 0; i < rows * cols; ++i) {
+  for (int i = 0; i < size ; ++i) {
     if (std::fabs(C1[i] - C2[i]) > tolerance) {
       std::cout << " NOT matching at i : " << i << std::endl;
       for(int j = i; j < i + 10; ++j){
-        if(j < rows * cols){
-          std::cout << "C1[i] = " << C1[j] << " C2[i] = " << C2[j] << std::endl;
+        if(j < size){
+          std::cout << "C1[" << j << "] = " << C1[j] << " C2[" << j << "] = " << C2[j] << std::endl;
         }
       }
       return false;
@@ -39,7 +39,7 @@ bool compare_matrices(double*& C1, double*& C2, int rows, int cols, double toler
 }
 
 // Function to compare results against reference implementation
-bool compare_results(double* result, double* reference, uint64_t size, double tolerance = 1e-5) {
+bool compare_results1(double* result, double* reference, uint64_t size, double tolerance = 1e-5) {
     double max_diff = 0.0;
     double max_val = 0.0;
     int errors = 0;
