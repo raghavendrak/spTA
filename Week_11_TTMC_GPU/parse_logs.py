@@ -11,25 +11,21 @@
 #    python parse_logs.py TTMC_ncm_2.log -o /path/to/dir/speedup.png
 #
 # 4. Parse log file and specify baseline method:
-#    python parse_logs.py TTMC_ncm_2.log -b gpu_4loop_streams
+#    python parse_logs.py TTMC_ncm_2.log -b v4
 #
 # 5. Parse log file and specify y-axis maximum value:
 #    python parse_logs.py TTMC_ncm_2.log -y 15.0
 #
 # 6. Parse log file and specify baseline method and y-axis maximum value:
-#    python parse_logs.py TTMC_ncm_2.log -b gpu_4loop_streams -y 15.0
+#    python parse_logs.py TTMC_ncm_2.log -b v4 -y 15.0
 #
 # 7. Parse log file and skip specific methods:
-#    python parse_logs.py TTMC_ncm_2.log -s cpu_4loop gpu_5loop
+#    python parse_logs.py TTMC_ncm_2.log -s v2 v5
 #
 # The script parses TTMC log files containing timing data for tensor contractions
 # and generates a bar plot comparing speedups of different GPU implementations
-# relative to the CPU baseline implementation.
-#
-# Required format of log file:
-# - Contains sections starting with "Contraction results for <dataset>"
-# - Each section has timing data for CPU and GPU implementations
-# - Timing data in format "Time taken by <method> : <time> milliseconds"
+# relative to the specified baseline implementation.
+
 
 import re
 import os
@@ -38,6 +34,15 @@ import matplotlib.pyplot as plt
 import argparse
 from matplotlib.ticker import MaxNLocator
 from collections import defaultdict
+
+# Method id to default name mapping
+DEFAULT_METHOD_NAMES = {
+    'v2': 'CPU 4-loop',
+    'v3': 'GPU 5-loop',
+    'v4': 'GPU 4-loop',
+    'v5': 'GPU 4-loop streams',
+    'v6': 'GPU_1nz_per_thread'
+}
 
 def parse_log_file(log_file_path):
     """Parse the TTMC log file and extract timing data for each dataset"""
@@ -55,6 +60,9 @@ def parse_log_file(log_file_path):
     
     # Dictionary to store timing information by dataset name
     dataset_timings = defaultdict(lambda: defaultdict(list))
+    
+    # Dictionary to map method IDs to their names
+    method_names = {}
     
     # Find all dataset entries
     dataset_entries = re.finditer(r"Running contraction on (.*?)\.\.\.?\n", content)
@@ -79,27 +87,21 @@ def parse_log_file(log_file_path):
         # Extract the section for this dataset
         dataset_section = content[start_pos:end_pos]
         
-        # Find all method runs in this section
+        # Find all method runs in this section using regex
+        # Updated regex to handle scientific notation (e.g., 1.23e+04)
+        method_runs = re.finditer(r"Run \d+/\d+ of method (v\d+)\.\.\..*?Method: (.*?), Time: (\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)", 
+                                 dataset_section, re.DOTALL)
         
-        # CPU 4-loop (reference)
-        cpu_times = re.findall(r"Method: CPU 4-loop \(reference\), Time: (\d+(?:\.\d+)?) ms", dataset_section)
-        for time in cpu_times:
-            dataset_timings[base_name]['cpu_4loop'].append(float(time))
-        
-        # GPU 5-loop
-        gpu5_times = re.findall(r"Method: GPU 5-loop, Time: (\d+(?:\.\d+)?) ms", dataset_section)
-        for time in gpu5_times:
-            dataset_timings[base_name]['gpu_5loop'].append(float(time))
-        
-        # GPU 4-loop
-        gpu4_times = re.findall(r"Method: GPU 4-loop, Time: (\d+(?:\.\d+)?) ms", dataset_section)
-        for time in gpu4_times:
-            dataset_timings[base_name]['gpu_4loop'].append(float(time))
-        
-        # GPU 4-loop streams
-        gpu4s_times = re.findall(r"Method: GPU 4-loop streams, Time: (\d+(?:\.\d+)?) ms", dataset_section)
-        for time in gpu4s_times:
-            dataset_timings[base_name]['gpu_4loop_streams'].append(float(time))
+        for method_run in method_runs:
+            method_id = method_run.group(1)  # v2, v3, etc.
+            method_name = method_run.group(2).split(',')[0].strip()  # Extract method name
+            run_time = float(method_run.group(3))  # Correctly parses scientific notation
+            
+            # Store the mapping from method_id to method_name
+            method_names[method_id] = method_name
+            
+            # Store the timing data
+            dataset_timings[base_name][method_id].append(run_time)
     
     # Calculate the maximum number of runs found for any method
     max_runs = 1
@@ -109,6 +111,10 @@ def parse_log_file(log_file_path):
                 max_runs = len(times)
     
     print(f"Detected maximum of {max_runs} runs per method")
+    print(f"Detected methods: {', '.join(method_names.keys())}")
+    print("Method mappings:")
+    for method_id, name in method_names.items():
+        print(f"  {method_id}: {name}")
     
     # Calculate average times and convert dictionary to list
     for base_name, timings in dataset_timings.items():
@@ -146,94 +152,62 @@ def parse_log_file(log_file_path):
                 
         results.append(result)
         
-    return results, contraction_choice, max_runs
+    return results, contraction_choice, max_runs, method_names
 
-def calculate_speedups(results, baseline_method='gpu_4loop'):
+def calculate_speedups(results, baseline_method='v4'):
     """Calculate speedup for each method with specified baseline, including error propagation"""
     
     for dataset in results:
         # Skip datasets with no baseline timing or handle them specially
-        if dataset[baseline_method] is None:
-            # Initialize all speedups to None since we can't calculate them without the baseline
-            dataset['cpu_4loop_speedup'] = None
-            dataset['gpu_5loop_speedup'] = None
-            dataset['gpu_4loop_speedup'] = None
-            dataset['gpu_4loop_streams_speedup'] = None
+        if baseline_method not in dataset or dataset[baseline_method] is None:
+            print(f"Skipping speedup calculation for dataset {dataset['name']} - missing baseline {baseline_method}")
             continue
             
         baseline = dataset[baseline_method]
         baseline_std = dataset.get(f'{baseline_method}_std', 0)
         
-        # Calculate speedups (baseline / method_time)
-        if dataset['cpu_4loop'] is not None:
-            dataset['cpu_4loop_speedup'] = baseline / dataset['cpu_4loop']
-            
-            # Error propagation for division: relative errors add in quadrature
-            if dataset['cpu_4loop_runs'] > 1 and dataset[f'{baseline_method}_runs'] > 1:
-                rel_err_baseline = baseline_std / baseline if baseline > 0 else 0
-                rel_err_method = dataset['cpu_4loop_std'] / dataset['cpu_4loop'] if dataset['cpu_4loop'] > 0 else 0
-                rel_err_speedup = np.sqrt(rel_err_baseline**2 + rel_err_method**2)
-                dataset['cpu_4loop_speedup_std'] = dataset['cpu_4loop_speedup'] * rel_err_speedup
-            else:
-                dataset['cpu_4loop_speedup_std'] = 0
-        else:
-            dataset['cpu_4loop_speedup'] = None
-            dataset['cpu_4loop_speedup_std'] = 0
-            
-        if dataset['gpu_5loop'] is not None:
-            dataset['gpu_5loop_speedup'] = baseline / dataset['gpu_5loop']
-            
-            # Error propagation
-            if dataset['gpu_5loop_runs'] > 1 and dataset[f'{baseline_method}_runs'] > 1:
-                rel_err_baseline = baseline_std / baseline if baseline > 0 else 0
-                rel_err_method = dataset['gpu_5loop_std'] / dataset['gpu_5loop'] if dataset['gpu_5loop'] > 0 else 0
-                rel_err_speedup = np.sqrt(rel_err_baseline**2 + rel_err_method**2)
-                dataset['gpu_5loop_speedup_std'] = dataset['gpu_5loop_speedup'] * rel_err_speedup
-            else:
-                dataset['gpu_5loop_speedup_std'] = 0
-        else:
-            dataset['gpu_5loop_speedup'] = None
-            dataset['gpu_5loop_speedup_std'] = 0
+        # Get all methods that have timing data for this dataset
+        methods = [key for key in dataset.keys() if key.startswith('v') and not key.endswith(('_times', '_std', '_runs', '_cv', '_speedup', '_speedup_std'))]
         
-        # The baseline method's speedup is always 1.0
-        dataset[f'{baseline_method}_speedup'] = 1.0
-        dataset[f'{baseline_method}_speedup_std'] = 0  # Zero std dev for the baseline
-            
-        if baseline_method != 'gpu_4loop' and dataset['gpu_4loop'] is not None:
-            dataset['gpu_4loop_speedup'] = baseline / dataset['gpu_4loop']
-            
-            # Error propagation
-            if dataset['gpu_4loop_runs'] > 1 and dataset[f'{baseline_method}_runs'] > 1:
-                rel_err_baseline = baseline_std / baseline if baseline > 0 else 0
-                rel_err_method = dataset['gpu_4loop_std'] / dataset['gpu_4loop'] if dataset['gpu_4loop'] > 0 else 0
-                rel_err_speedup = np.sqrt(rel_err_baseline**2 + rel_err_method**2)
-                dataset['gpu_4loop_speedup_std'] = dataset['gpu_4loop_speedup'] * rel_err_speedup
+        # Calculate speedups for all methods relative to baseline
+        for method in methods:
+            if method == baseline_method:
+                # The baseline method's speedup is always 1.0
+                dataset[f'{method}_speedup'] = 1.0
+                dataset[f'{method}_speedup_std'] = 0  # Zero std dev for the baseline
+                continue
+                
+            if dataset[method] is not None:
+                dataset[f'{method}_speedup'] = baseline / dataset[method]
+                
+                # Error propagation for division: relative errors add in quadrature
+                if dataset[f'{method}_runs'] > 1 and dataset[f'{baseline_method}_runs'] > 1:
+                    rel_err_baseline = baseline_std / baseline if baseline > 0 else 0
+                    rel_err_method = dataset[f'{method}_std'] / dataset[method] if dataset[method] > 0 else 0
+                    rel_err_speedup = np.sqrt(rel_err_baseline**2 + rel_err_method**2)
+                    dataset[f'{method}_speedup_std'] = dataset[f'{method}_speedup'] * rel_err_speedup
+                else:
+                    dataset[f'{method}_speedup_std'] = 0
             else:
-                dataset['gpu_4loop_speedup_std'] = 0
-        else:
-            if baseline_method != 'gpu_4loop':
-                dataset['gpu_4loop_speedup'] = None
-                dataset['gpu_4loop_speedup_std'] = 0
-            
-        if baseline_method != 'gpu_4loop_streams' and dataset['gpu_4loop_streams'] is not None:
-            dataset['gpu_4loop_streams_speedup'] = baseline / dataset['gpu_4loop_streams']
-            
-            # Error propagation
-            if dataset['gpu_4loop_streams_runs'] > 1 and dataset[f'{baseline_method}_runs'] > 1:
-                rel_err_baseline = baseline_std / baseline if baseline > 0 else 0
-                rel_err_method = dataset['gpu_4loop_streams_std'] / dataset['gpu_4loop_streams'] if dataset['gpu_4loop_streams'] > 0 else 0
-                rel_err_speedup = np.sqrt(rel_err_baseline**2 + rel_err_method**2)
-                dataset['gpu_4loop_streams_speedup_std'] = dataset['gpu_4loop_streams_speedup'] * rel_err_speedup
-            else:
-                dataset['gpu_4loop_streams_speedup_std'] = 0
-        else:
-            if baseline_method != 'gpu_4loop_streams':
-                dataset['gpu_4loop_streams_speedup'] = None
-                dataset['gpu_4loop_streams_speedup_std'] = 0
+                dataset[f'{method}_speedup'] = None
+                dataset[f'{method}_speedup_std'] = 0
             
     return results
 
-def plot_speedups(results, baseline_method='gpu_4loop', contraction_choice=None, output_file=None, y_max=5, skip_methods=None, runs_per_method=1):
+def format_time(time_value):
+    """Format time value with proper units and significant digits"""
+    if time_value is None:
+        return "N/A"
+    
+    if time_value >= 1e6:
+        return f"{time_value/1e6:.2f}s (x10⁶)"
+    elif time_value >= 1e3:
+        return f"{time_value/1e3:.2f}s"
+    else:
+        return f"{time_value:.2f}ms"
+
+def plot_speedups(results, baseline_method='v4', method_names=None, contraction_choice=None, 
+                 output_file=None, y_max=5, skip_methods=None, runs_per_method=1):
     """Create a bar plot showing speedups for all datasets
     
     Parameters:
@@ -241,7 +215,9 @@ def plot_speedups(results, baseline_method='gpu_4loop', contraction_choice=None,
     results : list
         List of dictionaries containing timing and speedup data for each dataset
     baseline_method : str
-        Method used as baseline for speedup calculations
+        Method used as baseline for speedup calculations (e.g. 'v4')
+    method_names : dict
+        Dictionary mapping method IDs to human-readable names
     contraction_choice : str
         Contraction operation used in the benchmark
     output_file : str
@@ -249,31 +225,42 @@ def plot_speedups(results, baseline_method='gpu_4loop', contraction_choice=None,
     y_max : float
         Maximum value for y-axis
     skip_methods : list
-        List of method names to skip in the plot (e.g., ['cpu_4loop', 'gpu_5loop'])
+        List of method IDs to skip in the plot (e.g., ['v2', 'v5'])
     runs_per_method : int
         Number of runs performed for each method (used in plot title)
     """
+    
+    # If method_names not provided, use default mapping
+    if method_names is None:
+        method_names = DEFAULT_METHOD_NAMES
     
     # Initialize skip_methods if not provided
     if skip_methods is None:
         skip_methods = []
     
     # Filter results to only include datasets with the baseline method available
-    filtered_results = [r for r in results if r[baseline_method] is not None]
+    filtered_results = [r for r in results if baseline_method in r and r[baseline_method] is not None]
     
     if not filtered_results:
         print("No datasets have the baseline method available for plotting")
         return
     
-    # Get the method labels
-    all_method_keys = ['cpu_4loop', 'gpu_5loop', 'gpu_4loop', 'gpu_4loop_streams']
+    # Find all unique method IDs across all datasets
+    all_method_ids = set()
+    for r in filtered_results:
+        for key in r.keys():
+            if key.startswith('v') and not key.endswith(('_times', '_std', '_runs', '_cv', '_speedup', '_speedup_std')):
+                all_method_ids.add(key)
+    
+    # Sort method IDs by version number
+    all_method_ids = sorted(all_method_ids, key=lambda x: int(x[1:]))
     
     # Filter out methods that should be skipped
-    method_keys = [method for method in all_method_keys if method not in skip_methods and method != baseline_method]
+    method_ids = [method for method in all_method_ids if method not in skip_methods and method != baseline_method]
     # Always include baseline method even if it's in skip_methods
-    method_keys.append(baseline_method)
+    method_ids.append(baseline_method)
     # Remove duplicates and maintain order
-    method_keys = list(dict.fromkeys(method_keys))
+    method_ids = sorted(set(method_ids), key=method_ids.index)
     
     # Extract data for plotting (only for methods we're not skipping)
     datasets = [r['name'] for r in filtered_results]
@@ -282,7 +269,7 @@ def plot_speedups(results, baseline_method='gpu_4loop', contraction_choice=None,
     speedup_data = []
     std_devs = []  # Standard deviations for each method
     
-    for method in method_keys:
+    for method in method_ids:
         speedup_key = f"{method}_speedup"
         std_key = f"{method}_speedup_std"
         
@@ -303,14 +290,15 @@ def plot_speedups(results, baseline_method='gpu_4loop', contraction_choice=None,
         speedup_data.append(method_speedups)
         std_devs.append(method_stds)
     
-    method_names = {
-        'cpu_4loop': 'CPU 4-loop',
-        'gpu_5loop': 'GPU 5-loop', 
-        'gpu_4loop': 'GPU 4-loop',
-        'gpu_4loop_streams': 'GPU 4-loop Streams'
-    }
+    # Create user-friendly method names for the plot
+    display_names = {}
+    for method_id in method_ids:
+        if method_id in method_names:
+            display_names[method_id] = method_names[method_id]
+        else:
+            display_names[method_id] = f"Method {method_id}"
     
-    baseline_label = method_names[baseline_method] + ' (Baseline)'
+    baseline_label = display_names[baseline_method] + ' (Baseline)'
     
     # Setup figure and axis
     fig, ax = plt.subplots(figsize=(12, 6))
@@ -320,10 +308,10 @@ def plot_speedups(results, baseline_method='gpu_4loop', contraction_choice=None,
     bar_width = 0.2
     
     # Create bars with appropriate labels
-    bar_colors = ['blue', 'red', 'green', 'purple']
+    bar_colors = ['blue', 'red', 'green', 'purple', 'orange', 'brown', 'pink', 'gray', 'olive', 'cyan']
     
     # Calculate positions based on number of methods being plotted
-    num_methods = len(method_keys)
+    num_methods = len(method_ids)
     if num_methods <= 1:
         bar_positions = [0]  # Only baseline
     else:
@@ -333,8 +321,8 @@ def plot_speedups(results, baseline_method='gpu_4loop', contraction_choice=None,
         bar_positions = [start_pos + i * bar_width for i in range(num_methods)]
     
     # Create bars for each method with error bars for standard deviation
-    for i, (method, data, std, pos) in enumerate(zip(method_keys, speedup_data, std_devs, bar_positions)):
-        label = method_names[method]
+    for i, (method, data, std, pos) in enumerate(zip(method_ids, speedup_data, std_devs, bar_positions)):
+        label = display_names[method]
         if method == baseline_method:
             label = baseline_label
         color = bar_colors[i % len(bar_colors)]  # Cycle through colors if needed
@@ -363,7 +351,7 @@ def plot_speedups(results, baseline_method='gpu_4loop', contraction_choice=None,
     # Add speedup values on top of bars
     for i in range(len(datasets)):
         # Add labels for all methods
-        for j, (method, data, std, pos) in enumerate(zip(method_keys, speedup_data, std_devs, bar_positions)):
+        for j, (method, data, std, pos) in enumerate(zip(method_ids, speedup_data, std_devs, bar_positions)):
             if not np.isnan(data[i]):
                 height = data[i]
                 # Get the run count for this dataset/method
@@ -389,14 +377,14 @@ def plot_speedups(results, baseline_method='gpu_4loop', contraction_choice=None,
     
     # Customize plot
     ax.set_xlabel('Dataset')
-    ax.set_ylabel(f'Speedup (relative to {method_names[baseline_method]})')
+    ax.set_ylabel(f'Speedup (relative to {display_names[baseline_method]})')
     
     # Set the title with contraction choice and run info if available
-    title = f'TTMC Method Performance Comparison (Baseline: {method_names[baseline_method]})'
+    title = f'TTMC Method Performance Comparison (Baseline: {display_names[baseline_method]})'
     if runs_per_method > 1:
         title += f' - Averaged from {runs_per_method} runs'
     if contraction_choice:
-        title += f' - Contraction: {contraction_choice}'
+        title += f'\nContraction: {contraction_choice}'
     ax.set_title(title)
     
     ax.set_xticks(x)
@@ -408,7 +396,7 @@ def plot_speedups(results, baseline_method='gpu_4loop', contraction_choice=None,
     for i, dataset in enumerate(filtered_results):
         positions = bar_positions
         
-        for method_idx, method in enumerate(method_keys):
+        for method_idx, method in enumerate(method_ids):
             speedup_key = f"{method}_speedup"
             pos = positions[method_idx]
             if speedup_key in dataset and dataset[speedup_key] is None:
@@ -432,18 +420,17 @@ def main():
     parser = argparse.ArgumentParser(description='Parse TTMC log files and create performance plots')
     parser.add_argument('log_file', help='Path to the TTMC log file')
     parser.add_argument('-o', '--output', help='Output file path for the plot (e.g., speedup_plot.png)')
-    parser.add_argument('-b', '--baseline', default='gpu_4loop', 
-                        choices=['cpu_4loop', 'gpu_5loop', 'gpu_4loop', 'gpu_4loop_streams'],
-                        help='Method to use as the baseline for speedup calculation')
+    parser.add_argument('-b', '--baseline', default='v4', 
+                        help='Method to use as the baseline for speedup calculation (e.g., v2, v3, v4)')
     parser.add_argument('-y', '--y-max', type=float, default=5.0,
                         help='Maximum value for the y-axis (default: 5.0)')
-    parser.add_argument('-s', '--skip', nargs='+', choices=['cpu_4loop', 'gpu_5loop', 'gpu_4loop', 'gpu_4loop_streams'],
-                        help='Methods to skip in the plot (e.g., -s cpu_4loop gpu_5loop)')
+    parser.add_argument('-s', '--skip', nargs='+',
+                        help='Methods to skip in the plot (e.g., -s v2 v6)')
     args = parser.parse_args()
     
     # Parse log file
     print(f"Parsing log file: {args.log_file}")
-    results, contraction_choice, max_runs = parse_log_file(args.log_file)
+    results, contraction_choice, max_runs, method_names = parse_log_file(args.log_file)
     
     if not results:
         print("No valid results found in log file.")
@@ -457,59 +444,83 @@ def main():
     results = calculate_speedups(results, baseline_method)
     
     # Print summary
-    method_names = {
-        'cpu_4loop': 'CPU 4-loop',
-        'gpu_5loop': 'GPU 5-loop', 
-        'gpu_4loop': 'GPU 4-loop',
-        'gpu_4loop_streams': 'GPU 4-loop Streams'
-    }
-    
-    print(f"\nUsing {method_names[baseline_method]} as baseline")
+    print(f"\nUsing {baseline_method} ({method_names.get(baseline_method, 'Unknown')}) as baseline")
     
     if args.skip:
         print(f"Skipping methods: {', '.join(args.skip)}")
     
+    # Get all unique methods across datasets
+    all_methods = set()
+    for r in results:
+        for key in r.keys():
+            if key.startswith('v') and not key.endswith(('_times', '_std', '_runs', '_cv', '_speedup', '_speedup_std')):
+                all_methods.add(key)
+    
+    # Sort methods by version number
+    all_methods = sorted(all_methods, key=lambda x: int(x[1:]))
+    
     print("\nPerformance Summary (Average Times):")
     print("-" * 100)
-    print(f"{'Dataset':<25} {'CPU 4-loop':<20} {'GPU 5-loop':<20} {'GPU 4-loop':<20} {'GPU 4-loop Strm':<20}")
+    
+    # Calculate column widths for better formatting
+    name_width = 25
+    method_widths = {}
+    for method in all_methods:
+        method_display = f"{method} ({method_names.get(method, 'Unknown')})"
+        method_widths[method] = max(len(method_display) + 5, 20)  # Add buffer for time value
+    
+    # Print header for all methods
+    header = f"{'Dataset':<{name_width}}"
+    for method in all_methods:
+        method_display = f"{method} ({method_names.get(method, 'Unknown')})"
+        header += f"{method_display:<{method_widths[method]}}"
+    print(header)
     print("-" * 100)
     
     for r in results:
-        cpu = f"{r['cpu_4loop']:.2f}ms " if r['cpu_4loop'] is not None else "N/A"
-        gpu5 = f"{r['gpu_5loop']:.2f}ms " if r['gpu_5loop'] is not None else "N/A"
-        gpu4 = f"{r['gpu_4loop']:.2f}ms " if r['gpu_4loop'] is not None else "N/A"
-        gpu4s = f"{r['gpu_4loop_streams']:.2f}ms " if r['gpu_4loop_streams'] is not None else "N/A"
-        
-        print(f"{r['name']:<25} {cpu:<20} {gpu5:<20} {gpu4:<20} {gpu4s:<20}")
+        row = f"{r['name']:<{name_width}}"
+        for method in all_methods:
+            if method in r and r[method] is not None:
+                # Format time with proper units
+                if r[method] >= 1e6:
+                    time_str = f"{r[method]/1e6:.2f}s (x10⁶)"
+                elif r[method] >= 1e3:
+                    time_str = f"{r[method]/1e3:.2f}s"
+                else:
+                    time_str = f"{r[method]:.2f}ms"
+                row += f"{time_str:<{method_widths[method]}}"
+            else:
+                row += f"{'N/A':<{method_widths[method]}}"
+        print(row)
     
-    print("\nSpeedup Summary (relative to {}):".format(method_names[baseline_method]))
+    print("\nSpeedup Summary (relative to {}: {}):".format(baseline_method, method_names.get(baseline_method, 'Unknown')))
     print("-" * 100)
-    print(f"{'Dataset':<25} {'CPU 4-loop':<15} {'GPU 5-loop':<15} {'GPU 4-loop':<15} {'GPU 4-loop Strm':<15}")
+    
+    # Print header for speedup values
+    header = f"{'Dataset':<{name_width}}"
+    for method in all_methods:
+        method_display = f"{method} ({method_names.get(method, 'Unknown')})"
+        header += f"{method_display:<{method_widths[method]}}"
+    print(header)
     print("-" * 100)
     
     for r in results:
         # Skip datasets with no baseline timing
-        if baseline_method in r and r[baseline_method] is None:
+        if baseline_method not in r or r[baseline_method] is None:
             continue
             
-        # Ensure all speedup keys exist
-        speedup_keys = ['cpu_4loop_speedup', 'gpu_5loop_speedup', 'gpu_4loop_speedup', 'gpu_4loop_streams_speedup']
-        for key in speedup_keys:
-            if key not in r:
-                r[key] = None
-                
-        cpu = f"{r['cpu_4loop_speedup']:.2f}x" if r['cpu_4loop_speedup'] is not None else "N/A"
-        gpu5 = f"{r['gpu_5loop_speedup']:.2f}x" if r['gpu_5loop_speedup'] is not None else "N/A"
-        gpu4 = f"{r['gpu_4loop_speedup']:.2f}x" if r['gpu_4loop_speedup'] is not None else "N/A"
-        gpu4s = f"{r['gpu_4loop_streams_speedup']:.2f}x" if r['gpu_4loop_streams_speedup'] is not None else "N/A"
-        
-        print(f"{r['name']:<25} {cpu:<15} {gpu5:<15} {gpu4:<15} {gpu4s:<15}")
+        row = f"{r['name']:<{name_width}}"
+        for method in all_methods:
+            speedup_key = f"{method}_speedup"
+            if speedup_key in r and r[speedup_key] is not None:
+                row += f"{r[speedup_key]:.2f}x{'':<{method_widths[method]-5}}"
+            else:
+                row += f"{'N/A':<{method_widths[method]}}"
+        print(row)
     
     # Create and save the speedup plot
-    if args.output:
-        plot_speedups(results, baseline_method, contraction_choice, args.output, args.y_max, args.skip, max_runs)
-    else:
-        plot_speedups(results, baseline_method, contraction_choice, None, args.y_max, args.skip, max_runs)
+    plot_speedups(results, baseline_method, method_names, contraction_choice, 
+                 args.output, args.y_max, args.skip, max_runs)
 
 if __name__ == "__main__":
     main() 
