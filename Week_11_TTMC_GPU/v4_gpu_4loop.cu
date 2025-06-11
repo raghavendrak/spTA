@@ -482,9 +482,9 @@ int main(int argc, char* argv[]) {
             }
         } else {
             if (verify) {
-                cout << "Method: GPU 4-loop, Time: " << duration / 1000.0 << " ms, Validation: " << (valid ? "PASSED" : "FAILED") << endl;
+                cout << "Method: GPU_4L, Time: " << duration / 1000.0 << " ms, Validation: " << (valid ? "PASSED" : "FAILED") << endl;
             } else {
-                cout << "Method: GPU 4-loop, Time: " << duration / 1000.0 << " ms" << endl;
+                cout << "Method: GPU_4L, Time: " << duration / 1000.0 << " ms" << endl;
             }
         }
         

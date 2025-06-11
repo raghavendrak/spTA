@@ -270,9 +270,9 @@ int main(int argc, char* argv[]) {
             }
         } else {
             if (verify) {
-                cout << "Method: CPU 5-loop, Time: " << duration / 1000.0 << " ms, Validation: " << (valid ? "PASSED" : "FAILED") << endl;
+                cout << "Method: CPU_5L, Time: " << duration / 1000.0 << " ms, Validation: " << (valid ? "PASSED" : "FAILED") << endl;
             } else {
-                cout << "Method: CPU 5-loop, Time: " << duration / 1000.0 << " ms" << endl;
+                cout << "Method: CPU_5L, Time: " << duration / 1000.0 << " ms" << endl;
             }
         }
         

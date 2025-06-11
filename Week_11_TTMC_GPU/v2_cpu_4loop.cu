@@ -273,9 +273,9 @@ int main(int argc, char* argv[]) {
         
         // Report results
         if (verbose) {
-            cout << "CPU 4-loop execution time: " << duration / 1000.0 << " ms" << endl;
+            cout << "Method: CPU_4L, Time: " << duration / 1000.0 << " ms" << endl;
         } else {
-            cout << "Method: CPU 4-loop (reference), Time: " << duration / 1000.0 << " ms" << endl;
+            cout << "Method: CPU_4L, Time: " << duration / 1000.0 << " ms" << endl;
         }
         
         // Clean up

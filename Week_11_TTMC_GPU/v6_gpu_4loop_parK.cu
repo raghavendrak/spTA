@@ -1,3 +1,4 @@
+//TO-DO: write kernel for contraction = 2 i.e. ijk, ir, js -> rsk
 #include <iostream>
 #include <vector>
 #include <cstring>
@@ -143,9 +144,7 @@ void GPU_4loop_parK_host_func(
     // Allocate device memory
     uint64_t *d_mode_0_ptr, *d_mode_0_idx, *d_mode_1_ptr, *d_mode_1_idx, *d_mode_2_ptr, *d_mode_2_idx;
     double *d_values, *d_arr_A, *d_arr_B, *d_arr_O;
-    // double* buffer_for_contraction_0_1;
-    // double* buffer_for_contraction_2;
-    // int* k_buffer_for_contraction_2;
+   
   
     cudaMalloc(&d_mode_0_ptr, sizeof(uint64_t) * size_mode_0_ptr);
     cudaMalloc(&d_mode_0_idx, sizeof(uint64_t) * size_mode_0_idx);
@@ -205,64 +204,7 @@ void GPU_4loop_parK_host_func(
       );
 
     }
-      /*
-    else if(contraction == 2){
-      double* buffer_for_ncm_2;
-      bool* k_index_buffer;
-      
-      NUM_STREAMS = 1;
-      cout << "No. of streams = " << NUM_STREAMS <<endl;
-
-      cudaMalloc(&buffer_for_ncm_2, n * f2 * NUM_STREAMS * sizeof(double));
-      cudaMalloc(&k_index_buffer, n * NUM_STREAMS * sizeof(bool));
-      
-      // cudaMalloc(&k_indices, n * NUM_STREAMS * sizeof(uint64_t));
-      // cudaMalloc(&counter,  NUM_STREAMS * sizeof(uint64_t));
-      
-      // cudaMemset(buffer_for_ncm_2 , 0, n * f2  * NUM_STREAMS * sizeof(double));
-      // cudaMemset(k_index_buffer, 0, n  * NUM_STREAMS * sizeof(bool));
-
-      
-      for (uint64_t i_ptr = 0; i_ptr < mode_0_ptr[1]; ++i_ptr) {
-        i = mode_0_idx[i_ptr];
-        j_ptr_offset = mode_1_ptr[i_ptr];
-        
-        cudaMemset(buffer_for_ncm_2 + n * f2 * (i_ptr % NUM_STREAMS), 0, n * f2  * sizeof(double));
-        cudaMemset(k_index_buffer + n * (i_ptr % NUM_STREAMS), 0, n  * sizeof(bool));
-        
-        dim3 gridDim(mode_1_ptr[i_ptr + 1] - mode_1_ptr[i_ptr]);
-        dim3 blockDim(32, 32);
-
-        GPU_4loop_streams_ncm_2_part_1<<<gridDim, blockDim, 0, streams[i_ptr%NUM_STREAMS]>>>(
-          d_mode_1_idx, d_mode_2_ptr, d_mode_2_idx,
-          d_values, d_arr_A, d_arr_B, d_arr_O, l, m, n, f1, f2, contraction,
-          size_mode_0_ptr, size_mode_1_ptr, size_mode_2_ptr,
-          size_mode_0_idx, size_mode_1_idx, size_mode_2_idx,
-          i, j_ptr_offset, buffer_for_ncm_2 + n * f2 * (i_ptr % NUM_STREAMS), k_index_buffer + n * (i_ptr % NUM_STREAMS)
-        );
-
-        // cudaDeviceSynchronize();
-        // pick_non_zero_Ks(k_index_buffer + n * (i_ptr % NUM_STREAMS), k_indices + n * (i_ptr % NUM_STREAMS),  n)
-
-        gridDim.x = n; //TO-DO: have to be optimized
-        GPU_4loop_streams_ncm_2_part_2<<<gridDim, blockDim, 0, streams[i_ptr%NUM_STREAMS]>>>(
-          d_mode_1_idx, d_mode_2_ptr, d_mode_2_idx,
-          d_values, d_arr_A, d_arr_B, d_arr_O, l, m, n, f1, f2, contraction,
-          size_mode_0_ptr, size_mode_1_ptr, size_mode_2_ptr,
-          size_mode_0_idx, size_mode_1_idx, size_mode_2_idx,
-          i, j_ptr_offset, buffer_for_ncm_2 + n * (i_ptr % NUM_STREAMS), k_index_buffer + n * (i_ptr % NUM_STREAMS)
-        );
-        cudaGetLastError();  // Check launch err;
-        // cudaStreamSynchronize(streams[i_ptr % NUM_STREAMS]);
-      }
-    }
-
-  // Sync and destroy streams
-  for ( itr = 0; itr < NUM_STREAMS; ++itr) {
-    cudaStreamSynchronize(streams[itr]);
-    cudaStreamDestroy(streams[itr]);
-  }
-      */
+     
     cudaDeviceSynchronize();
   
     // Copy results back to host
@@ -280,9 +222,7 @@ void GPU_4loop_parK_host_func(
     cudaFree(d_arr_B);
     cudaFree(d_arr_O);
   
-    // cudaFree(buffer_for_contraction_0_1);
-    // cudaFree(buffer_for_contraction_2);
-    // cudaFree(k_buffer_for_contraction_2);
+  
   }
 /*End of host function for GPU 4 loop Method using STREAMS*/
 ////////////////////////////////////////////////////////////////////
@@ -461,9 +401,9 @@ int main(int argc, char* argv[]) {
         }
     } else {
         if (verify) {
-          cout << "Method: GPU_1nz_per_thread (each thread picks a non-zero(k)), Time: " << duration / 1000.0 << " ms, Validation: " << (valid ? "PASSED" : "FAILED") << endl;
+          cout << "Method: GPU_1nz_per_thread , Time: " << duration / 1000.0 << " ms, Validation: " << (valid ? "PASSED" : "FAILED") << endl;
         } else {
-          cout << "Method: GPU_1nz_per_thread (each thread picks a non-zero(k)), Time: " << duration / 1000.0 << " ms" << endl;
+          cout << "Method: GPU_1nz_per_thread , Time: " << duration / 1000.0 << " ms" << endl;
         }
     }
     
