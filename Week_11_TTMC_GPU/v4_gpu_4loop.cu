@@ -71,6 +71,8 @@ __global__ void contractionKernel_4(
         if (buffer == nullptr) {// Handle allocation failure
           if(blockIdx.x == 0 && threadIdx.x == 0){
             printf("Memory allocation failure \n");
+            //printf("CUDA Kernel: Memory allocation failure for thread %d-%d. This likely indicates insufficient GPU memory.\n", blockIdx.x, threadIdx.x);
+            asm("trap;"); // Force kernel to terminate with error
           }
           return;
         } 
@@ -261,9 +263,8 @@ void performContraction_gpu_2(
   
   if(contraction == 0 || contraction == 1){
     // parallelising 'j_ptr' for contraction = 0 and contraction = 1 :
-    cudaMalloc(&buffer_for_contraction_0_1, f2 * size_mode_1_idx * sizeof(double));
-    // parallelising 'j_ptr' for contraction = 0 and contraction = 1 :
-    cudaMemset(buffer_for_contraction_0_1, 0, f2 * size_mode_1_idx * sizeof(double));
+    cudaCheckError(cudaMalloc(&buffer_for_contraction_0_1, f2 * size_mode_1_idx * sizeof(double)));
+    cudaCheckError(cudaMemset(buffer_for_contraction_0_1, 0, f2 * size_mode_1_idx * sizeof(double)));
     
     // parallelising 'i_ptr' :
     contractionKernel_4<<<blocksPerGrid, threadsPerBlock>>>(
@@ -375,22 +376,28 @@ int main(int argc, char* argv[]) {
         double *values;
         int order;
         
-        getCSFArrays(tensor, &mode_0_ptr, &mode_0_idx, 
-                    &mode_1_ptr, &mode_1_idx, 
-                    &mode_2_ptr, &mode_2_idx, 
-                    &values, &order);
-        
         size_t size_mode_0_ptr = tensor.ptrs[0].size();
         size_t size_mode_1_ptr = tensor.ptrs[1].size();
         size_t size_mode_2_ptr = tensor.ptrs[2].size();
         size_t size_mode_0_idx = tensor.idxs[0].size();
         size_t size_mode_1_idx = tensor.idxs[1].size();
         size_t size_mode_2_idx = tensor.idxs[2].size();
+        size_t total_values = tensor.values.size();
+        
+        vector<uint64_t> dimensions(tensor.order);
+        for(int i = 0; i < tensor.order; i++){
+            dimensions[i] = tensor.dimensions[i];
+        }
+
+        getCSFArrays(tensor, &mode_0_ptr, &mode_0_idx, 
+                    &mode_1_ptr, &mode_1_idx, 
+                    &mode_2_ptr, &mode_2_idx, 
+                    &values, &order);
         
         // Calculate matrix dimensions based on contraction mode
-        uint64_t matrix_dim1 = getMatrixDim1(tensor.dimensions, ncm);
-        uint64_t matrix_dim2 = getMatrixDim2(tensor.dimensions, ncm);
-        uint64_t out_dim1 = getOutputDim1(tensor.dimensions, ncm);
+        uint64_t matrix_dim1 = getMatrixDim1(dimensions, ncm);
+        uint64_t matrix_dim2 = getMatrixDim2(dimensions, ncm);
+        uint64_t out_dim1 = getOutputDim1(dimensions, ncm);
         
         // Generate factor matrices
         double *arr_A = nullptr, *arr_B = nullptr;
@@ -430,8 +437,8 @@ int main(int argc, char* argv[]) {
             mode_2_ptr, mode_2_idx,
             values, arr_A, arr_B, arr_O,
             arr_A_size, arr_B_size, arr_O_size,
-            ncm, tensor.dimensions[0], tensor.dimensions[1], tensor.dimensions[2], rank1, rank2,
-            tensor.values.size(),
+            ncm, dimensions[0], dimensions[1], dimensions[2], rank1, rank2,
+            total_values,
             size_mode_0_ptr, size_mode_1_ptr, size_mode_2_ptr,
             size_mode_0_idx, size_mode_1_idx, size_mode_2_idx
         );
@@ -455,7 +462,7 @@ int main(int argc, char* argv[]) {
                 mode_2_ptr, mode_2_idx,
                 values, arr_A, arr_B, ref_O,
                 arr_A_size, arr_B_size, arr_O_size, ncm,
-                tensor.dimensions[0], tensor.dimensions[1], tensor.dimensions[2], rank1, rank2
+                dimensions[0], dimensions[1], dimensions[2], rank1, rank2
             );
             
             auto ref_end = std::chrono::high_resolution_clock::now();

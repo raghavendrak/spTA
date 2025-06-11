@@ -483,11 +483,6 @@ int main(int argc, char* argv[]) {
         double *values;
         int order;
         
-        getCSFArrays(tensor, &mode_0_ptr, &mode_0_idx, 
-                    &mode_1_ptr, &mode_1_idx, 
-                    &mode_2_ptr, &mode_2_idx, 
-                    &values, &order);
-        
         size_t size_mode_0_ptr = tensor.ptrs[0].size();
         size_t size_mode_1_ptr = tensor.ptrs[1].size();
         size_t size_mode_2_ptr = tensor.ptrs[2].size();
@@ -496,10 +491,20 @@ int main(int argc, char* argv[]) {
         size_t size_mode_2_idx = tensor.idxs[2].size();
         size_t total_values = tensor.values.size();
         
+        vector<uint64_t> dimensions(tensor.order);
+        for(int i = 0; i < tensor.order; i++){
+            dimensions[i] = tensor.dimensions[i];
+        }
+
+        getCSFArrays(tensor, &mode_0_ptr, &mode_0_idx, 
+                    &mode_1_ptr, &mode_1_idx, 
+                    &mode_2_ptr, &mode_2_idx, 
+                    &values, &order);
+        
         // Calculate matrix dimensions based on contraction mode
-        uint64_t matrix_dim1 = getMatrixDim1(tensor.dimensions, ncm);
-        uint64_t matrix_dim2 = getMatrixDim2(tensor.dimensions, ncm);
-        uint64_t out_dim1 = getOutputDim1(tensor.dimensions, ncm);
+        uint64_t matrix_dim1 = getMatrixDim1(dimensions, ncm);
+        uint64_t matrix_dim2 = getMatrixDim2(dimensions, ncm);
+        uint64_t out_dim1 = getOutputDim1(dimensions, ncm);
         
         // Generate factor matrices
         double *arr_A = nullptr, *arr_B = nullptr;
@@ -557,8 +562,8 @@ int main(int argc, char* argv[]) {
             mode_2_ptr, mode_2_idx,
             values, arr_A, arr_B, arr_O,
             arr_A_size, arr_B_size, arr_O_size,
-            ncm, tensor.dimensions[0], tensor.dimensions[1], tensor.dimensions[2], rank1, rank2,
-            tensor.values.size(),
+            ncm, dimensions[0], dimensions[1], dimensions[2], rank1, rank2,
+            total_values,
             size_mode_0_ptr, size_mode_1_ptr, size_mode_2_ptr,
             size_mode_0_idx, size_mode_1_idx, size_mode_2_idx
         );
@@ -590,7 +595,7 @@ int main(int argc, char* argv[]) {
                 mode_2_ptr, mode_2_idx,
                 values, arr_A, arr_B, ref_O,
                 arr_A_size, arr_B_size, arr_O_size, ncm,
-                tensor.dimensions[0], tensor.dimensions[1], tensor.dimensions[2], rank1, rank2
+                dimensions[0], dimensions[1], dimensions[2], rank1, rank2
             );
             
             auto ref_end = std::chrono::high_resolution_clock::now();
