@@ -284,10 +284,11 @@ void GPU_4loop_host_func(
     // cudaMemcpy(d_mode_0_ptr, mode_0_ptr, sizeof(uint64_t) * size_mode_0_ptr, cudaMemcpyHostToDevice);
     // cudaMemcpy(d_mode_0_idx, mode_0_idx, sizeof(uint64_t) * size_mode_0_idx, cudaMemcpyHostToDevice);
     // cudaMemcpy(d_mode_1_ptr, mode_1_ptr, sizeof(uint64_t) * size_mode_1_ptr, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_mode_1_idx, mode_1_idx, sizeof(uint64_t) * size_mode_1_idx, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_mode_2_ptr, mode_2_ptr, sizeof(uint64_t) * size_mode_2_ptr, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_mode_2_idx, mode_2_idx, sizeof(uint64_t) * size_mode_2_idx, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_values, values, sizeof(double) * total_values, cudaMemcpyHostToDevice);
+
+    // cudaMemcpy(d_mode_1_idx, mode_1_idx, sizeof(uint64_t) * size_mode_1_idx, cudaMemcpyHostToDevice);
+    // cudaMemcpy(d_mode_2_ptr, mode_2_ptr, sizeof(uint64_t) * size_mode_2_ptr, cudaMemcpyHostToDevice);
+    // cudaMemcpy(d_mode_2_idx, mode_2_idx, sizeof(uint64_t) * size_mode_2_idx, cudaMemcpyHostToDevice);
+    // cudaMemcpy(d_values, values, sizeof(double) * total_values, cudaMemcpyHostToDevice);
     cudaMemcpy(d_arr_A, arr_A, sizeof(double) * arr_A_size, cudaMemcpyHostToDevice);
     cudaMemcpy(d_arr_B, arr_B, sizeof(double) * arr_B_size, cudaMemcpyHostToDevice);
     cudaMemcpy(d_arr_O, arr_O, sizeof(double) * arr_O_size, cudaMemcpyHostToDevice);
@@ -311,7 +312,7 @@ void GPU_4loop_host_func(
       cudaStreamCreate(&streams[itr]);
     }
     
-    // uint64_t mode_1_idx_offset, mode_2_ptr_offset, mode_2_idx_offset, mode_1_idx_num_elements;
+    uint64_t mode_1_idx_offset, mode_2_ptr_offset, mode_2_idx_offset, mode_1_idx_num_elements, mode_2_ptr_num_elements, mode_2_idx_num_elememts;
     // Launch kernels
     if (contraction == 0 || contraction == 1) {
       cout << "No. of streams = " << NUM_STREAMS <<endl;
@@ -324,14 +325,19 @@ void GPU_4loop_host_func(
         dim3 blockDim(32, 32);
         int sharedMemBytes = f2 * sizeof(double);
         
-        // mode_1_idx_offset = mode_1_ptr[i_ptr] ;
-        // mode_1_idx_num_elements = mode_1_ptr[i_ptr + 1] - mode_1_ptr[i_ptr];
-        // mode_2_ptr_offset = mode_2
-        // mode_2_idx_offset;
-        // cudaMemcpyAsync(d_mode_1_idx + mode_1_idx_offset, mode_1_idx + mode_1_idx_offset, sizeof(uint64_t) * mode_1_idx_num_elements, cudaMemcpyHostToDevice, streams[i_ptr%NUM_STREAMS]);
-        // cudaMemcpyAsync(d_mode_2_ptr + mode_2_ptr_offset, mode_2_ptr + mode_2_ptr_offset, sizeof(uint64_t) * mode_2_ptr_num_elements, cudaMemcpyHostToDevice);
-        // cudaMemcpyAsync(d_mode_2_idx + mode_2_idx_offset, mode_2_idx + mode_2_idx_offset, sizeof(uint64_t) * mode_2_idx_num_elememts, cudaMemcpyHostToDevice);
-        // cudaMemcpyAsync(d_values + mode_2_idx_offset, values + mode_2_idx_offset, sizeof(double) * mode_2_idx_num_elememts, cudaMemcpyHostToDevice);
+        mode_1_idx_offset = mode_1_ptr[i_ptr] ;
+        mode_1_idx_num_elements = mode_1_ptr[i_ptr + 1] - mode_1_ptr[i_ptr];
+
+        mode_2_ptr_offset = mode_1_idx_offset;
+        mode_2_ptr_num_elements = mode_1_idx_num_elements + 1;
+
+        mode_2_idx_offset = mode_2_ptr[mode_2_ptr_offset];
+        mode_2_idx_num_elememts = mode_2_ptr[mode_1_ptr[i_ptr + 1]] - mode_2_ptr[mode_2_ptr_offset];
+
+        cudaMemcpyAsync(d_mode_1_idx + mode_1_idx_offset, mode_1_idx + mode_1_idx_offset, sizeof(uint64_t) * mode_1_idx_num_elements, cudaMemcpyHostToDevice, streams[i_ptr%NUM_STREAMS]);
+        cudaMemcpyAsync(d_mode_2_ptr + mode_2_ptr_offset, mode_2_ptr + mode_2_ptr_offset, sizeof(uint64_t) * mode_2_ptr_num_elements, cudaMemcpyHostToDevice, streams[i_ptr%NUM_STREAMS]);
+        cudaMemcpyAsync(d_mode_2_idx + mode_2_idx_offset, mode_2_idx + mode_2_idx_offset, sizeof(uint64_t) * mode_2_idx_num_elememts, cudaMemcpyHostToDevice, streams[i_ptr%NUM_STREAMS]);
+        cudaMemcpyAsync(d_values + mode_2_idx_offset, values + mode_2_idx_offset, sizeof(double) * mode_2_idx_num_elememts, cudaMemcpyHostToDevice, streams[i_ptr%NUM_STREAMS]);
         
         //TO-DO: Instead, use cudaStreamQuery to find idle streams and then assign work. will it improve performance? No I think
         GPU_4loop_streams<<<gridDim, blockDim, sharedMemBytes, streams[i_ptr%NUM_STREAMS]>>>(
@@ -491,6 +497,15 @@ int main(int argc, char* argv[]) {
         size_t size_mode_2_idx = tensor.idxs[2].size();
         size_t total_values = tensor.values.size();
         
+        if(verbose) {
+          cout << "size_mode_0_ptr = " << size_mode_0_ptr << endl;
+          cout << "size_mode_1_ptr = " << size_mode_1_ptr << endl;
+          cout << "size_mode_2_ptr = " << size_mode_2_ptr << endl;
+          cout << "size_mode_0_idx = " << size_mode_0_idx << endl;
+          cout << "size_mode_1_idx = " << size_mode_1_idx << endl;
+          cout << "size_mode_2_idx = " << size_mode_2_idx << endl;
+          cout << "total_values = " << total_values << endl;
+        }
         vector<uint64_t> dimensions(tensor.order);
         for(int i = 0; i < tensor.order; i++){
             dimensions[i] = tensor.dimensions[i];
@@ -615,9 +630,9 @@ int main(int argc, char* argv[]) {
             }
         } else {
             if (verify) {
-                cout << "Method: GPU 4-loop streams, Time: " << duration / 1000.0 << " ms, Validation: " << (valid ? "PASSED" : "FAILED") << endl;
+                cout << "Method: GPU_4L_streams, Time: " << duration / 1000.0 << " ms, Validation: " << (valid ? "PASSED" : "FAILED") << endl;
             } else {
-                cout << "Method: GPU 4-loop streams, Time: " << duration / 1000.0 << " ms" << endl;
+                cout << "Method: GPU_4L_streams, Time: " << duration / 1000.0 << " ms" << endl;
             }
         }
         
