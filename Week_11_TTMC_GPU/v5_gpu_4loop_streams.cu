@@ -21,7 +21,89 @@ do {                                                                            
 
 /////////////////////////////////////////////////////////////////////
 /*Start of device function for GPU 4 loop Method using STREAMS*/
-__global__ void GPU_4loop_streams(
+__global__ void GPU_4loop_streams_ncm_0(
+  // uint64_t* mode_1_ptr,
+  uint64_t* mode_1_idx,
+  uint64_t* mode_2_ptr, uint64_t* mode_2_idx,
+  double* values, double* arr_A, double* arr_B,  
+  double* arr_O, uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, int ncm,
+  int size_mode_0_ptr, int size_mode_1_ptr, int size_mode_2_ptr,
+  int size_mode_0_idx, int size_mode_1_idx, int size_mode_2_idx, uint64_t i, uint64_t j_ptr_offset, int stream_id
+)
+{
+  extern __shared__ double buf[];
+  uint64_t j, j_ptr, k, k_ptr, k_ptr_offset, index_A, index_B, index_O ;
+  int r, s, r_offset, s_offset, WARP_SIZE = 32;
+  double value, A_val;
+  unsigned mask;
+
+  j_ptr = j_ptr_offset + blockIdx.x;
+  j = mode_1_idx[j_ptr];
+  // uint64_t nnz_k = mode_2_ptr[j_ptr+1] - mode_2_ptr[j_ptr];
+  
+  int buf_index = threadIdx.y * blockDim.x + threadIdx.x;
+
+  //NOTE; WORKS ONLY IF f2 < 1024
+  if(buf_index < f2){
+    buf[buf_index] = 0.0;
+  }
+  __syncthreads();
+
+  // parallelize s across warps
+  // block dimesion is 32 x 32. 
+  // hence, each row of thread block will form a warp 
+  // each row of thread block(a warp) picks a k, thus a nonzero of input tensor
+  for(k_ptr_offset = mode_2_ptr[j_ptr]; k_ptr_offset < mode_2_ptr[j_ptr + 1]; k_ptr_offset += blockDim.x){
+    k_ptr =  k_ptr_offset + threadIdx.x;
+    if(k_ptr < mode_2_ptr[j_ptr + 1]){
+      
+      value = values[k_ptr];
+      k = mode_2_idx[k_ptr];
+      
+      //Each thread in a warp picks a 's'
+      for(s_offset = 0; s_offset < f2; s_offset += blockDim.y){ 
+        s = s_offset + threadIdx.y;
+        if(s < f2){
+          mask = __activemask();
+          index_B = k * f2 + s;
+          double prod_val = value * arr_B[index_B];
+
+          for(int shuffle_offset = WARP_SIZE/2; shuffle_offset > 0; shuffle_offset>>=1){
+            prod_val += __shfl_down_sync(mask, prod_val, shuffle_offset);
+          }
+          if(threadIdx.x == 0) buf[s] += prod_val;
+        //   atomicAdd(&buf[s], value * arr_B[index_B] );
+        }
+      }
+    }
+  }
+  __syncthreads();
+
+  //////////////////////////////////////////////////////////////////////////////////
+  // parallelize 'r' across warps
+  // block dimesion is 32 x 32. 
+  // hence, each row of thread block will form a warp 
+  // each row of thread block(a warp) picks a 'r'
+  for(r_offset = 0; r_offset < f1; r_offset += blockDim.y){
+    r = r_offset + threadIdx.y;
+    if(r < f1){
+      index_A = j * f1 + r;
+      A_val = arr_A[index_A];
+      //Each thread in a warp picks a 's'
+      for(s_offset = 0; s_offset < f2; s_offset += blockDim.x){
+        s = s_offset + threadIdx.x;
+        if(s < f2){
+          index_O = stream_id * f1 * f2 + r * f2  + s;
+          //atomic add is required since different threadblocks in the same stream has same i
+          atomicAdd(&arr_O[index_O], buf[s] * A_val);
+        }
+      }
+      
+    }
+  }
+  
+}
+__global__ void GPU_4loop_streams_ncm_1(
   // uint64_t* mode_1_ptr,
   uint64_t* mode_1_idx,
   uint64_t* mode_2_ptr, uint64_t* mode_2_idx,
@@ -78,51 +160,30 @@ __global__ void GPU_4loop_streams(
     }
   }
   __syncthreads();
-  
+
   //////////////////////////////////////////////////////////////////////////////////
   // parallelize 'r' across warps
   // block dimesion is 32 x 32. 
   // hence, each row of thread block will form a warp 
   // each row of thread block(a warp) picks a 'r'
-  if(ncm == 0){
-    for(r_offset = 0; r_offset < f1; r_offset += blockDim.y){
-      r = r_offset + threadIdx.y;
-      if(r < f1){
-        index_A = j * f1 + r;
-        A_val = arr_A[index_A];
-        //Each thread in a warp picks a 's'
-        for(s_offset = 0; s_offset < f2; s_offset += blockDim.x){
-          s = s_offset + threadIdx.x;
-          if(s < f2){
-            index_O = i * f1 * f2 + r * f2  + s;
-            //atomic add is required since different threadblocks in the same stream has same i
-            atomicAdd(&arr_O[index_O], buf[s] * A_val);
-          }
+  for(r_offset = 0; r_offset < f1; r_offset += blockDim.y){
+    r = r_offset + threadIdx.y;
+    if(r < f1){
+      index_A = i * f1 + r;
+      A_val = arr_A[index_A];
+      //Each thread in a warp picks a 's'
+      for(s_offset = 0; s_offset < f2; s_offset += blockDim.x){
+        s = s_offset + threadIdx.x;
+        if(s < f2){
+          index_O = j * f1 * f2 + r * f2  + s;
+          //atomic add is required since different threadblocks in the same stream has same i
+          atomicAdd(&arr_O[index_O], buf[s] * A_val);
         }
-        
       }
+      
     }
   }
-  else if(ncm == 1){
-    for(r_offset = 0; r_offset < f1; r_offset += blockDim.y){
-      r = r_offset + threadIdx.y;
-      if(r < f1){
-        index_A = i * f1 + r;
-        A_val = arr_A[index_A];
-        //Each thread in a warp picks a 's'
-        for(s_offset = 0; s_offset < f2; s_offset += blockDim.x){
-          s = s_offset + threadIdx.x;
-          if(s < f2){
-            index_O = j * f1 * f2 + r * f2  + s;
-            //atomic add is required since different threadblocks in the same stream has same i
-            atomicAdd(&arr_O[index_O], buf[s] * A_val);
-          }
-        }
-        
-      }
-    }
-  }
-  // __syncthreads();
+  
 }
 
 __global__ void GPU_4loop_streams_ncm_2_part_1(
@@ -270,7 +331,7 @@ void GPU_4loop_host_func(
     cudaMalloc(&d_values, sizeof(double) * total_values);
     cudaMalloc(&d_arr_A, sizeof(double) * arr_A_size);
     cudaMalloc(&d_arr_B, sizeof(double) * arr_B_size);
-    cudaMalloc(&d_arr_O, sizeof(double) * arr_O_size);
+    if(contraction != 0) cudaMalloc(&d_arr_O, sizeof(double) * arr_O_size);
   
   
     // // parallelising 'j_ptr' for contraction = 0 and contraction = 1 :
@@ -291,8 +352,8 @@ void GPU_4loop_host_func(
     // cudaMemcpy(d_values, values, sizeof(double) * total_values, cudaMemcpyHostToDevice);
     cudaMemcpy(d_arr_A, arr_A, sizeof(double) * arr_A_size, cudaMemcpyHostToDevice);
     cudaMemcpy(d_arr_B, arr_B, sizeof(double) * arr_B_size, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_arr_O, arr_O, sizeof(double) * arr_O_size, cudaMemcpyHostToDevice);
-    
+    // cudaMemcpy(d_arr_O, arr_O, sizeof(double) * arr_O_size, cudaMemcpyHostToDevice);
+    if(contraction != 0) cudaMemset(d_arr_O, 0, sizeof(double) * arr_O_size);
     
     // // parallelising 'j_ptr' for contraction = 0 and contraction = 1 :
     // cudaMemset(buffer_for_contraction_0_1, 0, f2 * size_mode_1_idx * sizeof(double));
@@ -314,7 +375,48 @@ void GPU_4loop_host_func(
     
     uint64_t mode_1_idx_offset, mode_2_ptr_offset, mode_2_idx_offset, mode_1_idx_num_elements, mode_2_ptr_num_elements, mode_2_idx_num_elememts;
     // Launch kernels
-    if (contraction == 0 || contraction == 1) {
+    if (contraction == 0 ) {
+      cout << "No. of streams = " << NUM_STREAMS <<endl;
+      cudaMalloc(&d_arr_O, NUM_STREAMS * f1 * f2 * sizeof(double) );
+
+      for (uint64_t i_ptr = 0; i_ptr < mode_0_ptr[1]; ++i_ptr) {
+        i = mode_0_idx[i_ptr];
+        j_ptr_offset = mode_1_ptr[i_ptr];
+        
+        // int blocksPerGrid = mode_1_ptr[i_ptr + 1] - mode_1_ptr[i_ptr];
+        dim3 gridDim(mode_1_ptr[i_ptr + 1] - mode_1_ptr[i_ptr]);
+        dim3 blockDim(32, 32);
+        int sharedMemBytes = f2 * sizeof(double);
+        
+        mode_1_idx_offset = mode_1_ptr[i_ptr] ;
+        mode_1_idx_num_elements = mode_1_ptr[i_ptr + 1] - mode_1_ptr[i_ptr];
+
+        mode_2_ptr_offset = mode_1_idx_offset;
+        mode_2_ptr_num_elements = mode_1_idx_num_elements + 1;
+
+        mode_2_idx_offset = mode_2_ptr[mode_2_ptr_offset];
+        mode_2_idx_num_elememts = mode_2_ptr[mode_1_ptr[i_ptr + 1]] - mode_2_ptr[mode_2_ptr_offset];
+
+        cudaMemcpyAsync(d_mode_1_idx + mode_1_idx_offset, mode_1_idx + mode_1_idx_offset, sizeof(uint64_t) * mode_1_idx_num_elements, cudaMemcpyHostToDevice, streams[i_ptr%NUM_STREAMS]);
+        cudaMemcpyAsync(d_mode_2_ptr + mode_2_ptr_offset, mode_2_ptr + mode_2_ptr_offset, sizeof(uint64_t) * mode_2_ptr_num_elements, cudaMemcpyHostToDevice, streams[i_ptr%NUM_STREAMS]);
+        cudaMemcpyAsync(d_mode_2_idx + mode_2_idx_offset, mode_2_idx + mode_2_idx_offset, sizeof(uint64_t) * mode_2_idx_num_elememts, cudaMemcpyHostToDevice, streams[i_ptr%NUM_STREAMS]);
+        cudaMemcpyAsync(d_values + mode_2_idx_offset, values + mode_2_idx_offset, sizeof(double) * mode_2_idx_num_elememts, cudaMemcpyHostToDevice, streams[i_ptr%NUM_STREAMS]);
+        cudaMemset(d_arr_O + (i_ptr % NUM_STREAMS) * f1 * f2, 0, f1 * f2 * sizeof(double) );
+        
+        //TO-DO: Instead, use cudaStreamQuery to find idle streams and then assign work. will it improve performance? No I think
+        GPU_4loop_streams_ncm_0<<<gridDim, blockDim, sharedMemBytes, streams[i_ptr%NUM_STREAMS]>>>(
+          // d_mode_1_ptr, 
+          d_mode_1_idx, d_mode_2_ptr, d_mode_2_idx,
+          d_values, d_arr_A, d_arr_B, d_arr_O, l, m, n, f1, f2, contraction,
+          size_mode_0_ptr, size_mode_1_ptr, size_mode_2_ptr,
+          size_mode_0_idx, size_mode_1_idx, size_mode_2_idx,
+          i, j_ptr_offset, i_ptr%NUM_STREAMS
+        );
+        cudaMemcpyAsync(arr_O + i * f1 * f2, d_arr_O + (i_ptr % NUM_STREAMS) * f1 * f2, f1 * f2 * sizeof(double), cudaMemcpyDeviceToHost, streams[i_ptr%NUM_STREAMS]);
+        cudaGetLastError();  // Check launch err;
+      }
+    }
+    if ( contraction == 1) {
       cout << "No. of streams = " << NUM_STREAMS <<endl;
       for (uint64_t i_ptr = 0; i_ptr < mode_0_ptr[1]; ++i_ptr) {
         i = mode_0_idx[i_ptr];
@@ -340,7 +442,7 @@ void GPU_4loop_host_func(
         cudaMemcpyAsync(d_values + mode_2_idx_offset, values + mode_2_idx_offset, sizeof(double) * mode_2_idx_num_elememts, cudaMemcpyHostToDevice, streams[i_ptr%NUM_STREAMS]);
         
         //TO-DO: Instead, use cudaStreamQuery to find idle streams and then assign work. will it improve performance? No I think
-        GPU_4loop_streams<<<gridDim, blockDim, sharedMemBytes, streams[i_ptr%NUM_STREAMS]>>>(
+        GPU_4loop_streams_ncm_1<<<gridDim, blockDim, sharedMemBytes, streams[i_ptr%NUM_STREAMS]>>>(
           // d_mode_1_ptr, 
           d_mode_1_idx, d_mode_2_ptr, d_mode_2_idx,
           d_values, d_arr_A, d_arr_B, d_arr_O, l, m, n, f1, f2, contraction,
@@ -411,7 +513,9 @@ void GPU_4loop_host_func(
 
   
     // Copy results back to host
-    cudaMemcpy(arr_O, d_arr_O, sizeof(double) * arr_O_size, cudaMemcpyDeviceToHost);
+    if(contraction != 0){
+      cudaMemcpy(arr_O, d_arr_O, sizeof(double) * arr_O_size, cudaMemcpyDeviceToHost);
+    }
   
     // Free device memory
     // cudaFree(d_mode_0_ptr);
