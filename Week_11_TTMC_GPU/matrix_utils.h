@@ -26,7 +26,7 @@ bool compare_results(double*& C1, double*& C2, uint64_t size,  double tolerance 
 {
   for (int i = 0; i < size ; ++i) {
     if (std::fabs(C1[i] - C2[i]) > tolerance) {
-      std::cout << " NOT matching at i : " << i << std::endl;
+      std::cout << " output NOT matching at index : " << i << std::endl;
       for(int j = i; j < i + 10; ++j){
         if(j < size){
           std::cout << "C1[" << j << "] = " << C1[j] << " C2[" << j << "] = " << C2[j] << std::endl;

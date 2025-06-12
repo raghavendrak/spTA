@@ -200,7 +200,7 @@ def format_time(time_value):
         return "N/A"
     
     if time_value >= 1e6:
-        return f"{time_value/1e6:.2f}s (x10⁶)"
+        return f"{time_value/1e6:.2f}x10⁶ s"
     elif time_value >= 1e3:
         return f"{time_value/1e3:.2f}s"
     else:

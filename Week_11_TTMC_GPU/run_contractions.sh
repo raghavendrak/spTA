@@ -22,7 +22,7 @@
 #    ./run_contractions.sh --verify
 #
 # 7. Run with all options:
-#    ./run_contractions.sh /path/to/file.csf -v --verbose -r1 30 -r2 60 --ncm 1 --verify
+#    ./run_contractions.sh /path/to/file.csf  --verbose -r1 30 -r2 60 --ncm 1 --verify
 #
 # Note: Script requires NVIDIA GPU and CUDA toolkit to be installed
 # as it compiles and runs the CUDA-based implementations
@@ -34,7 +34,7 @@ rm -f ttmc_v*
 echo "Finding contraction methods..."
 method_files=(v*.cu)
 method_numbers=()
-skip_methods=(1)  # Skip method 1 (v1_cpu_5loop.cu)
+skip_methods=(1  6)  # Skip method 1 (v1_cpu_5loop.cu)
 
 for file in "${method_files[@]}"; do
     if [[ $file =~ v([0-9]+)_ ]]; then
@@ -277,10 +277,10 @@ process_all_csf_files() {
 generate_plots() {
     echo "Generating performance plots..."
     if [ -n "$NCM" ]; then
-        python parse_logs.py "TTMC_ncm_${NCM}.log" -o "speedup_ncm_${NCM}.png"
+        python parse_logs.py "TTMC_ncm_${NCM}.log" -o "speedup_ncm_${NCM}.png" -s "v2"
     else
         for ncm in 0 1 2; do
-            python parse_logs.py "TTMC_ncm_${ncm}.log" -o "speedup_ncm_${ncm}.png"
+            python parse_logs.py "TTMC_ncm_${ncm}.log" -o "speedup_ncm_${ncm}.png" -s "v2"
         done
     fi
 }
