@@ -19,6 +19,7 @@ process_tensor() {
     local tns_file="$1"
     
     # Skip if not a .tns file with exact extension
+    # if [[ "$tns_file" != *sib_3d.tns ]]; then
     if [[ "$tns_file" != *.tns ]]; then
         echo "Skipping $tns_file (not a .tns file)"
         return

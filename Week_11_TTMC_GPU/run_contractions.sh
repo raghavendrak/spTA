@@ -34,7 +34,7 @@ rm -f ttmc_v*
 echo "Finding contraction methods..."
 method_files=(v*.cu)
 method_numbers=()
-skip_methods=(1  6)  # Skip method 1 (v1_cpu_5loop.cu)
+skip_methods=(1 2 6)  # Skip method 1 (v1_cpu_5loop.cu)
 
 for file in "${method_files[@]}"; do
     if [[ $file =~ v([0-9]+)_ ]]; then
@@ -222,9 +222,9 @@ run_contractions() {
                 echo "---------------------------------" >> "$log_file"
             else
                 # Run all three contraction types
-                for ncm in 0 1 2; do
+                for ncm in 0 1 ; do
                     local log_file="TTMC_ncm_${ncm}.log"
-                    echo "Running contraction type $ncm on $csf_file..." >> "$log_file"
+                    echo "Running contraction on $csf_file..." >> "$log_file"
                     
                     # Add NCM option
                     local ncm_cmd_options=("${cmd_options[@]}" "-n" "$ncm")
@@ -271,6 +271,18 @@ process_all_csf_files() {
     find "$dir" -maxdepth 1 -name "*.csf" | while read -r file; do
         run_contractions "$file"
     done
+
+    if [ -z "$NCM" ]; then
+        for ncm in 0 1 ; do
+            local log_file="TTMC_ncm_${ncm}.log"
+            echo "Timestamp: $(date)" >> "$log_file"
+            echo "---------------------------------" >> "$log_file"
+        done
+    else
+        local log_file="TTMC_ncm_${NCM}.log"
+        echo "Timestamp: $(date)" >> "$log_file"
+        echo "---------------------------------" >> "$log_file"
+    fi
 }
 
 # Generate performance plots
