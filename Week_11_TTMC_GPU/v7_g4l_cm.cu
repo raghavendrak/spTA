@@ -21,7 +21,7 @@ do {                                                                            
 
 /////////////////////////////////////////////////////////////////////
 /*Start of device function for GPU 4 loop Method using COALESCED MEMORY*/
-__global__ void GPU_4L_CM_device_func( 
+__global__ void GPU_4L_CM_device_func_ncm_0( 
   const uint64_t* __restrict__ mode_0_ptr, const uint64_t* __restrict__ mode_0_idx,
   const uint64_t* __restrict__ mode_1_ptr, const uint64_t* __restrict__ mode_1_idx,
   const uint64_t* __restrict__ mode_2_ptr, const uint64_t* __restrict__ mode_2_idx,
@@ -31,37 +31,45 @@ __global__ void GPU_4L_CM_device_func(
   int size_mode_0_idx, int size_mode_1_idx, int size_mode_2_idx, int num_warps)
 {
   extern __shared__ double buf[];
-  int buf_size = num_warps * f2;
+  // int buf_size = num_warps * f2;
+  int buf_index;
   
   uint64_t i_ptr = blockIdx.x;
   uint64_t i =  mode_0_idx[i_ptr];
 
   uint64_t warp_size = 32;
   uint64_t warp_id = threadIdx.x / warp_size;
+  int tid_in_warp = threadIdx.x % warp_size;
 
   for(uint64_t j_ptr_offset = mode_1_ptr[i_ptr]; j_ptr_offset < mode_1_ptr[i_ptr + 1]; j_ptr_offset += num_warps){
     uint64_t j_ptr =  j_ptr_offset + warp_id;
     if(j_ptr < mode_1_ptr[i_ptr + 1]){
       uint64_t j = mode_1_idx[j_ptr];
 
-      for(int buf_index = threadIdx.x; buf_index < buf_size; buf_index+= blockDim.x)
-        buf[buf_index] = 0.0;
-      __syncthreads();
+      // for(int buf_index = threadIdx.x; buf_index < buf_size; buf_index+= blockDim.x)
+      //   buf[buf_index] = 0.0;
+      for(int buf_idx_offset = warp_id * f2; buf_idx_offset < (warp_id + 1)* f2; buf_idx_offset += warp_size){
+        buf_index = buf_idx_offset + tid_in_warp;
+        if(buf_index < (warp_id + 1)* f2){
+          buf[buf_index] = 0.0;
+        }
+      }
+      // __syncthreads();
 
       for(uint64_t k_ptr = mode_2_ptr[j_ptr]; k_ptr < mode_2_ptr[j_ptr + 1]; ++k_ptr){
         uint64_t k = mode_2_idx[k_ptr];
 
         for(uint64_t s_offset = 0; s_offset < f2; s_offset += warp_size){
-          uint64_t s = s_offset + threadIdx.x % warp_size;
+          uint64_t s = s_offset + tid_in_warp;
           if(s < f2){
             atomicAdd(&buf[warp_id * f2 + s], values[k_ptr] * arr_B[k * f2 + s]);
           }
         }
       }
-      __syncthreads();
+      // __syncthreads(); - not required because single warp execute the code serially
 
       for(uint64_t r_offset = 0; r_offset < f1; r_offset += warp_size){
-        uint64_t r = r_offset + threadIdx.x % warp_size;
+        uint64_t r = r_offset + tid_in_warp;
         if(r < f1){
           for(uint64_t s = 0; s < f2; ++s){
             atomicAdd(&arr_O[i * f1* f2 + r * f2 + s], buf[warp_id * f2 + s] * arr_A[j * f1 + r]);
@@ -71,9 +79,68 @@ __global__ void GPU_4L_CM_device_func(
       
     }
   }
-    
-
 }
+
+__global__ void GPU_4L_CM_device_func_ncm_1( 
+  const uint64_t* __restrict__ mode_0_ptr, const uint64_t* __restrict__ mode_0_idx,
+  const uint64_t* __restrict__ mode_1_ptr, const uint64_t* __restrict__ mode_1_idx,
+  const uint64_t* __restrict__ mode_2_ptr, const uint64_t* __restrict__ mode_2_idx,
+  const double* __restrict__ values, double* arr_A,  double* arr_B,  double* arr_O,
+  uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, uint64_t total_values,
+  int size_mode_0_ptr, int size_mode_1_ptr, int size_mode_2_ptr,
+  int size_mode_0_idx, int size_mode_1_idx, int size_mode_2_idx, int num_warps)
+{
+  extern __shared__ double buf[];
+  int buf_index;
+  
+  uint64_t i_ptr = blockIdx.x;
+  uint64_t i =  mode_0_idx[i_ptr];
+
+  uint64_t warp_size = 32;
+  uint64_t warp_id = threadIdx.x / warp_size;
+  int tid_in_warp = threadIdx.x % warp_size;
+
+  for(uint64_t j_ptr_offset = mode_1_ptr[i_ptr]; j_ptr_offset < mode_1_ptr[i_ptr + 1]; j_ptr_offset += num_warps){
+    uint64_t j_ptr =  j_ptr_offset + warp_id;
+    if(j_ptr < mode_1_ptr[i_ptr + 1]){
+      uint64_t j = mode_1_idx[j_ptr];
+
+      for(int buf_idx_offset = warp_id * f2; buf_idx_offset < (warp_id + 1)* f2; buf_idx_offset += warp_size){
+        buf_index = buf_idx_offset + tid_in_warp;
+        if(buf_index < (warp_id + 1)* f2){
+          buf[buf_index] = 0.0;
+        }
+      }
+      // __syncthreads();
+
+      for(uint64_t k_ptr = mode_2_ptr[j_ptr]; k_ptr < mode_2_ptr[j_ptr + 1]; ++k_ptr){
+        uint64_t k = mode_2_idx[k_ptr];
+
+        for(uint64_t s_offset = 0; s_offset < f2; s_offset += warp_size){
+          uint64_t s = s_offset + tid_in_warp;
+          if(s < f2){
+            atomicAdd(&buf[warp_id * f2 + s], values[k_ptr] * arr_B[k * f2 + s]);
+          }
+        }
+      }
+      // __syncthreads();
+
+      for(uint64_t r_offset = 0; r_offset < f1; r_offset += warp_size){
+        uint64_t r = r_offset + tid_in_warp;
+        if(r < f1){
+          for(uint64_t s = 0; s < f2; ++s){
+            atomicAdd(&arr_O[j * f1* f2 + r * f2 + s], buf[warp_id * f2 + s] * arr_A[i * f1 + r]);
+          }
+        }
+      }
+      
+    }
+  }
+}
+
+
+
+
 
 /*End of device function for GPU 4 loop Method using COALESCED MEMORY*/
 /////////////////////////////////////////////////////////////////////
@@ -127,7 +194,7 @@ void GPU_4L_CM_host_func(
       int num_warps = (block_size + warp_size - 1) / warp_size;
       int sharedMemBytes =  num_warps * f2 * sizeof(double);
       
-      GPU_4L_CM_device_func<<<grid_size, block_size, sharedMemBytes, 0>>>(
+      GPU_4L_CM_device_func_ncm_0<<<grid_size, block_size, sharedMemBytes>>>(
         d_mode_0_ptr, d_mode_0_idx,
         d_mode_1_ptr, d_mode_1_idx,
         d_mode_2_ptr, d_mode_2_idx,
@@ -135,8 +202,24 @@ void GPU_4L_CM_host_func(
         size_mode_0_ptr, size_mode_1_ptr, size_mode_2_ptr,
         size_mode_0_idx, size_mode_1_idx, size_mode_2_idx, num_warps
       );
-      cudaGetLastError();  // Check launch err;
+    }
+    else if (contraction == 1) {
+    
+      // dim3 gridDim(size_mode_0_idx);
+      int grid_size = size_mode_0_idx;
+      // dim3 blockDim(1024);
+      int block_size = 1024, warp_size = 32;
+      int num_warps = (block_size + warp_size - 1) / warp_size;
+      int sharedMemBytes =  num_warps * f2 * sizeof(double);
       
+      GPU_4L_CM_device_func_ncm_1<<<grid_size, block_size, sharedMemBytes>>>(
+        d_mode_0_ptr, d_mode_0_idx,
+        d_mode_1_ptr, d_mode_1_idx,
+        d_mode_2_ptr, d_mode_2_idx,
+        d_values, d_arr_A, d_arr_B, d_arr_O, l, m, n, f1, f2, total_values,
+        size_mode_0_ptr, size_mode_1_ptr, size_mode_2_ptr,
+        size_mode_0_idx, size_mode_1_idx, size_mode_2_idx, num_warps
+      );
     }
     /*
     else if(contraction == 2){
@@ -277,6 +360,17 @@ int main(int argc, char* argv[]) {
         size_t size_mode_1_idx = tensor.idxs[1].size();
         size_t size_mode_2_idx = tensor.idxs[2].size();
         size_t total_values = tensor.values.size();
+
+        if (verbose) {
+          cout
+            << "size_mode_0_ptr = " << size_mode_0_ptr << "\n"
+            << "size_mode_1_ptr = " << size_mode_1_ptr << "\n"
+            << "size_mode_2_ptr = " << size_mode_2_ptr << "\n"
+            << "size_mode_0_idx = " << size_mode_0_idx << "\n"
+            << "size_mode_1_idx = " << size_mode_1_idx << "\n"
+            << "size_mode_2_idx = " << size_mode_2_idx << "\n"
+            << "total_values    = " << total_values    << endl;
+        }
         
         vector<uint64_t> dimensions(tensor.order);
         for(int i = 0; i < tensor.order; i++){
