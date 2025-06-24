@@ -23,9 +23,9 @@ do {                                                                            
 /*Start of device function for GPU 4 loop Method using STREAMS*/
 __global__ void GPU_4loop_streams(
   // uint64_t* mode_1_ptr,
-  uint64_t* mode_1_idx,
-  uint64_t* mode_2_ptr, uint64_t* mode_2_idx,
-  double* values, double* arr_A, double* arr_B,  
+  const uint64_t* __restrict__ mode_1_idx,
+  const uint64_t* __restrict__ mode_2_ptr, const uint64_t* __restrict__ mode_2_idx,
+  const double* __restrict__ values, const double* __restrict__ arr_A, const double* __restrict__ arr_B,  
   double* arr_O, uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, int ncm,
   int size_mode_0_ptr, int size_mode_1_ptr, int size_mode_2_ptr,
   int size_mode_0_idx, int size_mode_1_idx, int size_mode_2_idx, uint64_t i, uint64_t j_ptr_offset
@@ -607,7 +607,7 @@ int main(int argc, char* argv[]) {
         
         // Report results
         if (verbose) {
-            cout << "GPU 4-loop streams execution time: " << duration / 1000.0 << " ms" << endl;
+            cout << "Method: GPU_4L_streams, Time: " << duration / 1000.0 << " ms" << endl;
             if (verify) {
                 cout << "Reference execution time: " << ref_duration / 1000.0 << " ms" << endl;
                 cout << "Speedup over reference: " << (double)ref_duration / duration << "x" << endl;
@@ -615,9 +615,9 @@ int main(int argc, char* argv[]) {
             }
         } else {
             if (verify) {
-                cout << "Method: GPU 4-loop streams, Time: " << duration / 1000.0 << " ms, Validation: " << (valid ? "PASSED" : "FAILED") << endl;
+                cout << "Method: GPU_4L_streams, Time: " << duration / 1000.0 << " ms, Validation: " << (valid ? "PASSED" : "FAILED") << endl;
             } else {
-                cout << "Method: GPU 4-loop streams, Time: " << duration / 1000.0 << " ms" << endl;
+                cout << "Method: GPU_4L_streams, Time: " << duration / 1000.0 << " ms" << endl;
             }
         }
         
