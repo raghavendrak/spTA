@@ -68,10 +68,10 @@ __global__ void GPU_4L_CM_device_func_ncm_0(
       }
       // __syncthreads(); - not required because single warp execute the code serially
 
-      for(uint64_t r_offset = 0; r_offset < f1; r_offset += warp_size){
-        uint64_t r = r_offset + tid_in_warp;
-        if(r < f1){
-          for(uint64_t s = 0; s < f2; ++s){
+      for(uint64_t r = 0; r < f1; ++r){
+        for(uint64_t s_offset = 0; s_offset < f2; s_offset += warp_size){
+          uint64_t s = s_offset + tid_in_warp;
+          if(s < f2){
             atomicAdd(&arr_O[i * f1* f2 + r * f2 + s], buf[warp_id * f2 + s] * arr_A[j * f1 + r]);
           }
         }
@@ -125,10 +125,10 @@ __global__ void GPU_4L_CM_device_func_ncm_1(
       }
       // __syncthreads();
 
-      for(uint64_t r_offset = 0; r_offset < f1; r_offset += warp_size){
-        uint64_t r = r_offset + tid_in_warp;
-        if(r < f1){
-          for(uint64_t s = 0; s < f2; ++s){
+      for(uint64_t r = 0; r < f1; ++r){
+        for(uint64_t s_offset = 0; s_offset < f2; s_offset += warp_size){
+          uint64_t s = s_offset + tid_in_warp;
+          if(s < f2){
             atomicAdd(&arr_O[j * f1* f2 + r * f2 + s], buf[warp_id * f2 + s] * arr_A[i * f1 + r]);
           }
         }
