@@ -290,7 +290,8 @@ void GPU_4loop_host_func(
     cudaMemcpy(d_values, values, sizeof(double) * total_values, cudaMemcpyHostToDevice);
     cudaMemcpy(d_arr_A, arr_A, sizeof(double) * arr_A_size, cudaMemcpyHostToDevice);
     cudaMemcpy(d_arr_B, arr_B, sizeof(double) * arr_B_size, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_arr_O, arr_O, sizeof(double) * arr_O_size, cudaMemcpyHostToDevice);
+    // cudaMemcpy(d_arr_O, arr_O, sizeof(double) * arr_O_size, cudaMemcpyHostToDevice);
+    cudaMemset(d_arr_O, 0, sizeof(double) * arr_O_size);
     
     
     // // parallelising 'j_ptr' for contraction = 0 and contraction = 1 :
