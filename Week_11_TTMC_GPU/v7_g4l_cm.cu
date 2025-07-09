@@ -22,18 +22,16 @@ do {                                                                            
 /////////////////////////////////////////////////////////////////////
 /*Start of device function for GPU 4 loop Method using COALESCED MEMORY*/
 __global__ void GPU_4L_CM_device_func_ncm_0( 
-  const uint64_t* __restrict__ mode_0_ptr, const uint64_t* __restrict__ mode_0_idx,
+  const uint64_t* __restrict__ mode_0_idx,
   const uint64_t* __restrict__ mode_1_ptr, const uint64_t* __restrict__ mode_1_idx,
   const uint64_t* __restrict__ mode_2_ptr, const uint64_t* __restrict__ mode_2_idx,
   const double* __restrict__ values, double* arr_A,  double* arr_B,  double* arr_O,
-  uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, uint64_t total_values,
-  int size_mode_0_ptr, int size_mode_1_ptr, int size_mode_2_ptr,
-  int size_mode_0_idx, int size_mode_1_idx, int size_mode_2_idx, int num_warps)
+  uint64_t f1, uint64_t f2,  int num_warps)
 {
   extern __shared__ double buf[];
   // int buf_size = num_warps * f2;
   int buf_index;
-  
+
   uint64_t i_ptr = blockIdx.x;
   uint64_t i =  mode_0_idx[i_ptr];
 
@@ -62,7 +60,8 @@ __global__ void GPU_4L_CM_device_func_ncm_0(
         for(uint64_t s_offset = 0; s_offset < f2; s_offset += warp_size){
           uint64_t s = s_offset + tid_in_warp;
           if(s < f2){
-            atomicAdd(&buf[warp_id * f2 + s], values[k_ptr] * arr_B[k * f2 + s]);
+            // atomicAdd(&buf[warp_id * f2 + s], values[k_ptr] * arr_B[k * f2 + s]);
+            buf[warp_id * f2 + s] += values[k_ptr] * arr_B[k * f2 + s];
           }
         }
       }
@@ -82,13 +81,11 @@ __global__ void GPU_4L_CM_device_func_ncm_0(
 }
 
 __global__ void GPU_4L_CM_device_func_ncm_1( 
-  const uint64_t* __restrict__ mode_0_ptr, const uint64_t* __restrict__ mode_0_idx,
+  const uint64_t* __restrict__ mode_0_idx,
   const uint64_t* __restrict__ mode_1_ptr, const uint64_t* __restrict__ mode_1_idx,
   const uint64_t* __restrict__ mode_2_ptr, const uint64_t* __restrict__ mode_2_idx,
   const double* __restrict__ values, double* arr_A,  double* arr_B,  double* arr_O,
-  uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, uint64_t total_values,
-  int size_mode_0_ptr, int size_mode_1_ptr, int size_mode_2_ptr,
-  int size_mode_0_idx, int size_mode_1_idx, int size_mode_2_idx, int num_warps)
+  uint64_t f1, uint64_t f2, int num_warps)
 {
   extern __shared__ double buf[];
   int buf_index;
@@ -119,12 +116,13 @@ __global__ void GPU_4L_CM_device_func_ncm_1(
         for(uint64_t s_offset = 0; s_offset < f2; s_offset += warp_size){
           uint64_t s = s_offset + tid_in_warp;
           if(s < f2){
-            atomicAdd(&buf[warp_id * f2 + s], values[k_ptr] * arr_B[k * f2 + s]);
+            // atomicAdd(&buf[warp_id * f2 + s], values[k_ptr] * arr_B[k * f2 + s]);
+            buf[warp_id * f2 + s] += values[k_ptr] * arr_B[k * f2 + s];
           }
         }
       }
       // __syncthreads();
-
+      
       for(uint64_t r = 0; r < f1; ++r){
         for(uint64_t s_offset = 0; s_offset < f2; s_offset += warp_size){
           uint64_t s = s_offset + tid_in_warp;
@@ -137,10 +135,6 @@ __global__ void GPU_4L_CM_device_func_ncm_1(
     }
   }
 }
-
-
-
-
 
 /*End of device function for GPU 4 loop Method using COALESCED MEMORY*/
 /////////////////////////////////////////////////////////////////////
@@ -157,11 +151,11 @@ void GPU_4L_CM_host_func(
   int size_mode_0_idx, int size_mode_1_idx, int size_mode_2_idx)
   {
     // Allocate device memory
-    uint64_t *d_mode_0_ptr, *d_mode_0_idx, *d_mode_1_ptr;
+    uint64_t *d_mode_0_idx, *d_mode_1_ptr;
     uint64_t *d_mode_1_idx, *d_mode_2_ptr, *d_mode_2_idx;
     double *d_values, *d_arr_A, *d_arr_B, *d_arr_O;
     
-    cudaMalloc(&d_mode_0_ptr, sizeof(uint64_t) * size_mode_0_ptr);
+    // cudaMalloc(&d_mode_0_ptr, sizeof(uint64_t) * size_mode_0_ptr);
     cudaMalloc(&d_mode_0_idx, sizeof(uint64_t) * size_mode_0_idx);
     cudaMalloc(&d_mode_1_ptr, sizeof(uint64_t) * size_mode_1_ptr);
     cudaMalloc(&d_mode_1_idx, sizeof(uint64_t) * size_mode_1_idx);
@@ -173,7 +167,7 @@ void GPU_4L_CM_host_func(
     cudaMalloc(&d_arr_O, sizeof(double) * arr_O_size);
   
     // Copy data to device
-    cudaMemcpy(d_mode_0_ptr, mode_0_ptr, sizeof(uint64_t) * size_mode_0_ptr, cudaMemcpyHostToDevice);
+    // cudaMemcpy(d_mode_0_ptr, mode_0_ptr, sizeof(uint64_t) * size_mode_0_ptr, cudaMemcpyHostToDevice);
     cudaMemcpy(d_mode_0_idx, mode_0_idx, sizeof(uint64_t) * size_mode_0_idx, cudaMemcpyHostToDevice);
     cudaMemcpy(d_mode_1_ptr, mode_1_ptr, sizeof(uint64_t) * size_mode_1_ptr, cudaMemcpyHostToDevice);
     cudaMemcpy(d_mode_1_idx, mode_1_idx, sizeof(uint64_t) * size_mode_1_idx, cudaMemcpyHostToDevice);
@@ -182,7 +176,8 @@ void GPU_4L_CM_host_func(
     cudaMemcpy(d_values, values, sizeof(double) * total_values, cudaMemcpyHostToDevice);
     cudaMemcpy(d_arr_A, arr_A, sizeof(double) * arr_A_size, cudaMemcpyHostToDevice);
     cudaMemcpy(d_arr_B, arr_B, sizeof(double) * arr_B_size, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_arr_O, arr_O, sizeof(double) * arr_O_size, cudaMemcpyHostToDevice);
+    // cudaMemcpy(d_arr_O, arr_O, sizeof(double) * arr_O_size, cudaMemcpyHostToDevice);
+    cudaMemset(d_arr_O, 0, sizeof(double) * arr_O_size);
     
     
     if (contraction == 0) {
@@ -195,12 +190,10 @@ void GPU_4L_CM_host_func(
       int sharedMemBytes =  num_warps * f2 * sizeof(double);
       
       GPU_4L_CM_device_func_ncm_0<<<grid_size, block_size, sharedMemBytes>>>(
-        d_mode_0_ptr, d_mode_0_idx,
+        d_mode_0_idx,
         d_mode_1_ptr, d_mode_1_idx,
         d_mode_2_ptr, d_mode_2_idx,
-        d_values, d_arr_A, d_arr_B, d_arr_O, l, m, n, f1, f2, total_values,
-        size_mode_0_ptr, size_mode_1_ptr, size_mode_2_ptr,
-        size_mode_0_idx, size_mode_1_idx, size_mode_2_idx, num_warps
+        d_values, d_arr_A, d_arr_B, d_arr_O, f1, f2, num_warps
       );
     }
     else if (contraction == 1) {
@@ -213,12 +206,10 @@ void GPU_4L_CM_host_func(
       int sharedMemBytes =  num_warps * f2 * sizeof(double);
       
       GPU_4L_CM_device_func_ncm_1<<<grid_size, block_size, sharedMemBytes>>>(
-        d_mode_0_ptr, d_mode_0_idx,
+        d_mode_0_idx,
         d_mode_1_ptr, d_mode_1_idx,
         d_mode_2_ptr, d_mode_2_idx,
-        d_values, d_arr_A, d_arr_B, d_arr_O, l, m, n, f1, f2, total_values,
-        size_mode_0_ptr, size_mode_1_ptr, size_mode_2_ptr,
-        size_mode_0_idx, size_mode_1_idx, size_mode_2_idx, num_warps
+        d_values, d_arr_A, d_arr_B, d_arr_O, f1, f2, num_warps
       );
     }
     /*
@@ -281,7 +272,7 @@ void GPU_4L_CM_host_func(
     cudaMemcpy(arr_O, d_arr_O, sizeof(double) * arr_O_size, cudaMemcpyDeviceToHost);
   
     // Free device memory
-    cudaFree(d_mode_0_ptr);
+    // cudaFree(d_mode_0_ptr);
     cudaFree(d_mode_0_idx);
     cudaFree(d_mode_1_ptr);
     cudaFree(d_mode_1_idx);
