@@ -206,7 +206,7 @@ def format_time(time_value):
     else:
         return f"{time_value:.2f}ms"
 
-def plot_speedups(results, baseline_method='v4', method_names=None, contraction_choice=None, 
+def plot_speedups(results, baseline_method='v5', method_names=None, contraction_choice=None, 
                  output_file=None, y_max=5, skip_methods=None, runs_per_method=1):
     """Create a bar plot showing speedups for all datasets
     
@@ -420,7 +420,7 @@ def main():
     parser = argparse.ArgumentParser(description='Parse TTMC log files and create performance plots')
     parser.add_argument('log_file', help='Path to the TTMC log file')
     parser.add_argument('-o', '--output', help='Output file path for the plot (e.g., speedup_plot.png)')
-    parser.add_argument('-b', '--baseline', default='v4', 
+    parser.add_argument('-b', '--baseline', default='v5', 
                         help='Method to use as the baseline for speedup calculation (e.g., v2, v3, v4)')
     parser.add_argument('-y', '--y-max', type=float, default=5.0,
                         help='Maximum value for the y-axis (default: 5.0)')
