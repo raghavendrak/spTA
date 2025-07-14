@@ -34,7 +34,7 @@ rm -f ttmc_v*
 echo "Finding contraction methods..."
 method_files=(v*.cu)
 method_numbers=()
-skip_methods=(1 2 6)  # Skip method 1 (v1_cpu_5loop.cu)
+skip_methods=(1 2 6 8)  # Skip method 1 (v1_cpu_5loop.cu)
 
 for file in "${method_files[@]}"; do
     if [[ $file =~ v([0-9]+)_ ]]; then
@@ -64,9 +64,9 @@ echo "Found methods: ${method_numbers[@]}"
 echo "Building contraction executables..."
 for method in ${method_numbers[@]}; do
     input_file="v${method}_"*.cu
-    output="ttmc_v${method}"
+    output="ttmc_v${method}.out"
     echo "  Compiling $input_file -> $output"
-    nvcc -O3 -arch=sm_70 $input_file -o $output
+    nvcc -O3 -arch=sm_89 $input_file -o $output
     if [ $? -ne 0 ]; then
         echo "Error compiling $output"
     fi
@@ -150,6 +150,14 @@ initialize_logs() {
             echo "Timestamp: $(date)" >> "$log_file"
             echo "Using factor matrix ranks: R1=$RANK_1, R2=$RANK_2" >> "$log_file"
             echo "Number of runs per method: $RUNS" >> "$log_file"
+            
+            if [ "$ncm" == 0 ]; then
+                echo "Your Contraction Choice : ijk,jr,ks→irs" >> "$log_file"
+            elif [ "$ncm" == 1 ]; then
+                echo "Your Contraction Choice : ijk,ir,ks→rjs" >> "$log_file"
+            elif [ "$ncm" == 2 ]; then
+                echo "Your Contraction Choice : ijk,ir,js→rsk" >> "$log_file"
+            fi
             echo "---------------------------------" >> "$log_file"
         done
     else
@@ -158,6 +166,13 @@ initialize_logs() {
         echo "Timestamp: $(date)" >> "$log_file"
         echo "Using factor matrix ranks: R1=$RANK_1, R2=$RANK_2" >> "$log_file"
         echo "Number of runs per method: $RUNS" >> "$log_file"
+        if [ "$NCM" == 0 ]; then
+            echo "Your Contraction Choice : ijk,jr,ks→irs" >> "$log_file"
+        elif [ "$NCM" == 1 ]; then
+            echo "Your Contraction Choice : ijk,ir,ks→rjs" >> "$log_file"
+        elif [ "$NCM" == 2 ]; then
+            echo "Your Contraction Choice : ijk,ir,js→rsk" >> "$log_file"
+        fi
         echo "---------------------------------" >> "$log_file"
     fi
 }
@@ -189,13 +204,6 @@ run_contractions() {
                 local log_file="TTMC_ncm_${NCM}.log"
                 echo "Running contraction on $csf_file..." >> "$log_file"
                 
-                if [ "$NCM" == 0 ]; then
-                    echo "Your Contraction Choice : ijk,jr,ks→irs" >> "$log_file"
-                elif [ "$NCM" == 1 ]; then
-                    echo "Your Contraction Choice : ijk,ir,ks→rjs" >> "$log_file"
-                elif [ "$NCM" == 2 ]; then
-                    echo "Your Contraction Choice : ijk,ir,js→rsk" >> "$log_file"
-                fi
                 
                 # Add NCM option
                 cmd_options+=("-n" "$NCM")
