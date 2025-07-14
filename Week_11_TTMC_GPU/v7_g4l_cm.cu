@@ -26,7 +26,7 @@ __global__ void GPU_4L_CM_device_func_ncm_0(
   const uint64_t* __restrict__ mode_1_ptr, const uint64_t* __restrict__ mode_1_idx,
   const uint64_t* __restrict__ mode_2_ptr, const uint64_t* __restrict__ mode_2_idx,
   const double* __restrict__ values, double* arr_A,  double* arr_B,  double* arr_O,
-  uint64_t f1, uint64_t f2,  int num_warps)
+  uint32_t f1, uint32_t f2,  int num_warps)
 {
   extern __shared__ double buf[];
   // int buf_size = num_warps * f2;
@@ -35,8 +35,8 @@ __global__ void GPU_4L_CM_device_func_ncm_0(
   uint64_t i_ptr = blockIdx.x;
   uint64_t i =  mode_0_idx[i_ptr];
 
-  uint64_t warp_size = 32;
-  uint64_t warp_id = threadIdx.x / warp_size;
+  uint32_t warp_size = 32;
+  uint32_t warp_id = threadIdx.x / warp_size;
   int tid_in_warp = threadIdx.x % warp_size;
 
   for(uint64_t j_ptr_offset = mode_1_ptr[i_ptr]; j_ptr_offset < mode_1_ptr[i_ptr + 1]; j_ptr_offset += num_warps){
@@ -57,8 +57,8 @@ __global__ void GPU_4L_CM_device_func_ncm_0(
       for(uint64_t k_ptr = mode_2_ptr[j_ptr]; k_ptr < mode_2_ptr[j_ptr + 1]; ++k_ptr){
         uint64_t k = mode_2_idx[k_ptr];
 
-        for(uint64_t s_offset = 0; s_offset < f2; s_offset += warp_size){
-          uint64_t s = s_offset + tid_in_warp;
+        for(uint32_t s_offset = 0; s_offset < f2; s_offset += warp_size){
+          uint32_t s = s_offset + tid_in_warp;
           if(s < f2){
             // atomicAdd(&buf[warp_id * f2 + s], values[k_ptr] * arr_B[k * f2 + s]);
             buf[warp_id * f2 + s] += values[k_ptr] * arr_B[k * f2 + s];
@@ -67,9 +67,9 @@ __global__ void GPU_4L_CM_device_func_ncm_0(
       }
       // __syncthreads(); - not required because single warp execute the code serially
 
-      for(uint64_t r = 0; r < f1; ++r){
-        for(uint64_t s_offset = 0; s_offset < f2; s_offset += warp_size){
-          uint64_t s = s_offset + tid_in_warp;
+      for(uint32_t r = 0; r < f1; ++r){
+        for(uint32_t s_offset = 0; s_offset < f2; s_offset += warp_size){
+          uint32_t s = s_offset + tid_in_warp;
           if(s < f2){
             atomicAdd(&arr_O[i * f1* f2 + r * f2 + s], buf[warp_id * f2 + s] * arr_A[j * f1 + r]);
           }
@@ -85,7 +85,7 @@ __global__ void GPU_4L_CM_device_func_ncm_1(
   const uint64_t* __restrict__ mode_1_ptr, const uint64_t* __restrict__ mode_1_idx,
   const uint64_t* __restrict__ mode_2_ptr, const uint64_t* __restrict__ mode_2_idx,
   const double* __restrict__ values, double* arr_A,  double* arr_B,  double* arr_O,
-  uint64_t f1, uint64_t f2, int num_warps)
+  uint32_t f1, uint32_t f2, int num_warps)
 {
   extern __shared__ double buf[];
   int buf_index;
@@ -93,8 +93,8 @@ __global__ void GPU_4L_CM_device_func_ncm_1(
   uint64_t i_ptr = blockIdx.x;
   uint64_t i =  mode_0_idx[i_ptr];
 
-  uint64_t warp_size = 32;
-  uint64_t warp_id = threadIdx.x / warp_size;
+  uint32_t warp_size = 32;
+  uint32_t warp_id = threadIdx.x / warp_size;
   int tid_in_warp = threadIdx.x % warp_size;
 
   for(uint64_t j_ptr_offset = mode_1_ptr[i_ptr]; j_ptr_offset < mode_1_ptr[i_ptr + 1]; j_ptr_offset += num_warps){
@@ -113,8 +113,8 @@ __global__ void GPU_4L_CM_device_func_ncm_1(
       for(uint64_t k_ptr = mode_2_ptr[j_ptr]; k_ptr < mode_2_ptr[j_ptr + 1]; ++k_ptr){
         uint64_t k = mode_2_idx[k_ptr];
 
-        for(uint64_t s_offset = 0; s_offset < f2; s_offset += warp_size){
-          uint64_t s = s_offset + tid_in_warp;
+        for(uint32_t s_offset = 0; s_offset < f2; s_offset += warp_size){
+          uint32_t s = s_offset + tid_in_warp;
           if(s < f2){
             // atomicAdd(&buf[warp_id * f2 + s], values[k_ptr] * arr_B[k * f2 + s]);
             buf[warp_id * f2 + s] += values[k_ptr] * arr_B[k * f2 + s];
@@ -123,9 +123,9 @@ __global__ void GPU_4L_CM_device_func_ncm_1(
       }
       // __syncthreads();
       
-      for(uint64_t r = 0; r < f1; ++r){
-        for(uint64_t s_offset = 0; s_offset < f2; s_offset += warp_size){
-          uint64_t s = s_offset + tid_in_warp;
+      for(uint32_t r = 0; r < f1; ++r){
+        for(uint32_t s_offset = 0; s_offset < f2; s_offset += warp_size){
+          uint32_t s = s_offset + tid_in_warp;
           if(s < f2){
             atomicAdd(&arr_O[j * f1* f2 + r * f2 + s], buf[warp_id * f2 + s] * arr_A[i * f1 + r]);
           }
@@ -146,7 +146,7 @@ void GPU_4L_CM_host_func(
   uint64_t* mode_2_ptr, uint64_t* mode_2_idx,
   double* values, double* arr_A, double* arr_B,  
   double* arr_O, uint64_t arr_A_size, uint64_t arr_B_size, uint64_t arr_O_size, int contraction, 
-  uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, uint64_t total_values,
+  uint64_t l, uint64_t m, uint64_t n, uint32_t f1, uint32_t f2, uint64_t total_values,
   int size_mode_0_ptr, int size_mode_1_ptr, int size_mode_2_ptr,
   int size_mode_0_idx, int size_mode_1_idx, int size_mode_2_idx)
   {
@@ -185,7 +185,7 @@ void GPU_4L_CM_host_func(
       // dim3 gridDim(size_mode_0_idx);
       int grid_size = size_mode_0_idx;
       // dim3 blockDim(1024);
-      int block_size = 1024, warp_size = 32;
+      int block_size = 512, warp_size = 32;
       int num_warps = (block_size + warp_size - 1) / warp_size;
       int sharedMemBytes =  num_warps * f2 * sizeof(double);
       
@@ -267,7 +267,7 @@ void GPU_4L_CM_host_func(
     */
   
 
-  
+    cudaDeviceSynchronize();
     // Copy results back to host
     cudaMemcpy(arr_O, d_arr_O, sizeof(double) * arr_O_size, cudaMemcpyDeviceToHost);
   
@@ -294,7 +294,7 @@ void GPU_4L_CM_host_func(
 int main(int argc, char* argv[]) {
     bool verbose = false;
     string csf_file;
-    uint64_t rank1 = 30, rank2 = 30;
+    uint32_t rank1 = 30, rank2 = 30;
     int ncm = 0;
     bool verify = false;  // Default: don't verify results
     
@@ -434,14 +434,15 @@ int main(int argc, char* argv[]) {
                 cout << "Running reference implementation (CPU 4-loop)..." << endl;
             }
             auto ref_start = std::chrono::high_resolution_clock::now();
-            
+            uint64_t rank1_64 = rank1;
+            uint64_t rank2_64 = rank2;
             performContraction_cpu_2(
                 mode_0_ptr, mode_0_idx,
                 mode_1_ptr, mode_1_idx,
                 mode_2_ptr, mode_2_idx,
                 values, arr_A, arr_B, ref_O,
                 arr_A_size, arr_B_size, arr_O_size, ncm,
-                dimensions[0], dimensions[1], dimensions[2], rank1, rank2
+                dimensions[0], dimensions[1], dimensions[2], rank1_64, rank2_64
             );
             
             auto ref_end = std::chrono::high_resolution_clock::now();
