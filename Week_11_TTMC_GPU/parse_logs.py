@@ -301,11 +301,11 @@ def plot_speedups(results, baseline_method='v5', method_names=None, contraction_
     baseline_label = display_names[baseline_method] + ' (Baseline)'
     
     # Setup figure and axis
-    fig, ax = plt.subplots(figsize=(12, 6))
+    fig, ax = plt.subplots(figsize=(18, 6))
     
     # Set up bar positions
     x = np.arange(len(datasets))
-    bar_width = 0.2
+    bar_width = 0.15
     
     # Create bars with appropriate labels
     bar_colors = ['blue', 'red', 'green', 'purple', 'orange', 'brown', 'pink', 'gray', 'olive', 'cyan']
@@ -374,6 +374,11 @@ def plot_speedups(results, baseline_method='v5', method_names=None, contraction_
                     ax.text(x[i] + pos, height + 0.05*height, 
                             f"{height:.2f}x {runs_label}", ha='center', va='bottom', fontsize=8, 
                             rotation=75)
+            else:
+                ax.text(x[i] + pos, 0.01, 
+                        "O.O.M", ha='center', va='bottom', fontsize=8, 
+                        rotation=90)
+
     
     # Customize plot
     ax.set_xlabel('Dataset')
