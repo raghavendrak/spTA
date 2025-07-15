@@ -3,8 +3,10 @@
 #include <cstring>
 #include <stdexcept>
 #include <cuda_runtime.h>
+#include <chrono>
 #include "csf_tensor.h"
 #include "matrix_utils.h"
+#include "scalar_types.h"
 
 using namespace std;
 
@@ -25,10 +27,10 @@ __global__ void GPU_4L_CM_device_func_ncm_0(
   const uint64_t* __restrict__ mode_0_idx,
   const uint64_t* __restrict__ mode_1_ptr, const uint64_t* __restrict__ mode_1_idx,
   const uint64_t* __restrict__ mode_2_ptr, const uint64_t* __restrict__ mode_2_idx,
-  const double* __restrict__ values, double* arr_A,  double* arr_B,  double* arr_O,
+  const Scalar* __restrict__ values, Scalar* arr_A,  Scalar* arr_B,  Scalar* arr_O,
   uint32_t f1, uint32_t f2,  int num_warps)
 {
-  extern __shared__ double buf[];
+  extern __shared__ Scalar buf[];
   // int buf_size = num_warps * f2;
   int buf_index;
 
@@ -84,10 +86,10 @@ __global__ void GPU_4L_CM_device_func_ncm_1(
   const uint64_t* __restrict__ mode_0_idx,
   const uint64_t* __restrict__ mode_1_ptr, const uint64_t* __restrict__ mode_1_idx,
   const uint64_t* __restrict__ mode_2_ptr, const uint64_t* __restrict__ mode_2_idx,
-  const double* __restrict__ values, double* arr_A,  double* arr_B,  double* arr_O,
+  const Scalar* __restrict__ values, Scalar* arr_A,  Scalar* arr_B,  Scalar* arr_O,
   uint32_t f1, uint32_t f2, int num_warps)
 {
-  extern __shared__ double buf[];
+  extern __shared__ Scalar buf[];
   int buf_index;
   
   uint64_t i_ptr = blockIdx.x;
@@ -144,16 +146,16 @@ void GPU_4L_CM_host_func(
   uint64_t* mode_0_ptr, uint64_t* mode_0_idx,
   uint64_t* mode_1_ptr, uint64_t* mode_1_idx,
   uint64_t* mode_2_ptr, uint64_t* mode_2_idx,
-  double* values, double* arr_A, double* arr_B,  
-  double* arr_O, uint64_t arr_A_size, uint64_t arr_B_size, uint64_t arr_O_size, int contraction, 
+  Scalar* values, Scalar* arr_A, Scalar* arr_B,  
+  Scalar* arr_O, uint64_t arr_A_size, uint64_t arr_B_size, uint64_t arr_O_size, int contraction, 
   uint64_t l, uint64_t m, uint64_t n, uint32_t f1, uint32_t f2, uint64_t total_values,
   int size_mode_0_ptr, int size_mode_1_ptr, int size_mode_2_ptr,
-  int size_mode_0_idx, int size_mode_1_idx, int size_mode_2_idx)
+  int size_mode_0_idx, int size_mode_1_idx, int size_mode_2_idx, bool verbose)
   {
     // Allocate device memory
     uint64_t *d_mode_0_idx, *d_mode_1_ptr;
     uint64_t *d_mode_1_idx, *d_mode_2_ptr, *d_mode_2_idx;
-    double *d_values, *d_arr_A, *d_arr_B, *d_arr_O;
+    Scalar *d_values, *d_arr_A, *d_arr_B, *d_arr_O;
     
     // cudaMalloc(&d_mode_0_ptr, sizeof(uint64_t) * size_mode_0_ptr);
     cudaMalloc(&d_mode_0_idx, sizeof(uint64_t) * size_mode_0_idx);
@@ -161,10 +163,10 @@ void GPU_4L_CM_host_func(
     cudaMalloc(&d_mode_1_idx, sizeof(uint64_t) * size_mode_1_idx);
     cudaMalloc(&d_mode_2_ptr, sizeof(uint64_t) * size_mode_2_ptr);
     cudaMalloc(&d_mode_2_idx, sizeof(uint64_t) * size_mode_2_idx);
-    cudaMalloc(&d_values, sizeof(double) * total_values);
-    cudaMalloc(&d_arr_A, sizeof(double) * arr_A_size);
-    cudaMalloc(&d_arr_B, sizeof(double) * arr_B_size);
-    cudaMalloc(&d_arr_O, sizeof(double) * arr_O_size);
+    cudaMalloc(&d_values, sizeof(Scalar) * total_values);
+    cudaMalloc(&d_arr_A, sizeof(Scalar) * arr_A_size);
+    cudaMalloc(&d_arr_B, sizeof(Scalar) * arr_B_size);
+    cudaMalloc(&d_arr_O, sizeof(Scalar) * arr_O_size);
   
     // Copy data to device
     // cudaMemcpy(d_mode_0_ptr, mode_0_ptr, sizeof(uint64_t) * size_mode_0_ptr, cudaMemcpyHostToDevice);
@@ -173,11 +175,11 @@ void GPU_4L_CM_host_func(
     cudaMemcpy(d_mode_1_idx, mode_1_idx, sizeof(uint64_t) * size_mode_1_idx, cudaMemcpyHostToDevice);
     cudaMemcpy(d_mode_2_ptr, mode_2_ptr, sizeof(uint64_t) * size_mode_2_ptr, cudaMemcpyHostToDevice);
     cudaMemcpy(d_mode_2_idx, mode_2_idx, sizeof(uint64_t) * size_mode_2_idx, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_values, values, sizeof(double) * total_values, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_arr_A, arr_A, sizeof(double) * arr_A_size, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_arr_B, arr_B, sizeof(double) * arr_B_size, cudaMemcpyHostToDevice);
-    // cudaMemcpy(d_arr_O, arr_O, sizeof(double) * arr_O_size, cudaMemcpyHostToDevice);
-    cudaMemset(d_arr_O, 0, sizeof(double) * arr_O_size);
+    cudaMemcpy(d_values, values, sizeof(Scalar) * total_values, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_arr_A, arr_A, sizeof(Scalar) * arr_A_size, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_arr_B, arr_B, sizeof(Scalar) * arr_B_size, cudaMemcpyHostToDevice);
+    // cudaMemcpy(d_arr_O, arr_O, sizeof(Scalar) * arr_O_size, cudaMemcpyHostToDevice);
+    cudaMemset(d_arr_O, 0, sizeof(Scalar) * arr_O_size);
     
     
     if (contraction == 0) {
@@ -187,7 +189,9 @@ void GPU_4L_CM_host_func(
       // dim3 blockDim(1024);
       int block_size = 512, warp_size = 32;
       int num_warps = (block_size + warp_size - 1) / warp_size;
-      int sharedMemBytes =  num_warps * f2 * sizeof(double);
+      int sharedMemBytes =  num_warps * f2 * sizeof(Scalar);
+
+      auto start = std::chrono::high_resolution_clock::now();
       
       GPU_4L_CM_device_func_ncm_0<<<grid_size, block_size, sharedMemBytes>>>(
         d_mode_0_idx,
@@ -195,6 +199,12 @@ void GPU_4L_CM_host_func(
         d_mode_2_ptr, d_mode_2_idx,
         d_values, d_arr_A, d_arr_B, d_arr_O, f1, f2, num_warps
       );
+      cudaDeviceSynchronize();
+      auto end = std::chrono::high_resolution_clock::now();
+      auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+      if(verbose){
+        cout << "GPU_4L_CM kernel execution time: " << duration / 1000.0 << " ms" << endl;
+      }
     }
     else if (contraction == 1) {
     
@@ -203,7 +213,7 @@ void GPU_4L_CM_host_func(
       // dim3 blockDim(1024);
       int block_size = 1024, warp_size = 32;
       int num_warps = (block_size + warp_size - 1) / warp_size;
-      int sharedMemBytes =  num_warps * f2 * sizeof(double);
+      int sharedMemBytes =  num_warps * f2 * sizeof(Scalar);
       
       GPU_4L_CM_device_func_ncm_1<<<grid_size, block_size, sharedMemBytes>>>(
         d_mode_0_idx,
@@ -214,19 +224,19 @@ void GPU_4L_CM_host_func(
     }
     /*
     else if(contraction == 2){
-      double* buffer_for_ncm_2;
+      Scalar* buffer_for_ncm_2;
       bool* k_index_buffer;
       
       NUM_STREAMS = 1;
       cout << "No. of streams = " << NUM_STREAMS <<endl;
 
-      cudaMalloc(&buffer_for_ncm_2, n * f2 * NUM_STREAMS * sizeof(double));
+      cudaMalloc(&buffer_for_ncm_2, n * f2 * NUM_STREAMS * sizeof(Scalar));
       cudaMalloc(&k_index_buffer, n * NUM_STREAMS * sizeof(bool));
       
       // cudaMalloc(&k_indices, n * NUM_STREAMS * sizeof(uint64_t));
       // cudaMalloc(&counter,  NUM_STREAMS * sizeof(uint64_t));
       
-      // cudaMemset(buffer_for_ncm_2 , 0, n * f2  * NUM_STREAMS * sizeof(double));
+      // cudaMemset(buffer_for_ncm_2 , 0, n * f2  * NUM_STREAMS * sizeof(Scalar));
       // cudaMemset(k_index_buffer, 0, n  * NUM_STREAMS * sizeof(bool));
 
       
@@ -234,7 +244,7 @@ void GPU_4L_CM_host_func(
         i = mode_0_idx[i_ptr];
         j_ptr_offset = mode_1_ptr[i_ptr];
         
-        cudaMemset(buffer_for_ncm_2 + n * f2 * (i_ptr % NUM_STREAMS), 0, n * f2  * sizeof(double));
+        cudaMemset(buffer_for_ncm_2 + n * f2 * (i_ptr % NUM_STREAMS), 0, n * f2  * sizeof(Scalar));
         cudaMemset(k_index_buffer + n * (i_ptr % NUM_STREAMS), 0, n  * sizeof(bool));
         
         dim3 gridDim(mode_1_ptr[i_ptr + 1] - mode_1_ptr[i_ptr]);
@@ -269,7 +279,7 @@ void GPU_4L_CM_host_func(
 
     cudaDeviceSynchronize();
     // Copy results back to host
-    cudaMemcpy(arr_O, d_arr_O, sizeof(double) * arr_O_size, cudaMemcpyDeviceToHost);
+    cudaMemcpy(arr_O, d_arr_O, sizeof(Scalar) * arr_O_size, cudaMemcpyDeviceToHost);
   
     // Free device memory
     // cudaFree(d_mode_0_ptr);
@@ -341,7 +351,7 @@ int main(int argc, char* argv[]) {
         uint64_t *mode_0_ptr, *mode_0_idx;
         uint64_t *mode_1_ptr, *mode_1_idx;
         uint64_t *mode_2_ptr, *mode_2_idx;
-        double *values;
+        Scalar *values;
         int order;
         
         size_t size_mode_0_ptr = tensor.ptrs[0].size();
@@ -379,7 +389,7 @@ int main(int argc, char* argv[]) {
         uint64_t out_dim1 = getOutputDim1(dimensions, ncm);
         
         // Generate factor matrices
-        double *arr_A = nullptr, *arr_B = nullptr;
+        Scalar *arr_A = nullptr, *arr_B = nullptr;
         generate_matrix(matrix_dim1, rank1, 42, arr_A);
         generate_matrix(matrix_dim2, rank2, 43, arr_B);
         
@@ -392,12 +402,12 @@ int main(int argc, char* argv[]) {
         if (verbose) {
           cout << "Matrix A dimensions: " << matrix_dim1 << " x " << rank1 << endl;
           cout << "Matrix B dimensions: " << matrix_dim2 << " x " << rank2 << endl;
-          cout << "Output dimensions: " << out_dim1 << " x " << out_dim2 << endl;
+          cout << "Output dimensions: " << out_dim1 << " x " << rank1 << " x " << rank2 << endl;
         }
         
         // Allocate output array
-        double* arr_O = allocate_aligned_array(arr_O_size);
-        double* ref_O = nullptr;
+        Scalar* arr_O = allocate_aligned_array(arr_O_size);
+        Scalar* ref_O = nullptr;
         
         if (verify) {
             // Only allocate reference array if verification is needed
@@ -419,14 +429,14 @@ int main(int argc, char* argv[]) {
             ncm, dimensions[0], dimensions[1], dimensions[2], rank1, rank2,
             total_values,
             size_mode_0_ptr, size_mode_1_ptr, size_mode_2_ptr,
-            size_mode_0_idx, size_mode_1_idx, size_mode_2_idx
+            size_mode_0_idx, size_mode_1_idx, size_mode_2_idx, verbose
         );
         
         auto end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
         
         bool valid = true;
-        double ref_duration = 0.0;
+        Scalar ref_duration = 0.0;
         
         if (verify) {
             // Only run reference implementation and validate if requested
@@ -457,7 +467,7 @@ int main(int argc, char* argv[]) {
             cout << "GPU_4L_CM execution time: " << duration / 1000.0 << " ms" << endl;
             if (verify) {
                 cout << "Reference execution time: " << ref_duration / 1000.0 << " ms" << endl;
-                cout << "Speedup over reference: " << (double)ref_duration / duration << "x" << endl;
+                cout << "Speedup over reference: " << (Scalar)ref_duration / duration << "x" << endl;
                 cout << "Result validation: " << (valid ? "PASSED" : "FAILED") << endl;
             }
         } else {

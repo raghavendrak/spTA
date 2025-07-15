@@ -477,7 +477,7 @@ def main():
     # Print header for all methods
     header = f"{'Dataset':<{name_width}}"
     for method in all_methods:
-        method_display = f"{method} ({method_names.get(method, 'Unknown')})"
+        method_display = f"|{method} ({method_names.get(method, 'Unknown')})"
         header += f"{method_display:<{method_widths[method]}}"
     print(header)
     print("-" * 100)
@@ -493,9 +493,9 @@ def main():
                     time_str = f"{r[method]/1e3:.2f}s"
                 else:
                     time_str = f"{r[method]:.2f}ms"
-                row += f"{time_str:<{method_widths[method]}}"
+                row += f"|{time_str:<{method_widths[method]}}"
             else:
-                row += f"{'N/A':<{method_widths[method]}}"
+                row += f"|{'N/A':<{method_widths[method]}}"
         print(row)
     
     print("\nSpeedup Summary (relative to {}: {}):".format(baseline_method, method_names.get(baseline_method, 'Unknown')))
