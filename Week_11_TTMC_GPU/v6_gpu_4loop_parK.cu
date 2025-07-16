@@ -6,7 +6,6 @@
 #include <cuda_runtime.h>
 #include "csf_tensor.h"
 #include "matrix_utils.h"
-#include "scalar_types.h"
 
 using namespace std;
 
@@ -27,13 +26,13 @@ __global__ void GPU_4loop_parK(
 uint64_t* mode_0_ptr, uint64_t* mode_0_idx,
 uint64_t* mode_1_ptr, uint64_t* mode_1_idx,
 uint64_t* mode_2_ptr, uint64_t* mode_2_idx,
-Scalar* values, Scalar* arr_A, Scalar* arr_B,  
-Scalar* arr_O, uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, int contraction,
+double* values, double* arr_A, double* arr_B,  
+double* arr_O, uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, int contraction,
 uint64_t size_mode_0_ptr, uint64_t size_mode_1_ptr, uint64_t size_mode_2_ptr,
-uint64_t size_mode_0_idx, uint64_t size_mode_1_idx, uint64_t size_mode_2_idx, Scalar* buffer) 
+uint64_t size_mode_0_idx, uint64_t size_mode_1_idx, uint64_t size_mode_2_idx, double* buffer) 
 { 
   
-  // extern __shared__ Scalar buf[];
+  // extern __shared__ double buf[];
   // Compute thread index
   int64_t k_ptr = blockIdx.x * blockDim.x + threadIdx.x;
   if(k_ptr >= size_mode_2_idx) return;
@@ -57,7 +56,7 @@ uint64_t size_mode_0_idx, uint64_t size_mode_1_idx, uint64_t size_mode_2_idx, Sc
   }
 
   uint64_t i, j, k;
-  Scalar value;
+  double value;
   if ((i_ptr >= 0 && i_ptr < mode_0_ptr[1]) && 
       (j_ptr >= 0 && j_ptr < size_mode_1_idx) && 
       (k_ptr >= 0 && k_ptr < size_mode_2_idx)) 
@@ -77,13 +76,13 @@ __global__ void GPU_4loop_parJ(
 uint64_t* mode_0_ptr, uint64_t* mode_0_idx,
 uint64_t* mode_1_ptr, uint64_t* mode_1_idx,
 uint64_t* mode_2_ptr, uint64_t* mode_2_idx,
-Scalar* values, Scalar* arr_A, Scalar* arr_B,  
-Scalar* arr_O, uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, int contraction,
+double* values, double* arr_A, double* arr_B,  
+double* arr_O, uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, int contraction,
 uint64_t size_mode_0_ptr, uint64_t size_mode_1_ptr, uint64_t size_mode_2_ptr,
-uint64_t size_mode_0_idx, uint64_t size_mode_1_idx, uint64_t size_mode_2_idx, Scalar* buffer) 
+uint64_t size_mode_0_idx, uint64_t size_mode_1_idx, uint64_t size_mode_2_idx, double* buffer) 
 { 
   
-  // extern __shared__ Scalar buf[];
+  // extern __shared__ double buf[];
   // Compute thread index
   int64_t j_ptr = blockIdx.x * blockDim.x + threadIdx.x;
   if(j_ptr >= size_mode_1_idx) return;
@@ -136,15 +135,15 @@ void GPU_4loop_parK_host_func(
   uint64_t* mode_0_ptr, uint64_t* mode_0_idx,
   uint64_t* mode_1_ptr, uint64_t* mode_1_idx,
   uint64_t* mode_2_ptr, uint64_t* mode_2_idx,
-  Scalar* values, Scalar* arr_A, Scalar* arr_B,  
-  Scalar* arr_O, uint64_t arr_A_size, uint64_t arr_B_size, uint64_t arr_O_size, int contraction, 
+  double* values, double* arr_A, double* arr_B,  
+  double* arr_O, uint64_t arr_A_size, uint64_t arr_B_size, uint64_t arr_O_size, int contraction, 
   uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, uint64_t total_values,
   int size_mode_0_ptr, int size_mode_1_ptr, int size_mode_2_ptr,
   int size_mode_0_idx, int size_mode_1_idx, int size_mode_2_idx)
   {
     // Allocate device memory
     uint64_t *d_mode_0_ptr, *d_mode_0_idx, *d_mode_1_ptr, *d_mode_1_idx, *d_mode_2_ptr, *d_mode_2_idx;
-    Scalar *d_values, *d_arr_A, *d_arr_B, *d_arr_O;
+    double *d_values, *d_arr_A, *d_arr_B, *d_arr_O;
    
   
     cudaMalloc(&d_mode_0_ptr, sizeof(uint64_t) * size_mode_0_ptr);
@@ -153,10 +152,10 @@ void GPU_4loop_parK_host_func(
     cudaMalloc(&d_mode_1_idx, sizeof(uint64_t) * size_mode_1_idx);
     cudaMalloc(&d_mode_2_ptr, sizeof(uint64_t) * size_mode_2_ptr);
     cudaMalloc(&d_mode_2_idx, sizeof(uint64_t) * size_mode_2_idx);
-    cudaMalloc(&d_values, sizeof(Scalar) * total_values);
-    cudaMalloc(&d_arr_A, sizeof(Scalar) * arr_A_size);
-    cudaMalloc(&d_arr_B, sizeof(Scalar) * arr_B_size);
-    cudaMalloc(&d_arr_O, sizeof(Scalar) * arr_O_size);
+    cudaMalloc(&d_values, sizeof(double) * total_values);
+    cudaMalloc(&d_arr_A, sizeof(double) * arr_A_size);
+    cudaMalloc(&d_arr_B, sizeof(double) * arr_B_size);
+    cudaMalloc(&d_arr_O, sizeof(double) * arr_O_size);
   
   
     // Copy data to device
@@ -166,23 +165,23 @@ void GPU_4loop_parK_host_func(
     cudaMemcpy(d_mode_1_idx, mode_1_idx, sizeof(uint64_t) * size_mode_1_idx, cudaMemcpyHostToDevice);
     cudaMemcpy(d_mode_2_ptr, mode_2_ptr, sizeof(uint64_t) * size_mode_2_ptr, cudaMemcpyHostToDevice);
     cudaMemcpy(d_mode_2_idx, mode_2_idx, sizeof(uint64_t) * size_mode_2_idx, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_values, values, sizeof(Scalar) * total_values, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_arr_A, arr_A, sizeof(Scalar) * arr_A_size, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_arr_B, arr_B, sizeof(Scalar) * arr_B_size, cudaMemcpyHostToDevice);
-    cudaMemset(d_arr_O, 0, sizeof(Scalar) * arr_O_size);
+    cudaMemcpy(d_values, values, sizeof(double) * total_values, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_arr_A, arr_A, sizeof(double) * arr_A_size, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_arr_B, arr_B, sizeof(double) * arr_B_size, cudaMemcpyHostToDevice);
+    cudaMemset(d_arr_O, 0, sizeof(double) * arr_O_size);
     
     
     
     if (contraction == 0 || contraction == 1) {
 
-      Scalar* buffer_for_contraction_0_1;
-      cudaCheckError(cudaMalloc(&buffer_for_contraction_0_1, f2 * size_mode_1_idx * sizeof(Scalar)));
-      cudaCheckError(cudaMemset(buffer_for_contraction_0_1, 0, f2 * size_mode_1_idx * sizeof(Scalar)));
+      double* buffer_for_contraction_0_1;
+      cudaCheckError(cudaMalloc(&buffer_for_contraction_0_1, f2 * size_mode_1_idx * sizeof(double)));
+      cudaCheckError(cudaMemset(buffer_for_contraction_0_1, 0, f2 * size_mode_1_idx * sizeof(double)));
       
       int threadsPerBlock = 256;
       int blocksPerGrid = (size_mode_2_idx + threadsPerBlock - 1) / threadsPerBlock;
 
-      // int sharedMemBytes = f2 * sizeof(Scalar);
+      // int sharedMemBytes = f2 * sizeof(double);
 
       // printf("blocksPerGrid = %d, threadsPerBlock = %d, sharedMemBytes = %d\n", blocksPerGrid, threadsPerBlock, sharedMemBytes);
       GPU_4loop_parK<<<blocksPerGrid, threadsPerBlock>>>(
@@ -209,7 +208,7 @@ void GPU_4loop_parK_host_func(
     cudaDeviceSynchronize();
   
     // Copy results back to host
-    cudaMemcpy(arr_O, d_arr_O, sizeof(Scalar) * arr_O_size, cudaMemcpyDeviceToHost);
+    cudaMemcpy(arr_O, d_arr_O, sizeof(double) * arr_O_size, cudaMemcpyDeviceToHost);
   
     // Free device memory
     cudaFree(d_mode_0_ptr);
@@ -282,7 +281,7 @@ int main(int argc, char* argv[]) {
     uint64_t *mode_0_ptr, *mode_0_idx;
     uint64_t *mode_1_ptr, *mode_1_idx;
     uint64_t *mode_2_ptr, *mode_2_idx;
-    Scalar *values;
+    double *values;
     int order;
     
     size_t size_mode_0_ptr = tensor.ptrs[0].size();
@@ -319,7 +318,7 @@ int main(int argc, char* argv[]) {
     uint64_t out_dim1 = getOutputDim1(dimensions, ncm);
     
     // Generate factor matrices
-    Scalar *arr_A = nullptr, *arr_B = nullptr;
+    double *arr_A = nullptr, *arr_B = nullptr;
     generate_matrix(matrix_dim1, rank1, 42, arr_A);
     generate_matrix(matrix_dim2, rank2, 43, arr_B);
     
@@ -336,8 +335,8 @@ int main(int argc, char* argv[]) {
     }
     
     // Allocate output array
-    Scalar* arr_O = allocate_aligned_array(arr_O_size);
-    Scalar* ref_O = nullptr;
+    double* arr_O = allocate_aligned_array(arr_O_size);
+    double* ref_O = nullptr;
     
     if (verify) {
       // Only allocate reference array if verification is needed
@@ -367,7 +366,7 @@ int main(int argc, char* argv[]) {
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
     
     bool valid = true;
-    Scalar ref_duration = 0.0;
+    double ref_duration = 0.0;
     
     if (verify) {
         // Only run reference implementation and validate if requested
@@ -397,7 +396,7 @@ int main(int argc, char* argv[]) {
         cout << "GPU_1nz_per_thread (each thread picks a non-zero(k)) execution time: " << duration / 1000.0 << " ms" << endl;
         if (verify) {
           cout << "Reference execution time: " << ref_duration / 1000.0 << " ms" << endl;
-          cout << "Speedup over reference: " << (Scalar)ref_duration / duration << "x" << endl;
+          cout << "Speedup over reference: " << (double)ref_duration / duration << "x" << endl;
           cout << "Result validation: " << (valid ? "PASSED" : "FAILED") << endl;
         }
     } else {

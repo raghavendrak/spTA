@@ -5,7 +5,6 @@
 #include <cuda_runtime.h>
 #include "csf_tensor.h"
 #include "matrix_utils.h"
-#include "scalar_types.h"
 
 using namespace std;
 
@@ -26,14 +25,14 @@ __global__ void GPU_4loop_ws(
   const uint64_t* __restrict__ mode_0_idx,
   const uint64_t* __restrict__ mode_1_ptr, const uint64_t* __restrict__ mode_1_idx,
   const uint64_t* __restrict__ mode_2_ptr, const uint64_t* __restrict__ mode_2_idx,
-  const Scalar* __restrict__ values, const Scalar* __restrict__ arr_A, const Scalar* __restrict__ arr_B,  
-  Scalar* arr_O, uint64_t f1, uint64_t f2, int ncm, uint64_t size_mode_0_idx
+  const double* __restrict__ values, const double* __restrict__ arr_A, const double* __restrict__ arr_B,  
+  double* arr_O, uint64_t f1, uint64_t f2, int ncm, uint64_t size_mode_0_idx
 )
 {
-  extern __shared__ Scalar buf[];
-  uint64_t k, k_ptr, k_ptr_offset, index_A, index_B, index_O ;
+  extern __shared__ double buf[];
+  uint64_t j, k, k_ptr, k_ptr_offset, index_A, index_B, index_O ;
   int r, s, r_offset, s_offset, WARP_SIZE = 32;
-  Scalar value, A_val;
+  double value, A_val;
   unsigned mask;
 
   // j_ptr = j_ptr_offset + blockIdx.x;
@@ -79,7 +78,7 @@ __global__ void GPU_4loop_ws(
                 if(s < f2){
                   mask = __activemask();
                   index_B = k * f2 + s;
-                  Scalar prod_val = value * arr_B[index_B];
+                  double prod_val = value * arr_B[index_B];
         
                   for(int shuffle_offset = WARP_SIZE/2; shuffle_offset > 0; shuffle_offset>>=1){
                     prod_val += __shfl_down_sync(mask, prod_val, shuffle_offset);
@@ -145,18 +144,18 @@ __global__ void GPU_4loop_streams_ncm_2_part_1(
   // uint64_t* mode_1_ptr,
   uint64_t* mode_1_idx,
   uint64_t* mode_2_ptr, uint64_t* mode_2_idx,
-  Scalar* values, Scalar* arr_A, Scalar* arr_B,  
-  Scalar* arr_O, uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, int ncm,
+  double* values, double* arr_A, double* arr_B,  
+  double* arr_O, uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, int ncm,
   int size_mode_0_ptr, int size_mode_1_ptr, int size_mode_2_ptr,
   int size_mode_0_idx, int size_mode_1_idx, int size_mode_2_idx, uint64_t i, uint64_t j_ptr_offset,
-  Scalar* buffer_for_ncm_2, bool* k_index_buffer
+  double* buffer_for_ncm_2, bool* k_index_buffer
 )
 { 
-  //shared memory will not be enough for 2d dense buf[k,s] of type Scalar
+  //shared memory will not be enough for 2d dense buf[k,s] of type double
   // for e.g. dim_k = 1024, dim_s = 32, the required memory is 32*8*1024 = 256kb
   uint64_t j, j_ptr, k, k_ptr, k_ptr_offset, index_B ;
   int  s, s_offset, buf_index;// WARP_SIZE = 32;
-  Scalar value;
+  double value;
   // unsigned mask;
 
   j_ptr = j_ptr_offset + blockIdx.x;
@@ -181,7 +180,7 @@ __global__ void GPU_4loop_streams_ncm_2_part_1(
         if(s < f2){
           index_B = j * f2 + s;
           buf_index = k * f2 + s;
-          Scalar prod_val = value * arr_B[index_B];
+          double prod_val = value * arr_B[index_B];
           
           //warp shuffle cannot be used here because either k or s is changing along the both block dimension
           // mask = __activemask();
@@ -205,16 +204,16 @@ __global__ void GPU_4loop_streams_ncm_2_part_1(
 __global__ void GPU_4loop_streams_ncm_2_part_2(
   uint64_t* mode_1_idx,
   uint64_t* mode_2_ptr, uint64_t* mode_2_idx,
-  Scalar* values, Scalar* arr_A, Scalar* arr_B,  
-  Scalar* arr_O, uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, int ncm,
+  double* values, double* arr_A, double* arr_B,  
+  double* arr_O, uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, int ncm,
   int size_mode_0_ptr, int size_mode_1_ptr, int size_mode_2_ptr,
   int size_mode_0_idx, int size_mode_1_idx, int size_mode_2_idx, uint64_t i, uint64_t j_ptr_offset,
-  Scalar* buffer_for_ncm_2, bool* k_index_buffer
+  double* buffer_for_ncm_2, bool* k_index_buffer
 )
 {
   uint64_t  k,  index_A, index_O ;
   int r, s, r_offset, s_offset, buf_index;
-  Scalar  A_val;
+  double  A_val;
   k = blockIdx.x;
   if(k_index_buffer[k]){
     // parallelize 'r' across warps
@@ -250,8 +249,8 @@ void GPU_4loop_host_func(
   uint64_t* mode_0_ptr, uint64_t* mode_0_idx,
   uint64_t* mode_1_ptr, uint64_t* mode_1_idx,
   uint64_t* mode_2_ptr, uint64_t* mode_2_idx,
-  Scalar* values, Scalar* arr_A, Scalar* arr_B,  
-  Scalar* arr_O, uint64_t arr_A_size, uint64_t arr_B_size, uint64_t arr_O_size, int contraction, 
+  double* values, double* arr_A, double* arr_B,  
+  double* arr_O, uint64_t arr_A_size, uint64_t arr_B_size, uint64_t arr_O_size, int contraction, 
   uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, uint64_t total_values,
   int size_mode_0_ptr, int size_mode_1_ptr, int size_mode_2_ptr,
   int size_mode_0_idx, int size_mode_1_idx, int size_mode_2_idx)
@@ -259,9 +258,9 @@ void GPU_4loop_host_func(
     // Allocate device memory
     uint64_t *d_mode_0_idx, *d_mode_1_ptr;
     uint64_t *d_mode_1_idx, *d_mode_2_ptr, *d_mode_2_idx;
-    Scalar *d_values, *d_arr_A, *d_arr_B, *d_arr_O;
-    // Scalar* buffer_for_contraction_0_1;
-    // Scalar* buffer_for_contraction_2;
+    double *d_values, *d_arr_A, *d_arr_B, *d_arr_O;
+    // double* buffer_for_contraction_0_1;
+    // double* buffer_for_contraction_2;
     // int* k_buffer_for_contraction_2;
   
     // cudaMalloc(&d_mode_0_ptr, sizeof(uint64_t) * size_mode_0_ptr);
@@ -270,17 +269,17 @@ void GPU_4loop_host_func(
     cudaMalloc(&d_mode_1_idx, sizeof(uint64_t) * size_mode_1_idx);
     cudaMalloc(&d_mode_2_ptr, sizeof(uint64_t) * size_mode_2_ptr);
     cudaMalloc(&d_mode_2_idx, sizeof(uint64_t) * size_mode_2_idx);
-    cudaMalloc(&d_values, sizeof(Scalar) * total_values);
-    cudaMalloc(&d_arr_A, sizeof(Scalar) * arr_A_size);
-    cudaMalloc(&d_arr_B, sizeof(Scalar) * arr_B_size);
-    cudaMalloc(&d_arr_O, sizeof(Scalar) * arr_O_size);
+    cudaMalloc(&d_values, sizeof(double) * total_values);
+    cudaMalloc(&d_arr_A, sizeof(double) * arr_A_size);
+    cudaMalloc(&d_arr_B, sizeof(double) * arr_B_size);
+    cudaMalloc(&d_arr_O, sizeof(double) * arr_O_size);
   
   
     // // parallelising 'j_ptr' for contraction = 0 and contraction = 1 :
-    // cudaMalloc(&buffer_for_contraction_0_1, f2 * size_mode_1_idx * sizeof(Scalar));
+    // cudaMalloc(&buffer_for_contraction_0_1, f2 * size_mode_1_idx * sizeof(double));
   
     // // parallelising 'j_ptr' for contraction = 2 :
-    // cudaMalloc(&buffer_for_contraction_2, n * f2 * size_mode_1_idx * sizeof(Scalar));
+    // cudaMalloc(&buffer_for_contraction_2, n * f2 * size_mode_1_idx * sizeof(double));
     // cudaMalloc(&k_buffer_for_contraction_2, n * size_mode_1_idx * sizeof(int));
   
     // Copy data to device
@@ -290,19 +289,19 @@ void GPU_4loop_host_func(
     cudaMemcpy(d_mode_1_idx, mode_1_idx, sizeof(uint64_t) * size_mode_1_idx, cudaMemcpyHostToDevice);
     cudaMemcpy(d_mode_2_ptr, mode_2_ptr, sizeof(uint64_t) * size_mode_2_ptr, cudaMemcpyHostToDevice);
     cudaMemcpy(d_mode_2_idx, mode_2_idx, sizeof(uint64_t) * size_mode_2_idx, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_values, values, sizeof(Scalar) * total_values, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_arr_A, arr_A, sizeof(Scalar) * arr_A_size, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_arr_B, arr_B, sizeof(Scalar) * arr_B_size, cudaMemcpyHostToDevice);
-    // cudaMemcpy(d_arr_O, arr_O, sizeof(Scalar) * arr_O_size, cudaMemcpyHostToDevice);
-    cudaMemset(d_arr_O, 0, sizeof(Scalar) * arr_O_size);
+    cudaMemcpy(d_values, values, sizeof(double) * total_values, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_arr_A, arr_A, sizeof(double) * arr_A_size, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_arr_B, arr_B, sizeof(double) * arr_B_size, cudaMemcpyHostToDevice);
+    // cudaMemcpy(d_arr_O, arr_O, sizeof(double) * arr_O_size, cudaMemcpyHostToDevice);
+    cudaMemset(d_arr_O, 0, sizeof(double) * arr_O_size);
     
     
     // // parallelising 'j_ptr' for contraction = 0 and contraction = 1 :
-    // cudaMemset(buffer_for_contraction_0_1, 0, f2 * size_mode_1_idx * sizeof(Scalar));
+    // cudaMemset(buffer_for_contraction_0_1, 0, f2 * size_mode_1_idx * sizeof(double));
     
     
     // // parallelising 'j_ptr' for contraction = 2 :
-    // cudaMemset(buffer_for_contraction_2, 0, n * f2 * size_mode_1_idx * sizeof(Scalar));
+    // cudaMemset(buffer_for_contraction_2, 0, n * f2 * size_mode_1_idx * sizeof(double));
     // cudaMemset(k_buffer_for_contraction_2, 0, n * size_mode_1_idx * sizeof(int));
     
     // uint64_t mode_1_idx_offset, mode_2_ptr_offset, mode_2_idx_offset, mode_1_idx_num_elements;
@@ -310,7 +309,7 @@ void GPU_4loop_host_func(
     if (contraction == 0 || contraction == 1) {
       dim3 gridDim(16,16);
       dim3 blockDim(32, 32);
-      int sharedMemBytes = f2 * sizeof(Scalar);
+      int sharedMemBytes = f2 * sizeof(double);
 
       GPU_4loop_ws<<<gridDim, blockDim, sharedMemBytes>>>(
         d_mode_0_idx, d_mode_1_ptr, d_mode_1_idx, d_mode_2_ptr, d_mode_2_idx,
@@ -321,19 +320,19 @@ void GPU_4loop_host_func(
     }
     /*
     else if(contraction == 2){
-      Scalar* buffer_for_ncm_2;
+      double* buffer_for_ncm_2;
       bool* k_index_buffer;
       
       NUM_STREAMS = 1;
       cout << "No. of streams = " << NUM_STREAMS <<endl;
 
-      cudaMalloc(&buffer_for_ncm_2, n * f2 * NUM_STREAMS * sizeof(Scalar));
+      cudaMalloc(&buffer_for_ncm_2, n * f2 * NUM_STREAMS * sizeof(double));
       cudaMalloc(&k_index_buffer, n * NUM_STREAMS * sizeof(bool));
       
       // cudaMalloc(&k_indices, n * NUM_STREAMS * sizeof(uint64_t));
       // cudaMalloc(&counter,  NUM_STREAMS * sizeof(uint64_t));
       
-      // cudaMemset(buffer_for_ncm_2 , 0, n * f2  * NUM_STREAMS * sizeof(Scalar));
+      // cudaMemset(buffer_for_ncm_2 , 0, n * f2  * NUM_STREAMS * sizeof(double));
       // cudaMemset(k_index_buffer, 0, n  * NUM_STREAMS * sizeof(bool));
 
       
@@ -341,7 +340,7 @@ void GPU_4loop_host_func(
         i = mode_0_idx[i_ptr];
         j_ptr_offset = mode_1_ptr[i_ptr];
         
-        cudaMemset(buffer_for_ncm_2 + n * f2 * (i_ptr % NUM_STREAMS), 0, n * f2  * sizeof(Scalar));
+        cudaMemset(buffer_for_ncm_2 + n * f2 * (i_ptr % NUM_STREAMS), 0, n * f2  * sizeof(double));
         cudaMemset(k_index_buffer + n * (i_ptr % NUM_STREAMS), 0, n  * sizeof(bool));
         
         dim3 gridDim(mode_1_ptr[i_ptr + 1] - mode_1_ptr[i_ptr]);
@@ -375,7 +374,7 @@ void GPU_4loop_host_func(
 
     cudaDeviceSynchronize();
     // Copy results back to host
-    cudaMemcpy(arr_O, d_arr_O, sizeof(Scalar) * arr_O_size, cudaMemcpyDeviceToHost);
+    cudaMemcpy(arr_O, d_arr_O, sizeof(double) * arr_O_size, cudaMemcpyDeviceToHost);
   
     // Free device memory
     // cudaFree(d_mode_0_ptr);
@@ -450,7 +449,7 @@ int main(int argc, char* argv[]) {
         uint64_t *mode_0_ptr, *mode_0_idx;
         uint64_t *mode_1_ptr, *mode_1_idx;
         uint64_t *mode_2_ptr, *mode_2_idx;
-        Scalar *values;
+        double *values;
         int order;
         
         size_t size_mode_0_ptr = tensor.ptrs[0].size();
@@ -477,7 +476,7 @@ int main(int argc, char* argv[]) {
         uint64_t out_dim1 = getOutputDim1(dimensions, ncm);
         
         // Generate factor matrices
-        Scalar *arr_A = nullptr, *arr_B = nullptr;
+        double *arr_A = nullptr, *arr_B = nullptr;
         generate_matrix(matrix_dim1, rank1, 42, arr_A);
         generate_matrix(matrix_dim2, rank2, 43, arr_B);
         
@@ -494,8 +493,8 @@ int main(int argc, char* argv[]) {
         }
         
         // Allocate output array
-        Scalar* arr_O = allocate_aligned_array(arr_O_size);
-        Scalar* ref_O = nullptr;
+        double* arr_O = allocate_aligned_array(arr_O_size);
+        double* ref_O = nullptr;
         
         if (verify) {
             // Only allocate reference array if verification is needed
@@ -504,27 +503,27 @@ int main(int argc, char* argv[]) {
         
         // Run this implementation (GPU 4-loop with streams) first
         if (verbose) {
-            cout << "Running GPU 4-loop with warp shuffle and 2d grid..." << endl;
+            cout << "Running GPU 4-loop with streams implementation..." << endl;
         }
         auto start = std::chrono::high_resolution_clock::now();
         
         // pinned memory for streams
-        // size_t ptr_size_0 = sizeof(uint64_t) * size_mode_0_ptr;
-        // size_t idx_size_0 = sizeof(uint64_t) * size_mode_0_idx;
-        // size_t ptr_size_1 = sizeof(uint64_t) * size_mode_1_ptr;
-        // size_t idx_size_1 = sizeof(uint64_t) * size_mode_1_idx;
-        // size_t ptr_size_2 = sizeof(uint64_t) * size_mode_2_ptr;
-        // size_t idx_size_2 = sizeof(uint64_t) * size_mode_2_idx;
-        // size_t val_size   = sizeof(Scalar)   * total_values;
+        size_t ptr_size_0 = sizeof(uint64_t) * size_mode_0_ptr;
+        size_t idx_size_0 = sizeof(uint64_t) * size_mode_0_idx;
+        size_t ptr_size_1 = sizeof(uint64_t) * size_mode_1_ptr;
+        size_t idx_size_1 = sizeof(uint64_t) * size_mode_1_idx;
+        size_t ptr_size_2 = sizeof(uint64_t) * size_mode_2_ptr;
+        size_t idx_size_2 = sizeof(uint64_t) * size_mode_2_idx;
+        size_t val_size   = sizeof(double)   * total_values;
 
         // Register host memory
-        // cudaHostRegister(mode_0_ptr, ptr_size_0, cudaHostRegisterDefault);
-        // cudaHostRegister(mode_0_idx, idx_size_0, cudaHostRegisterDefault);
-        // cudaHostRegister(mode_1_ptr, ptr_size_1, cudaHostRegisterDefault);
-        // cudaHostRegister(mode_1_idx, idx_size_1, cudaHostRegisterDefault);
-        // cudaHostRegister(mode_2_ptr, ptr_size_2, cudaHostRegisterDefault);
-        // cudaHostRegister(mode_2_idx, idx_size_2, cudaHostRegisterDefault);
-        // cudaHostRegister(values,     val_size,   cudaHostRegisterDefault);
+        cudaHostRegister(mode_0_ptr, ptr_size_0, cudaHostRegisterDefault);
+        cudaHostRegister(mode_0_idx, idx_size_0, cudaHostRegisterDefault);
+        cudaHostRegister(mode_1_ptr, ptr_size_1, cudaHostRegisterDefault);
+        cudaHostRegister(mode_1_idx, idx_size_1, cudaHostRegisterDefault);
+        cudaHostRegister(mode_2_ptr, ptr_size_2, cudaHostRegisterDefault);
+        cudaHostRegister(mode_2_idx, idx_size_2, cudaHostRegisterDefault);
+        cudaHostRegister(values,     val_size,   cudaHostRegisterDefault);
 
         GPU_4loop_host_func(
             mode_0_ptr, mode_0_idx,
@@ -538,19 +537,19 @@ int main(int argc, char* argv[]) {
             size_mode_0_idx, size_mode_1_idx, size_mode_2_idx
         );
         
-        // cudaHostUnregister(mode_0_ptr);
-        // cudaHostUnregister(mode_0_idx);
-        // cudaHostUnregister(mode_1_ptr);
-        // cudaHostUnregister(mode_1_idx);
-        // cudaHostUnregister(mode_2_ptr);
-        // cudaHostUnregister(mode_2_idx);
-        // cudaHostUnregister(values);
+        cudaHostUnregister(mode_0_ptr);
+        cudaHostUnregister(mode_0_idx);
+        cudaHostUnregister(mode_1_ptr);
+        cudaHostUnregister(mode_1_idx);
+        cudaHostUnregister(mode_2_ptr);
+        cudaHostUnregister(mode_2_idx);
+        cudaHostUnregister(values);
         
         auto end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
         
         bool valid = true;
-        Scalar ref_duration = 0.0;
+        double ref_duration = 0.0;
         
         if (verify) {
             // Only run reference implementation and validate if requested
@@ -580,7 +579,7 @@ int main(int argc, char* argv[]) {
             cout << "Method: GPU_4L_WS2, Time: " << duration / 1000.0 << " ms" << endl;
             if (verify) {
                 cout << "Reference execution time: " << ref_duration / 1000.0 << " ms" << endl;
-                cout << "Speedup over reference: " << (Scalar)ref_duration / duration << "x" << endl;
+                cout << "Speedup over reference: " << (double)ref_duration / duration << "x" << endl;
                 cout << "Result validation: " << (valid ? "PASSED" : "FAILED") << endl;
             }
         } else {

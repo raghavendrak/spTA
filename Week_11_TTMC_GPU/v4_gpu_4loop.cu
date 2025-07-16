@@ -6,7 +6,6 @@
 #include <cuda_runtime.h>
 #include "csf_tensor.h"
 #include "matrix_utils.h"
-#include "scalar_types.h"
 
 using namespace std;
 
@@ -21,7 +20,20 @@ do {                                                                            
     }                                                                                \
 } while (0)
 
-
+// atomicAdd_double is now defined here
+#ifndef ATOMIC_ADD_DOUBLE_DEFINED
+#define ATOMIC_ADD_DOUBLE_DEFINED
+__device__ double atomicAdd_double(double* address, double val) {
+  unsigned long long int* address_as_ull = (unsigned long long int*)address;
+  unsigned long long int old = *address_as_ull, assumed;
+  do {
+    assumed = old;
+    old = atomicCAS(address_as_ull, assumed,
+    __double_as_longlong(val + __longlong_as_double(assumed)));
+  } while (assumed != old);
+  return __longlong_as_double(old);
+}
+#endif
 
 /////////////////////////////////////////////////////////////////////
 /*Start of device function for GPU 4 loop Method*/
@@ -29,8 +41,8 @@ __global__ void contractionKernel_4(
   uint64_t* mode_0_ptr, uint64_t* mode_0_idx,
   uint64_t* mode_1_ptr, uint64_t* mode_1_idx,
   uint64_t* mode_2_ptr, uint64_t* mode_2_idx,
-  Scalar* values, Scalar* arr_A, Scalar* arr_B,  
-  Scalar* arr_O, uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, int contraction, Scalar* buffer)
+  double* values, double* arr_A, double* arr_B,  
+  double* arr_O, uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, int contraction, double* buffer)
 {
   // Compute thread index
   uint64_t j_ptr = blockIdx.x * blockDim.x + threadIdx.x;
@@ -55,7 +67,7 @@ __global__ void contractionKernel_4(
         uint64_t j = mode_1_idx[j_ptr];
 
         // Allocate buffer on a per-thread basis
-        //Scalar* buffer = (Scalar*)malloc(f2 * sizeof(Scalar));
+        //double* buffer = (double*)malloc(f2 * sizeof(double));
         if (buffer == nullptr) {// Handle allocation failure
           if(blockIdx.x == 0 && threadIdx.x == 0){
             printf("Memory allocation failure \n");
@@ -66,17 +78,17 @@ __global__ void contractionKernel_4(
         } 
 
         // Reset buffer
-        // memset(buffer, 0, f2 * sizeof(Scalar));
+        // memset(buffer, 0, f2 * sizeof(double));
 
         // Process the k_ptr range associated with j_ptr
         for (uint64_t k_ptr = mode_2_ptr[j_ptr]; k_ptr < mode_2_ptr[j_ptr + 1]; ++k_ptr) {
           uint64_t k = mode_2_idx[k_ptr];
-          Scalar value = values[k_ptr];
+          double value = values[k_ptr];
 
           for (uint64_t s = 0; s < f2; ++s) {
             uint64_t index_B = k * f2 + s;
-            // atomicAdd(&buffer[s], value * arr_B[index_B]);
-            atomicAdd(&buffer[j_ptr * f2 + s], value * arr_B[index_B]);
+            // atomicAdd_double(&buffer[s], value * arr_B[index_B]);
+            atomicAdd_double(&buffer[j_ptr * f2 + s], value * arr_B[index_B]);
           }
         }
 
@@ -97,8 +109,8 @@ __global__ void contractionKernel_4(
             } else if (contraction == 1) {
               index_O = j * f1 * f2 + r * f2 + s;
             }
-            // atomicAdd(&arr_O[index_O], buffer[s] * arr_A[index_A]);
-            atomicAdd(&arr_O[index_O], buffer[j_ptr * f2 + s] * arr_A[index_A]);
+            // atomicAdd_double(&arr_O[index_O], buffer[s] * arr_A[index_A]);
+            atomicAdd_double(&arr_O[index_O], buffer[j_ptr * f2 + s] * arr_A[index_A]);
           }
         }
 
@@ -113,8 +125,8 @@ __global__ void contractionKernel_for_second_contraction_part_1(
   uint64_t* mode_0_ptr, uint64_t* mode_0_idx,
   uint64_t* mode_1_ptr, uint64_t* mode_1_idx,
   uint64_t* mode_2_ptr, uint64_t* mode_2_idx,
-  Scalar* values, Scalar* arr_A, Scalar* arr_B,  
-  Scalar* arr_O, uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, int contraction, Scalar* buffer, int* k_buffer)
+  double* values, double* arr_A, double* arr_B,  
+  double* arr_O, uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, int contraction, double* buffer, int* k_buffer)
 {
   // Compute thread index
   uint64_t j_ptr = blockIdx.x * blockDim.x + threadIdx.x;
@@ -138,7 +150,7 @@ __global__ void contractionKernel_for_second_contraction_part_1(
         uint64_t k = mode_2_idx[k_ptr];
         atomicAdd(&k_buffer[j_ptr * n + k], 1);
         // k_buffer[j_ptr * n + k] += 1;
-        Scalar value = values[k_ptr];
+        double value = values[k_ptr];
 
         for (uint64_t s = 0; s < f2; ++s) {
           uint64_t index_B = j * f2 + s;
@@ -147,7 +159,7 @@ __global__ void contractionKernel_for_second_contraction_part_1(
           // if (index_B >= n * f2 || j_ptr * (n * f2) + index_buf >= n * f2 * mode_1_ptr[mode_0_ptr[1]]) {
           //     printf("Out of bound access! \n");
           // }
-          atomicAdd(&buffer[j_ptr * (n * f2) + index_buf], value * arr_B[index_B]);
+          atomicAdd_double(&buffer[j_ptr * (n * f2) + index_buf], value * arr_B[index_B]);
           // buffer[j_ptr * (n * f2) + index_buf] += value * arr_B[index_B];
         }
       }
@@ -160,8 +172,8 @@ __global__ void contractionKernel_for_second_contraction_part_2(
   uint64_t* mode_0_ptr, uint64_t* mode_0_idx,
   uint64_t* mode_1_ptr, uint64_t* mode_1_idx,
   uint64_t* mode_2_ptr, uint64_t* mode_2_idx,
-  Scalar* values, Scalar* arr_A, Scalar* arr_B,  
-  Scalar* arr_O, uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, int contraction, Scalar* buffer, int* k_buffer)
+  double* values, double* arr_A, double* arr_B,  
+  double* arr_O, uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, int contraction, double* buffer, int* k_buffer)
 {
   // Compute thread index
   uint64_t j_ptr = blockIdx.x * blockDim.x + threadIdx.x;
@@ -190,7 +202,7 @@ __global__ void contractionKernel_for_second_contraction_part_2(
               uint64_t index_O = k * f1 * f2 + r * f2 + s;
               uint64_t index_buf = k * f2 + s;
 
-              atomicAdd(&arr_O[index_O], buffer[j_ptr * n * f2 + index_buf] * arr_A[index_A]);
+              atomicAdd_double(&arr_O[index_O], buffer[j_ptr * n * f2 + index_buf] * arr_A[index_A]);
             }
           }
         }
@@ -207,17 +219,17 @@ void performContraction_gpu_2(
   uint64_t* mode_0_ptr, uint64_t* mode_0_idx,
   uint64_t* mode_1_ptr, uint64_t* mode_1_idx,
   uint64_t* mode_2_ptr, uint64_t* mode_2_idx,
-  Scalar* values, Scalar* arr_A, Scalar* arr_B,  
-  Scalar* arr_O, uint64_t arr_A_size, uint64_t arr_B_size, uint64_t arr_O_size, int contraction, 
+  double* values, double* arr_A, double* arr_B,  
+  double* arr_O, uint64_t arr_A_size, uint64_t arr_B_size, uint64_t arr_O_size, int contraction, 
   uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, uint64_t total_values,
   int size_mode_0_ptr, int size_mode_1_ptr, int size_mode_2_ptr,
   int size_mode_0_idx, int size_mode_1_idx, int size_mode_2_idx)
 {
   // Allocate device memory
   uint64_t *d_mode_0_ptr, *d_mode_0_idx, *d_mode_1_ptr, *d_mode_1_idx, *d_mode_2_ptr, *d_mode_2_idx;
-  Scalar *d_values, *d_arr_A, *d_arr_B, *d_arr_O;
-  Scalar* buffer_for_contraction_0_1;
-  Scalar* buffer_for_contraction_2;
+  double *d_values, *d_arr_A, *d_arr_B, *d_arr_O;
+  double* buffer_for_contraction_0_1;
+  double* buffer_for_contraction_2;
   int* k_buffer_for_contraction_2;
 
   cudaMalloc(&d_mode_0_ptr, sizeof(uint64_t) * size_mode_0_ptr);
@@ -226,10 +238,10 @@ void performContraction_gpu_2(
   cudaMalloc(&d_mode_1_idx, sizeof(uint64_t) * size_mode_1_idx);
   cudaMalloc(&d_mode_2_ptr, sizeof(uint64_t) * size_mode_2_ptr);
   cudaMalloc(&d_mode_2_idx, sizeof(uint64_t) * size_mode_2_idx);
-  cudaMalloc(&d_values, sizeof(Scalar) * total_values);
-  cudaMalloc(&d_arr_A, sizeof(Scalar) * arr_A_size);
-  cudaMalloc(&d_arr_B, sizeof(Scalar) * arr_B_size);
-  cudaMalloc(&d_arr_O, sizeof(Scalar) * arr_O_size);
+  cudaMalloc(&d_values, sizeof(double) * total_values);
+  cudaMalloc(&d_arr_A, sizeof(double) * arr_A_size);
+  cudaMalloc(&d_arr_B, sizeof(double) * arr_B_size);
+  cudaMalloc(&d_arr_O, sizeof(double) * arr_O_size);
 
   // Copy data to device
   cudaMemcpy(d_mode_0_ptr, mode_0_ptr, sizeof(uint64_t) * size_mode_0_ptr, cudaMemcpyHostToDevice);
@@ -238,10 +250,10 @@ void performContraction_gpu_2(
   cudaMemcpy(d_mode_1_idx, mode_1_idx, sizeof(uint64_t) * size_mode_1_idx, cudaMemcpyHostToDevice);
   cudaMemcpy(d_mode_2_ptr, mode_2_ptr, sizeof(uint64_t) * size_mode_2_ptr, cudaMemcpyHostToDevice);
   cudaMemcpy(d_mode_2_idx, mode_2_idx, sizeof(uint64_t) * size_mode_2_idx, cudaMemcpyHostToDevice);
-  cudaMemcpy(d_values, values, sizeof(Scalar) * total_values, cudaMemcpyHostToDevice);
-  cudaMemcpy(d_arr_A, arr_A, sizeof(Scalar) * arr_A_size, cudaMemcpyHostToDevice);
-  cudaMemcpy(d_arr_B, arr_B, sizeof(Scalar) * arr_B_size, cudaMemcpyHostToDevice);
-  cudaMemset(d_arr_O, 0, sizeof(Scalar) * arr_O_size);
+  cudaMemcpy(d_values, values, sizeof(double) * total_values, cudaMemcpyHostToDevice);
+  cudaMemcpy(d_arr_A, arr_A, sizeof(double) * arr_A_size, cudaMemcpyHostToDevice);
+  cudaMemcpy(d_arr_B, arr_B, sizeof(double) * arr_B_size, cudaMemcpyHostToDevice);
+  cudaMemset(d_arr_O, 0, sizeof(double) * arr_O_size);
 
   // Launch kernel
   int threadsPerBlock = 256;
@@ -251,8 +263,8 @@ void performContraction_gpu_2(
   
   if(contraction == 0 || contraction == 1){
     // parallelising 'j_ptr' for contraction = 0 and contraction = 1 :
-    cudaCheckError(cudaMalloc(&buffer_for_contraction_0_1, f2 * size_mode_1_idx * sizeof(Scalar)));
-    cudaCheckError(cudaMemset(buffer_for_contraction_0_1, 0, f2 * size_mode_1_idx * sizeof(Scalar)));
+    cudaCheckError(cudaMalloc(&buffer_for_contraction_0_1, f2 * size_mode_1_idx * sizeof(double)));
+    cudaCheckError(cudaMemset(buffer_for_contraction_0_1, 0, f2 * size_mode_1_idx * sizeof(double)));
     
     // parallelising 'i_ptr' :
     contractionKernel_4<<<blocksPerGrid, threadsPerBlock>>>(
@@ -261,11 +273,11 @@ void performContraction_gpu_2(
     }
     else if(contraction == 2){
       // parallelising 'j_ptr' for contraction = 2 :
-      cudaMalloc(&buffer_for_contraction_2, n * f2 * size_mode_1_idx * sizeof(Scalar));
+      cudaMalloc(&buffer_for_contraction_2, n * f2 * size_mode_1_idx * sizeof(double));
       cudaMalloc(&k_buffer_for_contraction_2, n * size_mode_1_idx * sizeof(int));
       
       // parallelising 'j_ptr' for contraction = 2 :
-      cudaMemset(buffer_for_contraction_2, 0, n * f2 * size_mode_1_idx * sizeof(Scalar));
+      cudaMemset(buffer_for_contraction_2, 0, n * f2 * size_mode_1_idx * sizeof(double));
       cudaMemset(k_buffer_for_contraction_2, 0, n * size_mode_1_idx * sizeof(int));
 
       contractionKernel_for_second_contraction_part_1<<<blocksPerGrid, threadsPerBlock>>>(
@@ -281,7 +293,7 @@ void performContraction_gpu_2(
 
 
   // Copy results back to host
-  cudaMemcpy(arr_O, d_arr_O, sizeof(Scalar) * arr_O_size, cudaMemcpyDeviceToHost);
+  cudaMemcpy(arr_O, d_arr_O, sizeof(double) * arr_O_size, cudaMemcpyDeviceToHost);
 
   // Free device memory
   cudaFree(d_mode_0_ptr);
@@ -361,7 +373,7 @@ int main(int argc, char* argv[]) {
         uint64_t *mode_0_ptr, *mode_0_idx;
         uint64_t *mode_1_ptr, *mode_1_idx;
         uint64_t *mode_2_ptr, *mode_2_idx;
-        Scalar *values;
+        double *values;
         int order;
         
         size_t size_mode_0_ptr = tensor.ptrs[0].size();
@@ -388,7 +400,7 @@ int main(int argc, char* argv[]) {
         uint64_t out_dim1 = getOutputDim1(dimensions, ncm);
         
         // Generate factor matrices
-        Scalar *arr_A = nullptr, *arr_B = nullptr;
+        double *arr_A = nullptr, *arr_B = nullptr;
         generate_matrix(matrix_dim1, rank1, 42, arr_A);
         generate_matrix(matrix_dim2, rank2, 43, arr_B);
         
@@ -405,8 +417,8 @@ int main(int argc, char* argv[]) {
         }
         
         // Allocate output array
-        Scalar* arr_O = allocate_aligned_array(arr_O_size);
-        Scalar* ref_O = nullptr;
+        double* arr_O = allocate_aligned_array(arr_O_size);
+        double* ref_O = nullptr;
         
         if (verify) {
             // Only allocate reference array if verification is needed
@@ -435,7 +447,7 @@ int main(int argc, char* argv[]) {
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
         
         bool valid = true;
-        Scalar ref_duration = 0.0;
+        double ref_duration = 0.0;
         
         if (verify) {
             // Only run reference implementation and validate if requested
@@ -465,7 +477,7 @@ int main(int argc, char* argv[]) {
             cout << "GPU 4-loop execution time: " << duration / 1000.0 << " ms" << endl;
             if (verify) {
                 cout << "Reference execution time: " << ref_duration / 1000.0 << " ms" << endl;
-                cout << "Speedup over reference: " << (Scalar)ref_duration / duration << "x" << endl;
+                cout << "Speedup over reference: " << (double)ref_duration / duration << "x" << endl;
                 cout << "Result validation: " << (valid ? "PASSED" : "FAILED") << endl;
             }
         } else {

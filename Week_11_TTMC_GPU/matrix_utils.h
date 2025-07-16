@@ -5,17 +5,15 @@
 #include <iostream>
 #include <cmath>
 #include <cstdlib>
-#include <iomanip>
-#include "scalar_types.h"
 
 // Function to generate a random matrix
-void generate_matrix(uint64_t rows, uint64_t cols, unsigned int seed, Scalar*& arr) {
+void generate_matrix(uint64_t rows, uint64_t cols, unsigned int seed, double*& arr) {
   // Allocate memory for the matrix
-  arr = new Scalar[rows * cols];
+  arr = new double[rows * cols];
 
   // Initialize random number generator with seed
   std::mt19937 gen(seed);
-  std::uniform_real_distribution<Scalar> dist(0.0, 1.0);
+  std::uniform_real_distribution<double> dist(0.0, 1.0);
 
   // Fill matrix with random values
   for (uint64_t i = 0; i < rows * cols; i++) {
@@ -24,14 +22,13 @@ void generate_matrix(uint64_t rows, uint64_t cols, unsigned int seed, Scalar*& a
 }
 
 // Function to compare two matrices
-bool compare_results1(Scalar*& C1, Scalar*& C2, uint64_t size,  Scalar tolerance = 1e-6)
+bool compare_results(double*& C1, double*& C2, uint64_t size,  double tolerance = 1e-6)
 {
   for (int i = 0; i < size ; ++i) {
     if (std::fabs(C1[i] - C2[i]) > tolerance) {
       std::cout << " output NOT matching at index : " << i << std::endl;
       for(int j = i; j < i + 10; ++j){
         if(j < size){
-          std::cout << std::fixed << std::setprecision(10);
           std::cout << "C1[" << j << "] = " << C1[j] << " C2[" << j << "] = " << C2[j] << std::endl;
         }
       }
@@ -42,13 +39,13 @@ bool compare_results1(Scalar*& C1, Scalar*& C2, uint64_t size,  Scalar tolerance
 }
 
 // Function to compare results against reference implementation
-bool compare_results(Scalar* result, Scalar* reference, uint64_t size, Scalar tolerance = 1e-6) {
-    Scalar max_diff = 0.0;
-    Scalar max_val = 0.0;
+bool compare_results1(double* result, double* reference, uint64_t size, double tolerance = 1e-5) {
+    double max_diff = 0.0;
+    double max_val = 0.0;
     int errors = 0;
     
     for (uint64_t i = 0; i < size; i++) {
-        Scalar diff = std::fabs(result[i] - reference[i]);
+        double diff = std::fabs(result[i] - reference[i]);
         max_diff = std::max(max_diff, diff);
         max_val = std::max(max_val, std::fabs(reference[i]));
         
@@ -57,7 +54,7 @@ bool compare_results(Scalar* result, Scalar* reference, uint64_t size, Scalar to
         }
     }
     
-    Scalar rel_error = (max_val > 0) ? max_diff / max_val : max_diff;
+    double rel_error = (max_val > 0) ? max_diff / max_val : max_diff;
     
     std::cout << "Validation: Max absolute diff = " << max_diff 
          << ", Relative error = " << rel_error 
@@ -67,9 +64,9 @@ bool compare_results(Scalar* result, Scalar* reference, uint64_t size, Scalar to
 }
 
 // Function for aligned memory allocation
-Scalar* allocate_aligned_array(size_t num_elements) {
+double* allocate_aligned_array(size_t num_elements) {
     constexpr size_t alignment = 32;           // 32 bytes = 256 bits
-    constexpr size_t element_size = sizeof(Scalar); // 8 bytes per Scalar
+    constexpr size_t element_size = sizeof(double); // 8 bytes per double
 
     size_t total_bytes = num_elements * element_size;
 
@@ -86,12 +83,12 @@ Scalar* allocate_aligned_array(size_t num_elements) {
 
     //initilaize to zero
     size_t total_elements = total_bytes / element_size;
-    Scalar* arr = static_cast<Scalar*>(ptr);
+    double* arr = static_cast<double*>(ptr);
     for (size_t i = 0; i < total_elements; ++i) {
       arr[i] = 0.0;
     }
 
-    return static_cast<Scalar*>(ptr);
+    return static_cast<double*>(ptr);
 }
 
 #endif // MATRIX_UTILS_H 

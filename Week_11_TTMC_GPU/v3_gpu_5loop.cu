@@ -20,7 +20,20 @@ do {                                                                            
     }                                                                                \
 } while (0)
 
-
+// atomicAdd_double is now defined here
+#ifndef ATOMIC_ADD_DOUBLE_DEFINED
+#define ATOMIC_ADD_DOUBLE_DEFINED
+__device__ double atomicAdd_double(double* address, double val) {
+  unsigned long long int* address_as_ull = (unsigned long long int*)address;
+  unsigned long long int old = *address_as_ull, assumed;
+  do {
+    assumed = old;
+    old = atomicCAS(address_as_ull, assumed,
+    __double_as_longlong(val + __longlong_as_double(assumed)));
+  } while (assumed != old);
+  return __longlong_as_double(old);
+}
+#endif
 
 /////////////////////////////////////////////////////////////////////
 /*Start of device function for GPU 5 loop Method*/
@@ -28,8 +41,8 @@ __global__ void GPU_5loop_contraction_kernel_0(
   uint64_t* mode_0_ptr, uint64_t* mode_0_idx,
   uint64_t* mode_1_ptr, uint64_t* mode_1_idx,
   uint64_t* mode_2_ptr, uint64_t* mode_2_idx,
-  Scalar* values, Scalar* arr_A, Scalar* arr_B,  
-  Scalar* arr_O, uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, int contraction,
+  double* values, double* arr_A, double* arr_B,  
+  double* arr_O, uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, int contraction,
   uint64_t size_mode_0_ptr, uint64_t size_mode_1_ptr, uint64_t size_mode_2_ptr,
   uint64_t size_mode_0_idx, uint64_t size_mode_1_idx, uint64_t size_mode_2_idx) 
 {
@@ -45,7 +58,7 @@ __global__ void GPU_5loop_contraction_kernel_0(
     }
   }
   uint64_t i, j, k, index_A, index_B, index_O;
-  Scalar value;
+  double value;
   if ((i_ptr >= 0 && i_ptr < mode_0_ptr[1]) && 
       ( j_ptr < size_mode_1_idx) ) 
   {
@@ -79,7 +92,7 @@ __global__ void GPU_5loop_contraction_kernel_0(
             index_O = k * f1 * f2 + r * f2 + s;
           }
 
-          atomicAdd(&arr_O[index_O], value * arr_A[index_A] * arr_B[index_B]);
+          atomicAdd_double(&arr_O[index_O], value * arr_A[index_A] * arr_B[index_B]);
         }
       }
     }
@@ -96,8 +109,8 @@ void performContraction_gpu_1(
   uint64_t* mode_0_ptr, uint64_t* mode_0_idx,
   uint64_t* mode_1_ptr, uint64_t* mode_1_idx,
   uint64_t* mode_2_ptr, uint64_t* mode_2_idx,
-  Scalar* values, Scalar* arr_A, Scalar* arr_B,
-  Scalar* arr_O, uint64_t arr_A_size, uint64_t arr_B_size, uint64_t arr_O_size,
+  double* values, double* arr_A, double* arr_B,
+  double* arr_O, uint64_t arr_A_size, uint64_t arr_B_size, uint64_t arr_O_size,
   int contraction, uint64_t dim_0, uint64_t dim_1, uint64_t dim_2,
   uint64_t r1, uint64_t r2, uint64_t total_values,
   uint64_t size_mode_0_ptr, uint64_t size_mode_1_ptr, uint64_t size_mode_2_ptr,
@@ -105,7 +118,7 @@ void performContraction_gpu_1(
 {
   // Allocate device memory
   uint64_t *d_mode_0_ptr, *d_mode_0_idx, *d_mode_1_ptr, *d_mode_1_idx, *d_mode_2_ptr, *d_mode_2_idx;
-  Scalar *d_values, *d_arr_A, *d_arr_B, *d_arr_O;
+  double *d_values, *d_arr_A, *d_arr_B, *d_arr_O;
 
   cudaMalloc(&d_mode_0_ptr, sizeof(uint64_t) * size_mode_0_ptr);
   cudaMalloc(&d_mode_0_idx, sizeof(uint64_t) * size_mode_0_idx);
@@ -113,10 +126,10 @@ void performContraction_gpu_1(
   cudaMalloc(&d_mode_1_idx, sizeof(uint64_t) * size_mode_1_idx);
   cudaMalloc(&d_mode_2_ptr, sizeof(uint64_t) * size_mode_2_ptr);
   cudaMalloc(&d_mode_2_idx, sizeof(uint64_t) * size_mode_2_idx);
-  cudaMalloc(&d_values, sizeof(Scalar) * total_values);
-  cudaMalloc(&d_arr_A, sizeof(Scalar) * arr_A_size);
-  cudaMalloc(&d_arr_B, sizeof(Scalar) * arr_B_size);
-  cudaMalloc(&d_arr_O, sizeof(Scalar) * arr_O_size);
+  cudaMalloc(&d_values, sizeof(double) * total_values);
+  cudaMalloc(&d_arr_A, sizeof(double) * arr_A_size);
+  cudaMalloc(&d_arr_B, sizeof(double) * arr_B_size);
+  cudaMalloc(&d_arr_O, sizeof(double) * arr_O_size);
 
   // Copy data from host to device
   cudaMemcpy(d_mode_0_ptr, mode_0_ptr, sizeof(uint64_t) * size_mode_0_ptr, cudaMemcpyHostToDevice);
@@ -125,10 +138,10 @@ void performContraction_gpu_1(
   cudaMemcpy(d_mode_1_idx, mode_1_idx, sizeof(uint64_t) * size_mode_1_idx, cudaMemcpyHostToDevice);
   cudaMemcpy(d_mode_2_ptr, mode_2_ptr, sizeof(uint64_t) * size_mode_2_ptr, cudaMemcpyHostToDevice);
   cudaMemcpy(d_mode_2_idx, mode_2_idx, sizeof(uint64_t) * size_mode_2_idx, cudaMemcpyHostToDevice);
-  cudaMemcpy(d_values, values, sizeof(Scalar) * total_values, cudaMemcpyHostToDevice);
-  cudaMemcpy(d_arr_A, arr_A, sizeof(Scalar) * arr_A_size, cudaMemcpyHostToDevice);
-  cudaMemcpy(d_arr_B, arr_B, sizeof(Scalar) * arr_B_size, cudaMemcpyHostToDevice);
-  cudaMemset(d_arr_O, 0, sizeof(Scalar) * arr_O_size);
+  cudaMemcpy(d_values, values, sizeof(double) * total_values, cudaMemcpyHostToDevice);
+  cudaMemcpy(d_arr_A, arr_A, sizeof(double) * arr_A_size, cudaMemcpyHostToDevice);
+  cudaMemcpy(d_arr_B, arr_B, sizeof(double) * arr_B_size, cudaMemcpyHostToDevice);
+  cudaMemset(d_arr_O, 0, sizeof(double) * arr_O_size);
 
   // Kernel launch parameters
   int threadsPerBlock = 256;
@@ -146,7 +159,7 @@ void performContraction_gpu_1(
   cudaDeviceSynchronize();
 
   // Copy results back to host
-  cudaMemcpy(arr_O, d_arr_O, sizeof(Scalar) * arr_O_size, cudaMemcpyDeviceToHost);
+  cudaMemcpy(arr_O, d_arr_O, sizeof(double) * arr_O_size, cudaMemcpyDeviceToHost);
 
   // Free device memory
   cudaFree(d_mode_0_ptr);
@@ -218,7 +231,7 @@ int main(int argc, char* argv[]) {
         uint64_t *mode_0_ptr, *mode_0_idx;
         uint64_t *mode_1_ptr, *mode_1_idx;
         uint64_t *mode_2_ptr, *mode_2_idx;
-        Scalar *values;
+        double *values;
         int order;
         
         size_t size_mode_0_ptr = tensor.ptrs[0].size();
@@ -245,7 +258,7 @@ int main(int argc, char* argv[]) {
         uint64_t out_dim1 = getOutputDim1(dimensions, ncm);
         
         // Generate factor matrices
-        Scalar *arr_A = nullptr, *arr_B = nullptr;
+        double *arr_A = nullptr, *arr_B = nullptr;
         generate_matrix(matrix_dim1, rank1, 42, arr_A);
         generate_matrix(matrix_dim2, rank2, 43, arr_B);
         
@@ -262,8 +275,8 @@ int main(int argc, char* argv[]) {
         }
         
         // Allocate output array
-        Scalar* arr_O = allocate_aligned_array(arr_O_size);
-        Scalar* ref_O = nullptr;
+        double* arr_O = allocate_aligned_array(arr_O_size);
+        double* ref_O = nullptr;
         
         if (verify) {
             // Only allocate reference array if verification is needed
@@ -292,7 +305,7 @@ int main(int argc, char* argv[]) {
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
         
         bool valid = true;
-        Scalar ref_duration = 0.0;
+        double ref_duration = 0.0;
         
         if (verify) {
             // Now run reference implementation (CPU 4-loop) for validation
@@ -322,7 +335,7 @@ int main(int argc, char* argv[]) {
             cout << "GPU 5-loop execution time: " << duration / 1000.0 << " ms" << endl;
             if (verify) {
                 cout << "Reference execution time: " << ref_duration / 1000.0 << " ms" << endl;
-                cout << "Speedup over reference: " << (Scalar)ref_duration / duration << "x" << endl;
+                cout << "Speedup over reference: " << (double)ref_duration / duration << "x" << endl;
                 cout << "Result validation: " << (valid ? "PASSED" : "FAILED") << endl;
             }
         } else {
