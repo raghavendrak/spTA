@@ -20,20 +20,20 @@ do {                                                                            
     }                                                                                \
 } while (0)
 
-// atomicAdd_double is now defined here
-#ifndef ATOMIC_ADD_DOUBLE_DEFINED
-#define ATOMIC_ADD_DOUBLE_DEFINED
-__device__ double atomicAdd_double(double* address, double val) {
-  unsigned long long int* address_as_ull = (unsigned long long int*)address;
-  unsigned long long int old = *address_as_ull, assumed;
-  do {
-    assumed = old;
-    old = atomicCAS(address_as_ull, assumed,
-    __double_as_longlong(val + __longlong_as_double(assumed)));
-  } while (assumed != old);
-  return __longlong_as_double(old);
-}
-#endif
+// // atomicAdd_double is now defined here
+// #ifndef ATOMIC_ADD_DOUBLE_DEFINED
+// #define ATOMIC_ADD_DOUBLE_DEFINED
+// __device__ double atomicAdd_double(double* address, double val) {
+//   unsigned long long int* address_as_ull = (unsigned long long int*)address;
+//   unsigned long long int old = *address_as_ull, assumed;
+//   do {
+//     assumed = old;
+//     old = atomicCAS(address_as_ull, assumed,
+//     __double_as_longlong(val + __longlong_as_double(assumed)));
+//   } while (assumed != old);
+//   return __longlong_as_double(old);
+// }
+// #endif
 
 /////////////////////////////////////////////////////////////////////
 /*Start of device function for GPU 5 loop Method*/
@@ -92,7 +92,7 @@ __global__ void GPU_5loop_contraction_kernel_0(
             index_O = k * f1 * f2 + r * f2 + s;
           }
 
-          atomicAdd_double(&arr_O[index_O], value * arr_A[index_A] * arr_B[index_B]);
+          atomicAdd(&arr_O[index_O], value * arr_A[index_A] * arr_B[index_B]);
         }
       }
     }
@@ -147,16 +147,17 @@ void performContraction_gpu_1(
   int threadsPerBlock = 256;
   int blocksPerGrid = (size_mode_1_idx + threadsPerBlock - 1) / threadsPerBlock;
 
+  auto start = std::chrono::high_resolution_clock::now();
   // Launch appropriate kernel based on contraction type
   GPU_5loop_contraction_kernel_0<<<blocksPerGrid, threadsPerBlock>>>(
     d_mode_0_ptr, d_mode_0_idx, d_mode_1_ptr, d_mode_1_idx, d_mode_2_ptr, d_mode_2_idx,
     d_values, d_arr_A, d_arr_B, d_arr_O, dim_0, dim_1, dim_2, r1, r2, contraction,
     size_mode_0_ptr, size_mode_1_ptr, size_mode_2_ptr, size_mode_0_idx, size_mode_1_idx, size_mode_2_idx
   );
-
-  // Check for launch errors
-  cudaGetLastError();
   cudaDeviceSynchronize();
+  auto end = std::chrono::high_resolution_clock::now();
+  auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+  cout << "Method: GPU_5L, Time: " << duration / 1000.0 << " ms" << endl;
 
   // Copy results back to host
   cudaMemcpy(arr_O, d_arr_O, sizeof(double) * arr_O_size, cudaMemcpyDeviceToHost);
@@ -328,23 +329,14 @@ int main(int argc, char* argv[]) {
             
             // Validate results using compare_results from matrix_utils.h
             valid = compare_results(arr_O, ref_O, arr_O_size);
+            
+            cout << "validation: " << (valid ? "PASSED" : "FAILED") << endl;
         }
         
         // Report results
         if (verbose) {
-            cout << "GPU 5-loop execution time: " << duration / 1000.0 << " ms" << endl;
-            if (verify) {
-                cout << "Reference execution time: " << ref_duration / 1000.0 << " ms" << endl;
-                cout << "Speedup over reference: " << (double)ref_duration / duration << "x" << endl;
-                cout << "Result validation: " << (valid ? "PASSED" : "FAILED") << endl;
-            }
-        } else {
-            if (verify) {
-                cout << "Method: GPU_5L, Time: " << duration / 1000.0 << " ms, Validation: " << (valid ? "PASSED" : "FAILED") << endl;
-            } else {
-                cout << "Method: GPU_5L, Time: " << duration / 1000.0 << " ms" << endl;
-            }
-        }
+          cout << "Method: GPU_5L, Time: " << duration / 1000.0 << " ms" << endl;
+        } 
         
         // Clean up
         delete[] mode_0_ptr;

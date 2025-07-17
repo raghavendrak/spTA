@@ -1,6 +1,7 @@
 #include <iostream>
 #include <vector>
 #include <cstring>
+#include <chrono>
 #include <stdexcept>
 #include <cuda_runtime.h>
 #include "csf_tensor.h"
@@ -219,6 +220,7 @@ void GPU_4L_CM_host_func(
       int num_warps = (block_size + warp_size - 1) / warp_size;
       int sharedMemBytes =  num_warps * f2 * sizeof(double);
       
+      auto start = std::chrono::high_resolution_clock::now();
       GPU_4L_CM_device_func_ncm_0<<<grid_size, block_size, sharedMemBytes>>>(
         d_mode_0_ptr, d_mode_0_idx,
         d_mode_1_ptr, d_mode_1_idx,
@@ -227,6 +229,10 @@ void GPU_4L_CM_host_func(
         size_mode_0_ptr, size_mode_1_ptr, size_mode_2_ptr,
         size_mode_0_idx, size_mode_1_idx, size_mode_2_idx, num_warps
       );
+      cudaDeviceSynchronize();
+      auto end = std::chrono::high_resolution_clock::now();
+      auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+      cout << "Method: GPU_4L_WS, Time: " << duration / 1000.0 << " ms" << endl;
     }
     else if (contraction == 1) {
     
@@ -237,6 +243,7 @@ void GPU_4L_CM_host_func(
       int num_warps = (block_size + warp_size - 1) / warp_size;
       int sharedMemBytes =  num_warps * f2 * sizeof(double);
       
+      auto start = std::chrono::high_resolution_clock::now();
       GPU_4L_CM_device_func_ncm_1<<<grid_size, block_size, sharedMemBytes>>>(
         d_mode_0_ptr, d_mode_0_idx,
         d_mode_1_ptr, d_mode_1_idx,
@@ -245,6 +252,10 @@ void GPU_4L_CM_host_func(
         size_mode_0_ptr, size_mode_1_ptr, size_mode_2_ptr,
         size_mode_0_idx, size_mode_1_idx, size_mode_2_idx, num_warps
       );
+      cudaDeviceSynchronize();
+      auto end = std::chrono::high_resolution_clock::now();
+      auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+      cout << "Method: GPU_4L_WS, Time: " << duration / 1000.0 << " ms" << endl;
     }
     /*
     else if(contraction == 2){
@@ -483,22 +494,12 @@ int main(int argc, char* argv[]) {
             
             // Validate results using compare_results from matrix_utils.h
             valid = compare_results(arr_O, ref_O, arr_O_size);
+            cout << "validation: " << (valid ? "PASSED" : "FAILED") << endl;  
         }
         
         // Report results
-        if (verbose) {
-            cout << "Method: GPU_4L_WS, Time: " << duration / 1000.0 << " ms" << endl;
-            if (verify) {
-                cout << "Reference execution time: " << ref_duration / 1000.0 << " ms" << endl;
-                cout << "Speedup over reference: " << (double)ref_duration / duration << "x" << endl;
-                cout << "Result validation: " << (valid ? "PASSED" : "FAILED") << endl;
-            }
-        } else {
-            if (verify) {
-                cout << "Method: GPU_4L_WS, Time: " << duration / 1000.0 << " ms, Validation: " << (valid ? "PASSED" : "FAILED") << endl;
-            } else {
-                cout << "Method: GPU_4L_WS, Time: " << duration / 1000.0 << " ms" << endl;
-            }
+        if(verbose){
+          cout << "Method: GPU_4L_WS, Time: " << duration / 1000.0 << " ms" << endl;
         }
         
         // Clean up

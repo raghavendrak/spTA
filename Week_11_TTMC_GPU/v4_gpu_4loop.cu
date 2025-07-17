@@ -20,20 +20,6 @@ do {                                                                            
     }                                                                                \
 } while (0)
 
-// atomicAdd_double is now defined here
-#ifndef ATOMIC_ADD_DOUBLE_DEFINED
-#define ATOMIC_ADD_DOUBLE_DEFINED
-__device__ double atomicAdd_double(double* address, double val) {
-  unsigned long long int* address_as_ull = (unsigned long long int*)address;
-  unsigned long long int old = *address_as_ull, assumed;
-  do {
-    assumed = old;
-    old = atomicCAS(address_as_ull, assumed,
-    __double_as_longlong(val + __longlong_as_double(assumed)));
-  } while (assumed != old);
-  return __longlong_as_double(old);
-}
-#endif
 
 /////////////////////////////////////////////////////////////////////
 /*Start of device function for GPU 4 loop Method*/
@@ -87,8 +73,8 @@ __global__ void contractionKernel_4(
 
           for (uint64_t s = 0; s < f2; ++s) {
             uint64_t index_B = k * f2 + s;
-            // atomicAdd_double(&buffer[s], value * arr_B[index_B]);
-            atomicAdd_double(&buffer[j_ptr * f2 + s], value * arr_B[index_B]);
+            // atomicAdd(&buffer[s], value * arr_B[index_B]);
+            atomicAdd(&buffer[j_ptr * f2 + s], value * arr_B[index_B]);
           }
         }
 
@@ -109,8 +95,8 @@ __global__ void contractionKernel_4(
             } else if (contraction == 1) {
               index_O = j * f1 * f2 + r * f2 + s;
             }
-            // atomicAdd_double(&arr_O[index_O], buffer[s] * arr_A[index_A]);
-            atomicAdd_double(&arr_O[index_O], buffer[j_ptr * f2 + s] * arr_A[index_A]);
+            // atomicAdd(&arr_O[index_O], buffer[s] * arr_A[index_A]);
+            atomicAdd(&arr_O[index_O], buffer[j_ptr * f2 + s] * arr_A[index_A]);
           }
         }
 
@@ -159,7 +145,7 @@ __global__ void contractionKernel_for_second_contraction_part_1(
           // if (index_B >= n * f2 || j_ptr * (n * f2) + index_buf >= n * f2 * mode_1_ptr[mode_0_ptr[1]]) {
           //     printf("Out of bound access! \n");
           // }
-          atomicAdd_double(&buffer[j_ptr * (n * f2) + index_buf], value * arr_B[index_B]);
+          atomicAdd(&buffer[j_ptr * (n * f2) + index_buf], value * arr_B[index_B]);
           // buffer[j_ptr * (n * f2) + index_buf] += value * arr_B[index_B];
         }
       }
@@ -202,7 +188,7 @@ __global__ void contractionKernel_for_second_contraction_part_2(
               uint64_t index_O = k * f1 * f2 + r * f2 + s;
               uint64_t index_buf = k * f2 + s;
 
-              atomicAdd_double(&arr_O[index_O], buffer[j_ptr * n * f2 + index_buf] * arr_A[index_A]);
+              atomicAdd(&arr_O[index_O], buffer[j_ptr * n * f2 + index_buf] * arr_A[index_A]);
             }
           }
         }
@@ -265,11 +251,16 @@ void performContraction_gpu_2(
     // parallelising 'j_ptr' for contraction = 0 and contraction = 1 :
     cudaCheckError(cudaMalloc(&buffer_for_contraction_0_1, f2 * size_mode_1_idx * sizeof(double)));
     cudaCheckError(cudaMemset(buffer_for_contraction_0_1, 0, f2 * size_mode_1_idx * sizeof(double)));
-    
+    auto start = std::chrono::high_resolution_clock::now();
     // parallelising 'i_ptr' :
+
     contractionKernel_4<<<blocksPerGrid, threadsPerBlock>>>(
       d_mode_0_ptr, d_mode_0_idx, d_mode_1_ptr, d_mode_1_idx, d_mode_2_ptr, d_mode_2_idx,
       d_values, d_arr_A, d_arr_B, d_arr_O, l, m, n, f1, f2, contraction, buffer_for_contraction_0_1);
+    cudaDeviceSynchronize();
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+    cout << "Method: GPU_4L, Time: " << duration / 1000.0 << " ms" << endl;
     }
     else if(contraction == 2){
       // parallelising 'j_ptr' for contraction = 2 :
@@ -280,6 +271,7 @@ void performContraction_gpu_2(
       cudaMemset(buffer_for_contraction_2, 0, n * f2 * size_mode_1_idx * sizeof(double));
       cudaMemset(k_buffer_for_contraction_2, 0, n * size_mode_1_idx * sizeof(int));
 
+      auto start = std::chrono::high_resolution_clock::now();
       contractionKernel_for_second_contraction_part_1<<<blocksPerGrid, threadsPerBlock>>>(
         d_mode_0_ptr, d_mode_0_idx, d_mode_1_ptr, d_mode_1_idx, d_mode_2_ptr, d_mode_2_idx,
         d_values, d_arr_A, d_arr_B, d_arr_O, l, m, n, f1, f2, contraction, buffer_for_contraction_2, k_buffer_for_contraction_2);
@@ -287,6 +279,9 @@ void performContraction_gpu_2(
         contractionKernel_for_second_contraction_part_2<<<blocksPerGrid, threadsPerBlock>>>(
           d_mode_0_ptr, d_mode_0_idx, d_mode_1_ptr, d_mode_1_idx, d_mode_2_ptr, d_mode_2_idx,
           d_values, d_arr_A, d_arr_B, d_arr_O, l, m, n, f1, f2, contraction, buffer_for_contraction_2, k_buffer_for_contraction_2);
+        auto end = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+        cout << "Method: GPU_4L, Time: " << duration / 1000.0 << " ms" << endl;
     }
         
     cudaDeviceSynchronize();
@@ -470,23 +465,13 @@ int main(int argc, char* argv[]) {
             
             // Validate results using compare_results from matrix_utils.h
             valid = compare_results(arr_O, ref_O, arr_O_size);
+            cout << "validation: " << (valid ? "PASSED" : "FAILED") << endl;
         }
         
         // Report results
         if (verbose) {
-            cout << "GPU 4-loop execution time: " << duration / 1000.0 << " ms" << endl;
-            if (verify) {
-                cout << "Reference execution time: " << ref_duration / 1000.0 << " ms" << endl;
-                cout << "Speedup over reference: " << (double)ref_duration / duration << "x" << endl;
-                cout << "Result validation: " << (valid ? "PASSED" : "FAILED") << endl;
-            }
-        } else {
-            if (verify) {
-                cout << "Method: GPU_4L, Time: " << duration / 1000.0 << " ms, Validation: " << (valid ? "PASSED" : "FAILED") << endl;
-            } else {
-                cout << "Method: GPU_4L, Time: " << duration / 1000.0 << " ms" << endl;
-            }
-        }
+          cout << "Method: GPU_4L, Time: " << duration / 1000.0 << " ms" << endl;
+        } 
         
         // Clean up
         delete[] mode_0_ptr;

@@ -1,6 +1,7 @@
 #include <iostream>
 #include <vector>
 #include <cstring>
+#include <chrono>
 #include <stdexcept>
 #include <cuda_runtime.h>
 #include "csf_tensor.h"
@@ -299,13 +300,16 @@ void GPU_4loop_host_func(
         cout << "gridDim: (" << gridDim.x << ", " << gridDim.y << ", " << gridDim.z << ")" << endl;
         cout << "blockDim: (" << blockDim.x << ", " << blockDim.y << ", " << blockDim.z << ")" << endl;
       }
-
+      
+      auto start = std::chrono::high_resolution_clock::now();
       GPU_4loop_cm2<<<gridDim, blockDim, sharedMemBytes>>>(
         d_mode_0_idx, d_mode_1_ptr, d_mode_1_idx, d_mode_2_ptr, d_mode_2_idx,
         d_values, d_arr_A, d_arr_B, d_arr_O, f1, f2, contraction, size_mode_0_idx
       );
-      cudaGetLastError();  // Check launch err;
-        
+      cudaDeviceSynchronize();
+      auto end = std::chrono::high_resolution_clock::now();
+      auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+      cout << "Method: GPU_4L_CM2, Time: " << duration / 1000.0 << " ms" << endl;        
     }
     /*
     else if(contraction == 2){
@@ -561,22 +565,11 @@ int main(int argc, char* argv[]) {
             
             // Validate results using compare_results from matrix_utils.h
             valid = compare_results(arr_O, ref_O, arr_O_size);
+            cout << "Result validation: " << (valid ? "PASSED" : "FAILED") << endl;
         }
         
-        // Report results
-        if (verbose) {
-            cout << "Method: GPU_4L_CM2, Time: " << duration / 1000.0 << " ms" << endl;
-            if (verify) {
-                cout << "Reference execution time: " << ref_duration / 1000.0 << " ms" << endl;
-                cout << "Speedup over reference: " << (double)ref_duration / duration << "x" << endl;
-                cout << "Result validation: " << (valid ? "PASSED" : "FAILED") << endl;
-            }
-        } else {
-            if (verify) {
-                cout << "Method: GPU_4L_CM2, Time: " << duration / 1000.0 << " ms, Validation: " << (valid ? "PASSED" : "FAILED") << endl;
-            } else {
-                cout << "Method: GPU_4L_CM2, Time: " << duration / 1000.0 << " ms" << endl;
-            }
+        if(verbose){  
+          cout << "Method: GPU_4L_CM2, Time: " << duration / 1000.0 << " ms" << endl;
         }
         
         // Clean up

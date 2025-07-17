@@ -1,6 +1,7 @@
 #include <iostream>
 #include <vector>
 #include <cstring>
+#include <chrono>
 #include <stdexcept>
 #include <cuda_runtime.h>
 #include "csf_tensor.h"
@@ -316,6 +317,9 @@ void GPU_4loop_host_func(
     // Launch kernels
     if (contraction == 0 || contraction == 1) {
       cout << "No. of streams = " << NUM_STREAMS <<endl;
+      
+      auto start = std::chrono::high_resolution_clock::now();
+
       for (uint64_t i_ptr = 0; i_ptr < mode_0_ptr[1]; ++i_ptr) {
         i = mode_0_idx[i_ptr];
         j_ptr_offset = mode_1_ptr[i_ptr];
@@ -324,7 +328,7 @@ void GPU_4loop_host_func(
         dim3 gridDim(mode_1_ptr[i_ptr + 1] - mode_1_ptr[i_ptr]);
         dim3 blockDim(32, 32);
         int sharedMemBytes = f2 * sizeof(double);
-        
+
         // mode_1_idx_offset = mode_1_ptr[i_ptr] ;
         // mode_1_idx_num_elements = mode_1_ptr[i_ptr + 1] - mode_1_ptr[i_ptr];
         // mode_2_ptr_offset = mode_2
@@ -343,8 +347,16 @@ void GPU_4loop_host_func(
           size_mode_0_idx, size_mode_1_idx, size_mode_2_idx,
           i, j_ptr_offset
         );
-        cudaGetLastError();  // Check launch err;
       }
+
+      for ( itr = 0; itr < NUM_STREAMS; ++itr) {
+        cudaStreamSynchronize(streams[itr]);
+        cudaStreamDestroy(streams[itr]);
+      }
+      auto end = std::chrono::high_resolution_clock::now();
+      auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+      
+      cout << "Method: GPU_4L_STREAMS, Time: " << duration / 1000.0 << " ms" << endl;
     }
     else if(contraction == 2){
       double* buffer_for_ncm_2;
@@ -398,11 +410,11 @@ void GPU_4loop_host_func(
       
     }
 
-  // Sync and destroy streams
-  for ( itr = 0; itr < NUM_STREAMS; ++itr) {
-    cudaStreamSynchronize(streams[itr]);
-    cudaStreamDestroy(streams[itr]);
-  }
+  // // Sync and destroy streams
+  // for ( itr = 0; itr < NUM_STREAMS; ++itr) {
+  //   cudaStreamSynchronize(streams[itr]);
+  //   cudaStreamDestroy(streams[itr]);
+  // }
 
   
     // Copy results back to host
@@ -604,22 +616,11 @@ int main(int argc, char* argv[]) {
             
             // Validate results using compare_results from matrix_utils.h
             valid = compare_results(arr_O, ref_O, arr_O_size);
+            cout << "validation: " << (valid ? "PASSED" : "FAILED") << endl;
         }
         
-        // Report results
-        if (verbose) {
-            cout << "Method: GPU_4L_streams, Time: " << duration / 1000.0 << " ms" << endl;
-            if (verify) {
-                cout << "Reference execution time: " << ref_duration / 1000.0 << " ms" << endl;
-                cout << "Speedup over reference: " << (double)ref_duration / duration << "x" << endl;
-                cout << "Result validation: " << (valid ? "PASSED" : "FAILED") << endl;
-            }
-        } else {
-            if (verify) {
-                cout << "Method: GPU_4L_streams, Time: " << duration / 1000.0 << " ms, Validation: " << (valid ? "PASSED" : "FAILED") << endl;
-            } else {
-                cout << "Method: GPU_4L_streams, Time: " << duration / 1000.0 << " ms" << endl;
-            }
+        if(verbose){
+          cout << "Method: GPU_4L_streams, Time: " << duration / 1000.0 << " ms" << endl;
         }
         
         // Clean up
