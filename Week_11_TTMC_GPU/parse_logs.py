@@ -305,7 +305,7 @@ def plot_speedups(results, baseline_method='v5', method_names=None, contraction_
     
     # Set up bar positions
     x = np.arange(len(datasets))
-    bar_width = 0.15
+    bar_width = 0.1
     
     # Create bars with appropriate labels
     bar_colors = ['blue', 'red', 'green', 'purple', 'orange', 'brown', 'pink', 'gray', 'olive', 'cyan']
@@ -472,30 +472,50 @@ def main():
     method_widths = {}
     for method in all_methods:
         method_display = f"{method} ({method_names.get(method, 'Unknown')})"
-        method_widths[method] = max(len(method_display) + 5, 20)  # Add buffer for time value
+        method_widths[method] = max(len(method_display) + 5, 15)  # Add buffer for time value
     
     # Print header for all methods
     header = f"{'Dataset':<{name_width}}"
     for method in all_methods:
         method_display = f"{method} ({method_names.get(method, 'Unknown')})"
         header += f"{method_display:<{method_widths[method]}}"
+    header += "best method"
     print(header)
     print("-" * 100)
     
     for r in results:
         row = f"{r['name']:<{name_width}}"
+        min_time = float('inf')
+        best_method = "N/A"
+        best_method_time = None
+
+        # First pass to find best method and its time
+        for method in all_methods:
+            if method in r and r[method] is not None and r[method] < min_time:
+                min_time = r[method]
+                best_method = f"{method} ({method_names.get(method, 'Unknown')})"
+                best_method_time = r[method]
+
+        # Second pass to print row with best method highlighted
         for method in all_methods:
             if method in r and r[method] is not None:
+                time_val = r[method]
                 # Format time with proper units
-                if r[method] >= 1e6:
-                    time_str = f"{r[method]/1e6:.2f}s (x10⁶)"
-                elif r[method] >= 1e3:
-                    time_str = f"{r[method]/1e3:.2f}s"
+                if time_val >= 1e6:
+                    time_str = f"{time_val / 1e6:.2f}s (x10⁶)"
+                elif time_val >= 1e3:
+                    time_str = f"{time_val / 1e3:.2f}s"
                 else:
-                    time_str = f"{r[method]:.2f}ms"
-                row += f"{time_str:<{method_widths[method]}}"
+                    time_str = f"{time_val:.2f}ms"
+
+                # Highlight the best method's time
+                if time_val == best_method_time:
+                    time_str = f"*{time_str}*"
+                row += f"|{time_str:<{method_widths[method]}}"
             else:
-                row += f"{'N/A':<{method_widths[method]}}"
+                row += f"|{'N/A':<{method_widths[method]}}"
+
+        row += best_method
         print(row)
     
     print("\nSpeedup Summary (relative to {}: {}):".format(baseline_method, method_names.get(baseline_method, 'Unknown')))
