@@ -34,7 +34,8 @@ rm -f ttmc_v*
 echo "Finding contraction methods..."
 method_files=(v*.cu)
 method_numbers=()
-skip_methods=(1 2 6 8)  # Skip method 1 (v1_cpu_5loop.cu)
+skip_methods=(1 2 6 11 12)  # Skip method 1 (v1_cpu_5loop.cu)
+# skip_methods=(1 2 3 4 5 6 8 9 10 11  )  # Skip method 1 (v1_cpu_5loop.cu)
 
 for file in "${method_files[@]}"; do
     if [[ $file =~ v([0-9]+)_ ]]; then
@@ -186,7 +187,7 @@ run_contractions() {
     
     # Run all contraction methods
     for method in ${method_numbers[@]}; do
-        executable="ttmc_v${method}"
+        executable="ttmc_v${method}.out"
         
         if [ -f "$executable" ]; then
             echo "  Running method v${method}..."
