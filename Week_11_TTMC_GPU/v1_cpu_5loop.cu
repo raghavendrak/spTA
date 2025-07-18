@@ -13,12 +13,12 @@ using namespace std;
 void performContraction_cpu_1(uint64_t*& mode_0_ptr, uint64_t*& mode_0_idx,
                         uint64_t*& mode_1_ptr, uint64_t*& mode_1_idx,
                         uint64_t*& mode_2_ptr, uint64_t*& mode_2_idx,
-                        double*& values, double*& arr_A, double*& arr_B,  
-                        double*& arr_O, uint64_t& arr_A_size, uint64_t& arr_B_size, uint64_t& arr_O_size, int& contraction, 
+                        float*& values, float*& arr_A, float*& arr_B,  
+                        float*& arr_O, uint64_t& arr_A_size, uint64_t& arr_B_size, uint64_t& arr_O_size, int& contraction, 
                         uint64_t& l, uint64_t& m, uint64_t& n, uint64_t& f1, uint64_t& f2) 
 {
   uint64_t i, j, k, index_A, index_B, index_O;
-  double value;
+  float value;
   if(contraction == 0){
     // Traverse through CSF tensor pointer and indices arrays for all modes
     for (uint64_t i_ptr = 0; i_ptr < mode_0_ptr[1]; ++i_ptr) {
@@ -177,7 +177,7 @@ int main(int argc, char* argv[]) {
         uint64_t *mode_0_ptr, *mode_0_idx;
         uint64_t *mode_1_ptr, *mode_1_idx;
         uint64_t *mode_2_ptr, *mode_2_idx;
-        double *values;
+        float *values;
         int order;
         
         getCSFArrays(tensor, &mode_0_ptr, &mode_0_idx, 
@@ -191,7 +191,7 @@ int main(int argc, char* argv[]) {
         uint64_t out_dim1 = getOutputDim1(tensor.dimensions, ncm);
         
         // Generate factor matrices
-        double *arr_A = nullptr, *arr_B = nullptr;
+        float *arr_A = nullptr, *arr_B = nullptr;
         generate_matrix(matrix_dim1, rank1, 42, arr_A);
         generate_matrix(matrix_dim2, rank2, 43, arr_B);
         
@@ -208,8 +208,8 @@ int main(int argc, char* argv[]) {
         }
         
         // Allocate output array
-        double* arr_O = allocate_aligned_array(arr_O_size);
-        double* ref_O = nullptr;
+        float* arr_O = allocate_aligned_array(arr_O_size);
+        float* ref_O = nullptr;
         
         if (verify) {
             // Only allocate reference array if verification is needed
@@ -235,7 +235,7 @@ int main(int argc, char* argv[]) {
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
         
         bool valid = true;
-        double ref_duration = 0.0;
+        float ref_duration = 0.0;
         
         if (verify) {
             // Only run reference implementation and validate if requested
@@ -265,7 +265,7 @@ int main(int argc, char* argv[]) {
             cout << "CPU 5-loop execution time: " << duration / 1000.0 << " ms" << endl;
             if (verify) {
                 cout << "Reference execution time: " << ref_duration / 1000.0 << " ms" << endl;
-                cout << "Speedup over reference: " << (double)ref_duration / duration << "x" << endl;
+                cout << "Speedup over reference: " << (float)ref_duration / duration << "x" << endl;
                 cout << "Result validation: " << (valid ? "PASSED" : "FAILED") << endl;
             }
         } else {

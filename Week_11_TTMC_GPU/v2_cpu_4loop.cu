@@ -18,15 +18,15 @@ using namespace std;
 void performContraction_cpu_2(uint64_t*& mode_0_ptr,uint64_t*& mode_0_idx,
                         uint64_t*& mode_1_ptr, uint64_t*& mode_1_idx,
                         uint64_t*& mode_2_ptr, uint64_t*& mode_2_idx,
-                        double*& values, double*& arr_A, double*& arr_B,  
-                        double*& arr_O, uint64_t& arr_A_size, uint64_t& arr_B_size, uint64_t& arr_O_size, int& contraction, 
+                        float*& values, float*& arr_A, float*& arr_B,  
+                        float*& arr_O, uint64_t& arr_A_size, uint64_t& arr_B_size, uint64_t& arr_O_size, int& contraction, 
                         uint64_t& l, uint64_t& m, uint64_t& n, uint64_t& f1, uint64_t& f2) 
 {
   uint64_t i, j, k, index_A, index_B, index_O;
-  double value;
+  float value;
                             
   if(contraction == 0){
-    double* buffer = allocate_aligned_array(f2);    // buffer for mode-s
+    float* buffer = allocate_aligned_array(f2);    // buffer for mode-s
 
     // Traverse through CSF tensor pointer and indices arrays for all modes
     for (uint64_t i_ptr = 0; i_ptr < mode_0_ptr[1]; ++i_ptr) {
@@ -35,7 +35,7 @@ void performContraction_cpu_2(uint64_t*& mode_0_ptr,uint64_t*& mode_0_idx,
       for (uint64_t j_ptr = mode_1_ptr[i_ptr]; j_ptr < mode_1_ptr[i_ptr + 1]; ++j_ptr) {
         j = mode_1_idx[j_ptr] ;                     // Index for 'j' mode in CSF
         
-        memset(buffer, 0, f2 * sizeof(double));             // Set the entire memory block to 0
+        memset(buffer, 0, f2 * sizeof(float));             // Set the entire memory block to 0
         
         for (uint64_t k_ptr = mode_2_ptr[j_ptr]; k_ptr < mode_2_ptr[j_ptr + 1]; ++k_ptr) {
           k = mode_2_idx[k_ptr] ;                 // Index for 'k' mode in CSF
@@ -69,7 +69,7 @@ void performContraction_cpu_2(uint64_t*& mode_0_ptr,uint64_t*& mode_0_idx,
     std::free(buffer);
   }
   else if(contraction == 1){
-    double* buffer = allocate_aligned_array(f2);    // buffer for mode-s
+    float* buffer = allocate_aligned_array(f2);    // buffer for mode-s
     
     // Traverse through CSF tensor pointer and indices arrays for all modes
     for (uint64_t i_ptr = 0; i_ptr < mode_0_ptr[1]; ++i_ptr) {
@@ -78,7 +78,7 @@ void performContraction_cpu_2(uint64_t*& mode_0_ptr,uint64_t*& mode_0_idx,
       for (uint64_t j_ptr = mode_1_ptr[i_ptr]; j_ptr < mode_1_ptr[i_ptr + 1]; ++j_ptr) {
         j = mode_1_idx[j_ptr] ;                     // Index for 'j' mode in CSF
 
-        memset(buffer, 0, f2 * sizeof(double));             // Set the entire memory block to 0
+        memset(buffer, 0, f2 * sizeof(float));             // Set the entire memory block to 0
 
         for (uint64_t k_ptr = mode_2_ptr[j_ptr]; k_ptr < mode_2_ptr[j_ptr + 1]; ++k_ptr) {
           k = mode_2_idx[k_ptr] ;                 // Index for 'k' mode in CSF
@@ -112,7 +112,7 @@ void performContraction_cpu_2(uint64_t*& mode_0_ptr,uint64_t*& mode_0_idx,
     std::free(buffer);
   }
   else if(contraction == 2){
-    double* buffer = allocate_aligned_array(n*f2);    // buffer for mode-k and mode-s
+    float* buffer = allocate_aligned_array(n*f2);    // buffer for mode-k and mode-s
     bool* k_buffer = new bool[n];  // buffer for k-indices
     uint64_t index_buf = 0;
 
@@ -120,7 +120,7 @@ void performContraction_cpu_2(uint64_t*& mode_0_ptr,uint64_t*& mode_0_idx,
     for (uint64_t i_ptr = 0; i_ptr < mode_0_ptr[1]; ++i_ptr) {
       i = mode_0_idx[i_ptr] ;                          // Index in the mode 'i'
 
-      memset(buffer, 0, n * f2 * sizeof(double));             // Set the entire memory block to 0
+      memset(buffer, 0, n * f2 * sizeof(float));             // Set the entire memory block to 0
       memset(k_buffer, 0, n * sizeof(bool)); //initialize to false
       for (uint64_t j_ptr = mode_1_ptr[i_ptr]; j_ptr < mode_1_ptr[i_ptr + 1]; ++j_ptr) {
         j = mode_1_idx[j_ptr] ;                      // Index for 'j' mode in CSF
@@ -220,7 +220,7 @@ int main(int argc, char* argv[]) {
         uint64_t *mode_0_ptr, *mode_0_idx;
         uint64_t *mode_1_ptr, *mode_1_idx;
         uint64_t *mode_2_ptr, *mode_2_idx;
-        double *values;
+        float *values;
         int order;
         
         getCSFArrays(tensor, &mode_0_ptr, &mode_0_idx, 
@@ -234,7 +234,7 @@ int main(int argc, char* argv[]) {
         uint64_t out_dim1 = getOutputDim1(tensor.dimensions, ncm);
         
         // Generate factor matrices
-        double *arr_A = nullptr, *arr_B = nullptr;
+        float *arr_A = nullptr, *arr_B = nullptr;
         generate_matrix(matrix_dim1, rank1, 42, arr_A);
         generate_matrix(matrix_dim2, rank2, 43, arr_B);
         
@@ -251,7 +251,7 @@ int main(int argc, char* argv[]) {
         }
         
         // Allocate output array
-        double* arr_O = allocate_aligned_array(arr_O_size);
+        float* arr_O = allocate_aligned_array(arr_O_size);
         
         // Run this implementation (CPU 4-loop - reference)
         if (verbose) {

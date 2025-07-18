@@ -27,8 +27,8 @@ __global__ void contractionKernel_4(
   uint64_t* mode_0_ptr, uint64_t* mode_0_idx,
   uint64_t* mode_1_ptr, uint64_t* mode_1_idx,
   uint64_t* mode_2_ptr, uint64_t* mode_2_idx,
-  double* values, double* arr_A, double* arr_B,  
-  double* arr_O, uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, int contraction, double* buffer)
+  float* values, float* arr_A, float* arr_B,  
+  float* arr_O, uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, int contraction, float* buffer)
 {
   // Compute thread index
   uint64_t j_ptr = blockIdx.x * blockDim.x + threadIdx.x;
@@ -53,7 +53,7 @@ __global__ void contractionKernel_4(
         uint64_t j = mode_1_idx[j_ptr];
 
         // Allocate buffer on a per-thread basis
-        //double* buffer = (double*)malloc(f2 * sizeof(double));
+        //float* buffer = (float*)malloc(f2 * sizeof(float));
         if (buffer == nullptr) {// Handle allocation failure
           if(blockIdx.x == 0 && threadIdx.x == 0){
             printf("Memory allocation failure \n");
@@ -64,12 +64,12 @@ __global__ void contractionKernel_4(
         } 
 
         // Reset buffer
-        // memset(buffer, 0, f2 * sizeof(double));
+        // memset(buffer, 0, f2 * sizeof(float));
 
         // Process the k_ptr range associated with j_ptr
         for (uint64_t k_ptr = mode_2_ptr[j_ptr]; k_ptr < mode_2_ptr[j_ptr + 1]; ++k_ptr) {
           uint64_t k = mode_2_idx[k_ptr];
-          double value = values[k_ptr];
+          float value = values[k_ptr];
 
           for (uint64_t s = 0; s < f2; ++s) {
             uint64_t index_B = k * f2 + s;
@@ -111,8 +111,8 @@ __global__ void contractionKernel_for_second_contraction_part_1(
   uint64_t* mode_0_ptr, uint64_t* mode_0_idx,
   uint64_t* mode_1_ptr, uint64_t* mode_1_idx,
   uint64_t* mode_2_ptr, uint64_t* mode_2_idx,
-  double* values, double* arr_A, double* arr_B,  
-  double* arr_O, uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, int contraction, double* buffer, int* k_buffer)
+  float* values, float* arr_A, float* arr_B,  
+  float* arr_O, uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, int contraction, float* buffer, int* k_buffer)
 {
   // Compute thread index
   uint64_t j_ptr = blockIdx.x * blockDim.x + threadIdx.x;
@@ -136,7 +136,7 @@ __global__ void contractionKernel_for_second_contraction_part_1(
         uint64_t k = mode_2_idx[k_ptr];
         atomicAdd(&k_buffer[j_ptr * n + k], 1);
         // k_buffer[j_ptr * n + k] += 1;
-        double value = values[k_ptr];
+        float value = values[k_ptr];
 
         for (uint64_t s = 0; s < f2; ++s) {
           uint64_t index_B = j * f2 + s;
@@ -158,8 +158,8 @@ __global__ void contractionKernel_for_second_contraction_part_2(
   uint64_t* mode_0_ptr, uint64_t* mode_0_idx,
   uint64_t* mode_1_ptr, uint64_t* mode_1_idx,
   uint64_t* mode_2_ptr, uint64_t* mode_2_idx,
-  double* values, double* arr_A, double* arr_B,  
-  double* arr_O, uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, int contraction, double* buffer, int* k_buffer)
+  float* values, float* arr_A, float* arr_B,  
+  float* arr_O, uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, int contraction, float* buffer, int* k_buffer)
 {
   // Compute thread index
   uint64_t j_ptr = blockIdx.x * blockDim.x + threadIdx.x;
@@ -205,17 +205,17 @@ void performContraction_gpu_2(
   uint64_t* mode_0_ptr, uint64_t* mode_0_idx,
   uint64_t* mode_1_ptr, uint64_t* mode_1_idx,
   uint64_t* mode_2_ptr, uint64_t* mode_2_idx,
-  double* values, double* arr_A, double* arr_B,  
-  double* arr_O, uint64_t arr_A_size, uint64_t arr_B_size, uint64_t arr_O_size, int contraction, 
+  float* values, float* arr_A, float* arr_B,  
+  float* arr_O, uint64_t arr_A_size, uint64_t arr_B_size, uint64_t arr_O_size, int contraction, 
   uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2, uint64_t total_values,
   int size_mode_0_ptr, int size_mode_1_ptr, int size_mode_2_ptr,
   int size_mode_0_idx, int size_mode_1_idx, int size_mode_2_idx)
 {
   // Allocate device memory
   uint64_t *d_mode_0_ptr, *d_mode_0_idx, *d_mode_1_ptr, *d_mode_1_idx, *d_mode_2_ptr, *d_mode_2_idx;
-  double *d_values, *d_arr_A, *d_arr_B, *d_arr_O;
-  double* buffer_for_contraction_0_1;
-  double* buffer_for_contraction_2;
+  float *d_values, *d_arr_A, *d_arr_B, *d_arr_O;
+  float* buffer_for_contraction_0_1;
+  float* buffer_for_contraction_2;
   int* k_buffer_for_contraction_2;
 
   cudaMalloc(&d_mode_0_ptr, sizeof(uint64_t) * size_mode_0_ptr);
@@ -224,10 +224,10 @@ void performContraction_gpu_2(
   cudaMalloc(&d_mode_1_idx, sizeof(uint64_t) * size_mode_1_idx);
   cudaMalloc(&d_mode_2_ptr, sizeof(uint64_t) * size_mode_2_ptr);
   cudaMalloc(&d_mode_2_idx, sizeof(uint64_t) * size_mode_2_idx);
-  cudaMalloc(&d_values, sizeof(double) * total_values);
-  cudaMalloc(&d_arr_A, sizeof(double) * arr_A_size);
-  cudaMalloc(&d_arr_B, sizeof(double) * arr_B_size);
-  cudaMalloc(&d_arr_O, sizeof(double) * arr_O_size);
+  cudaMalloc(&d_values, sizeof(float) * total_values);
+  cudaMalloc(&d_arr_A, sizeof(float) * arr_A_size);
+  cudaMalloc(&d_arr_B, sizeof(float) * arr_B_size);
+  cudaMalloc(&d_arr_O, sizeof(float) * arr_O_size);
 
   // Copy data to device
   cudaMemcpy(d_mode_0_ptr, mode_0_ptr, sizeof(uint64_t) * size_mode_0_ptr, cudaMemcpyHostToDevice);
@@ -236,10 +236,10 @@ void performContraction_gpu_2(
   cudaMemcpy(d_mode_1_idx, mode_1_idx, sizeof(uint64_t) * size_mode_1_idx, cudaMemcpyHostToDevice);
   cudaMemcpy(d_mode_2_ptr, mode_2_ptr, sizeof(uint64_t) * size_mode_2_ptr, cudaMemcpyHostToDevice);
   cudaMemcpy(d_mode_2_idx, mode_2_idx, sizeof(uint64_t) * size_mode_2_idx, cudaMemcpyHostToDevice);
-  cudaMemcpy(d_values, values, sizeof(double) * total_values, cudaMemcpyHostToDevice);
-  cudaMemcpy(d_arr_A, arr_A, sizeof(double) * arr_A_size, cudaMemcpyHostToDevice);
-  cudaMemcpy(d_arr_B, arr_B, sizeof(double) * arr_B_size, cudaMemcpyHostToDevice);
-  cudaMemset(d_arr_O, 0, sizeof(double) * arr_O_size);
+  cudaMemcpy(d_values, values, sizeof(float) * total_values, cudaMemcpyHostToDevice);
+  cudaMemcpy(d_arr_A, arr_A, sizeof(float) * arr_A_size, cudaMemcpyHostToDevice);
+  cudaMemcpy(d_arr_B, arr_B, sizeof(float) * arr_B_size, cudaMemcpyHostToDevice);
+  cudaMemset(d_arr_O, 0, sizeof(float) * arr_O_size);
 
   // Launch kernel
   int threadsPerBlock = 256;
@@ -249,8 +249,8 @@ void performContraction_gpu_2(
   
   if(contraction == 0 || contraction == 1){
     // parallelising 'j_ptr' for contraction = 0 and contraction = 1 :
-    cudaCheckError(cudaMalloc(&buffer_for_contraction_0_1, f2 * size_mode_1_idx * sizeof(double)));
-    cudaCheckError(cudaMemset(buffer_for_contraction_0_1, 0, f2 * size_mode_1_idx * sizeof(double)));
+    cudaCheckError(cudaMalloc(&buffer_for_contraction_0_1, f2 * size_mode_1_idx * sizeof(float)));
+    cudaCheckError(cudaMemset(buffer_for_contraction_0_1, 0, f2 * size_mode_1_idx * sizeof(float)));
     auto start = std::chrono::high_resolution_clock::now();
     // parallelising 'i_ptr' :
 
@@ -264,11 +264,11 @@ void performContraction_gpu_2(
     }
     else if(contraction == 2){
       // parallelising 'j_ptr' for contraction = 2 :
-      cudaMalloc(&buffer_for_contraction_2, n * f2 * size_mode_1_idx * sizeof(double));
+      cudaMalloc(&buffer_for_contraction_2, n * f2 * size_mode_1_idx * sizeof(float));
       cudaMalloc(&k_buffer_for_contraction_2, n * size_mode_1_idx * sizeof(int));
       
       // parallelising 'j_ptr' for contraction = 2 :
-      cudaMemset(buffer_for_contraction_2, 0, n * f2 * size_mode_1_idx * sizeof(double));
+      cudaMemset(buffer_for_contraction_2, 0, n * f2 * size_mode_1_idx * sizeof(float));
       cudaMemset(k_buffer_for_contraction_2, 0, n * size_mode_1_idx * sizeof(int));
 
       auto start = std::chrono::high_resolution_clock::now();
@@ -288,7 +288,7 @@ void performContraction_gpu_2(
 
 
   // Copy results back to host
-  cudaMemcpy(arr_O, d_arr_O, sizeof(double) * arr_O_size, cudaMemcpyDeviceToHost);
+  cudaMemcpy(arr_O, d_arr_O, sizeof(float) * arr_O_size, cudaMemcpyDeviceToHost);
 
   // Free device memory
   cudaFree(d_mode_0_ptr);
@@ -368,7 +368,7 @@ int main(int argc, char* argv[]) {
         uint64_t *mode_0_ptr, *mode_0_idx;
         uint64_t *mode_1_ptr, *mode_1_idx;
         uint64_t *mode_2_ptr, *mode_2_idx;
-        double *values;
+        float *values;
         int order;
         
         size_t size_mode_0_ptr = tensor.ptrs[0].size();
@@ -395,7 +395,7 @@ int main(int argc, char* argv[]) {
         uint64_t out_dim1 = getOutputDim1(dimensions, ncm);
         
         // Generate factor matrices
-        double *arr_A = nullptr, *arr_B = nullptr;
+        float *arr_A = nullptr, *arr_B = nullptr;
         generate_matrix(matrix_dim1, rank1, 42, arr_A);
         generate_matrix(matrix_dim2, rank2, 43, arr_B);
         
@@ -412,8 +412,8 @@ int main(int argc, char* argv[]) {
         }
         
         // Allocate output array
-        double* arr_O = allocate_aligned_array(arr_O_size);
-        double* ref_O = nullptr;
+        float* arr_O = allocate_aligned_array(arr_O_size);
+        float* ref_O = nullptr;
         
         if (verify) {
             // Only allocate reference array if verification is needed
@@ -442,7 +442,7 @@ int main(int argc, char* argv[]) {
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
         
         bool valid = true;
-        double ref_duration = 0.0;
+        float ref_duration = 0.0;
         
         if (verify) {
             // Only run reference implementation and validate if requested
