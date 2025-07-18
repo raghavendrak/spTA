@@ -32,7 +32,7 @@ using namespace std;
 // Structure to hold the COO data
 struct COOElement {
     vector<uint64_t> indices; // Store indices for all modes
-    double value;
+    float value;
 };
 
 // Function to parse the COO file and convert to CSF format
@@ -94,7 +94,7 @@ void cooToCSF(const string& inputFile, const string& outputFile, int specifiedOr
         istringstream iss(line);
         vector<uint64_t> indices;
         uint64_t idx;
-        double value;
+        float value;
         
         // Read the indices
         int i = 0;
@@ -169,7 +169,7 @@ void cooToCSF(const string& inputFile, const string& outputFile, int specifiedOr
     // Generate CSF format
     vector<vector<uint64_t>> idx(order); // Indices for each level
     vector<vector<uint64_t>> ptr(order); // Pointers for each level
-    vector<double> vals; // Non-zero values
+    vector<float> vals; // Non-zero values
     
     // Initialize the first level pointer
     ptr[0].push_back(0);
@@ -250,7 +250,7 @@ void cooToCSF(const string& inputFile, const string& outputFile, int specifiedOr
     
     // Write values
     outFile << "values:";
-    for (double val : vals) {
+    for (float val : vals) {
         outFile << " " << val;
     }
     outFile << endl;

@@ -7,13 +7,13 @@
 #include <cstdlib>
 
 // Function to generate a random matrix
-void generate_matrix(uint64_t rows, uint64_t cols, unsigned int seed, double*& arr) {
+void generate_matrix(uint64_t rows, uint64_t cols, unsigned int seed, float*& arr) {
   // Allocate memory for the matrix
-  arr = new double[rows * cols];
+  arr = new float[rows * cols];
 
   // Initialize random number generator with seed
   std::mt19937 gen(seed);
-  std::uniform_real_distribution<double> dist(0.0, 1.0);
+  std::uniform_real_distribution<float> dist(0.0, 1.0);
 
   // Fill matrix with random values
   for (uint64_t i = 0; i < rows * cols; i++) {
@@ -22,7 +22,7 @@ void generate_matrix(uint64_t rows, uint64_t cols, unsigned int seed, double*& a
 }
 
 // Function to compare two matrices
-bool compare_results(double*& C1, double*& C2, uint64_t size,  double tolerance = 1e-6)
+bool compare_results1(float*& C1, float*& C2, uint64_t size,  float tolerance = 1e-6)
 {
   for (int i = 0; i < size ; ++i) {
     if (std::fabs(C1[i] - C2[i]) > tolerance) {
@@ -39,13 +39,13 @@ bool compare_results(double*& C1, double*& C2, uint64_t size,  double tolerance 
 }
 
 // Function to compare results against reference implementation
-bool compare_results1(double* result, double* reference, uint64_t size, double tolerance = 1e-5) {
-    double max_diff = 0.0;
-    double max_val = 0.0;
+bool compare_results(float* result, float* reference, uint64_t size, float tolerance = 1e-5) {
+    float max_diff = 0.0;
+    float max_val = 0.0;
     int errors = 0;
     
     for (uint64_t i = 0; i < size; i++) {
-        double diff = std::fabs(result[i] - reference[i]);
+        float diff = std::fabs(result[i] - reference[i]);
         max_diff = std::max(max_diff, diff);
         max_val = std::max(max_val, std::fabs(reference[i]));
         
@@ -54,7 +54,7 @@ bool compare_results1(double* result, double* reference, uint64_t size, double t
         }
     }
     
-    double rel_error = (max_val > 0) ? max_diff / max_val : max_diff;
+    float rel_error = (max_val > 0) ? max_diff / max_val : max_diff;
     
     std::cout << "Validation: Max absolute diff = " << max_diff 
          << ", Relative error = " << rel_error 
@@ -64,9 +64,9 @@ bool compare_results1(double* result, double* reference, uint64_t size, double t
 }
 
 // Function for aligned memory allocation
-double* allocate_aligned_array(size_t num_elements) {
+float* allocate_aligned_array(size_t num_elements) {
     constexpr size_t alignment = 32;           // 32 bytes = 256 bits
-    constexpr size_t element_size = sizeof(double); // 8 bytes per double
+    constexpr size_t element_size = sizeof(float); // 8 bytes per float
 
     size_t total_bytes = num_elements * element_size;
 
@@ -83,12 +83,12 @@ double* allocate_aligned_array(size_t num_elements) {
 
     //initilaize to zero
     size_t total_elements = total_bytes / element_size;
-    double* arr = static_cast<double*>(ptr);
+    float* arr = static_cast<float*>(ptr);
     for (size_t i = 0; i < total_elements; ++i) {
       arr[i] = 0.0;
     }
 
-    return static_cast<double*>(ptr);
+    return static_cast<float*>(ptr);
 }
 
 #endif // MATRIX_UTILS_H 

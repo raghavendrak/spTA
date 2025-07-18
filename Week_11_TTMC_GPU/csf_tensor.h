@@ -15,7 +15,7 @@ struct CSFTensor {
     int order;  // Number of modes
     vector<vector<uint64_t>> ptrs;  // Pointers for each mode
     vector<vector<uint64_t>> idxs;  // Indices for each mode
-    vector<double> values;  // Non-zero values
+    vector<float> values;  // Non-zero values
     vector<uint64_t> dimensions; // Dimensions of each mode
     vector<int> modeOrdering; // Original mode ordering
     
@@ -129,7 +129,7 @@ CSFTensor readCSFTensor(const string& filename) {
             }
         } else if (label == "values") {
             // Parse values
-            double val;
+            float val;
             while (iss >> val) {
                 tensor->values.push_back(val);
             }
@@ -152,7 +152,7 @@ void getCSFArrays(const CSFTensor& tensor,
                  uint64_t** mode_0_ptr, uint64_t** mode_0_idx,
                  uint64_t** mode_1_ptr, uint64_t** mode_1_idx,
                  uint64_t** mode_2_ptr, uint64_t** mode_2_idx,
-                 double** values, int* order) {
+                 float** values, int* order) {
     // Set the order
     *order = tensor.order;
     
@@ -193,7 +193,7 @@ void getCSFArrays(const CSFTensor& tensor,
     }
     
     // Copy values
-    *values = new double[tensor.values.size()];
+    *values = new float[tensor.values.size()];
     for (size_t i = 0; i < tensor.values.size(); i++) {
         (*values)[i] = tensor.values[i];
     }    

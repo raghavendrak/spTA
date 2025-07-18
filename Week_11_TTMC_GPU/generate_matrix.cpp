@@ -53,7 +53,7 @@ void writeMatrixToDenseFile(const std::string& filename, uint64_t rows, uint64_t
     }
 
     std::mt19937 gen(seed); // Mersenne Twister RNG seeded with 'seed'
-    std::uniform_real_distribution<double> dist(0.0, 1.0); // Uniform distribution in [0, 1)
+    std::uniform_real_distribution<float> dist(0.0, 1.0); // Uniform distribution in [0, 1)
 
     // Write dimensions first (compatible with ParTI's Tensor::load)
     file << "2\n"; // 2D tensor (matrix)
@@ -79,7 +79,7 @@ void writeMatrixToCOOFile(const std::string& filename, uint64_t rows, uint64_t c
     }
 
     std::mt19937 gen(seed); // Mersenne Twister RNG seeded with 'seed'
-    std::uniform_real_distribution<double> dist(0.0, 1.0); // Uniform distribution in [0, 1)
+    std::uniform_real_distribution<float> dist(0.0, 1.0); // Uniform distribution in [0, 1)
 
     // Write dimensions first (compatible with ParTI's Tensor::load)
     file << "2\n"; // 2D tensor (matrix)
@@ -88,7 +88,7 @@ void writeMatrixToCOOFile(const std::string& filename, uint64_t rows, uint64_t c
     // Generate and write non-zero values in COO format
     for (uint64_t i = 0; i < rows; ++i) {
         for (uint64_t j = 0; j < cols; ++j) {
-            double val = dist(gen);
+            float val = dist(gen);
             file << i << " " << j << " " << val << "\n";
         }
     }
@@ -163,7 +163,7 @@ int main(int argc, char* argv[]) {
     // Generate matrices for TTM operation
     // For TTM, each matrix should have dimensions [R × I_n]
     // where I_n is the size of the tensor in mode n, and R is the rank
-    for (int i = 0; i < tensorOrder && i < 3; ++i) {
+    for (int i = 1; i < tensorOrder && i < 3; ++i) {
         // For TTM, Matrix U should have dimensions [R × I_n]
         // where R is the rank (nrows) and I_n is the dimension of mode n (ncols)
         uint64_t rows = ranks[i]; // Rank for this mode
