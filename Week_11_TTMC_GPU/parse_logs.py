@@ -22,9 +22,16 @@
 # 7. Parse log file and skip specific methods:
 #    python parse_logs.py TTMC_ncm_2.log -s v2 v5
 #
+# 8. Parse log file and perform error analysis:
+#    python parse_logs.py TTMC_ncm_2.log -e
+#
+# 9. Parse log file with ParTI baseline and error analysis:
+#    python parse_logs.py TTMC_ncm_2.log -e -b parti
 # The script parses TTMC log files containing timing data for tensor contractions
 # and generates a bar plot comparing speedups of different GPU implementations
-# relative to the specified baseline implementation.
+# relative to the specified baseline implementation. It can also perform error
+# analysis on validation data to show max absolute diff, relative error, and
+# elements with significant error statistics.
 
 
 import re
@@ -34,14 +41,20 @@ import matplotlib.pyplot as plt
 import argparse
 from matplotlib.ticker import MaxNLocator
 from collections import defaultdict
+from tabulate import tabulate
 
 # Method id to default name mapping
 DEFAULT_METHOD_NAMES = {
     'v2': 'CPU 4-loop',
     'v3': 'GPU 5-loop',
     'v4': 'GPU 4-loop',
-    'v5': 'GPU 4-loop streams',
-    'v6': 'GPU_1nz_per_thread'
+    'v5': 'GPU 4-loop Streams',
+    'v6': 'GPU 4-loop ParK',
+    'v7': 'GPU 4-loop CM',
+    'v8': 'GPU 4-loop WS',
+    'v9': 'GPU 4-loop WS v2',
+    'v10': 'GPU 4-loop CM v2',
+    'parti': 'ParTI TTM'
 }
 
 def parse_log_file(log_file_path):
@@ -154,7 +167,7 @@ def parse_log_file(log_file_path):
         
     return results, contraction_choice, max_runs, method_names
 
-def calculate_speedups(results, baseline_method='v4'):
+def calculate_speedups(results, baseline_method='v5'):
     """Calculate speedup for each method with specified baseline, including error propagation"""
     
     for dataset in results:
@@ -167,7 +180,7 @@ def calculate_speedups(results, baseline_method='v4'):
         baseline_std = dataset.get(f'{baseline_method}_std', 0)
         
         # Get all methods that have timing data for this dataset
-        methods = [key for key in dataset.keys() if key.startswith('v') and not key.endswith(('_times', '_std', '_runs', '_cv', '_speedup', '_speedup_std'))]
+        methods = [key for key in dataset.keys() if (key.startswith('v') or key == 'parti') and not key.endswith(('_times', '_std', '_runs', '_cv', '_speedup', '_speedup_std'))]
         
         # Calculate speedups for all methods relative to baseline
         for method in methods:
@@ -296,7 +309,7 @@ def plot_speedups(results, baseline_method='v5', method_names=None, contraction_
         if method_id in method_names:
             display_names[method_id] = method_names[method_id]
         else:
-            display_names[method_id] = f"Method {method_id}"
+            display_names[method_id] = f"{method_id}"
     
     baseline_label = display_names[baseline_method] + ' (Baseline)'
     
@@ -421,6 +434,230 @@ def plot_speedups(results, baseline_method='v5', method_names=None, contraction_
     else:
         plt.show()
 
+def parse_validation_data(log_file_path):
+    """Parse validation data from the TTMC log file and extract error metrics by method"""
+    
+    validation_results = []
+    
+    with open(log_file_path, 'r') as f:
+        content = f.read()
+    
+    # Dictionary to store validation information by dataset name
+    dataset_validations = defaultdict(lambda: defaultdict(list))
+    
+    # Find all dataset entries
+    dataset_entries = re.finditer(r"Running contraction on (.*?)\.\.\.?\n", content)
+    
+    # Process each dataset entry
+    for dataset_entry in dataset_entries:
+        dataset_name = dataset_entry.group(1).strip()
+        # Extract base dataset name without path and extension
+        base_name = os.path.basename(dataset_name)
+        base_name = os.path.splitext(base_name)[0]
+        
+        # Find the starting point of this dataset entry
+        start_pos = dataset_entry.start()
+        
+        # Find the end point (next dataset entry or end of content)
+        next_dataset = re.search(r"Running contraction on (.*?)\.\.\.?\n", content[start_pos + 1:])
+        if next_dataset:
+            end_pos = start_pos + 1 + next_dataset.start()
+        else:
+            end_pos = len(content)
+        
+        # Extract the section for this dataset
+        dataset_section = content[start_pos:end_pos]
+        
+        # Find method runs and their associated validation data
+        method_runs = re.finditer(r"Run \d+/\d+ of method (v\d+)\.\.\..*?Method: (.*?), Time: (\d+(?:\.\d+)?(?:[eE][+-]?\d+)?).*?Validation: Max absolute diff = ([\d\.e\-\+]+), Relative error = ([\d\.e\-\+]+), Elements with significant error = ([\d]+)", 
+                                 dataset_section, re.DOTALL)
+        
+        for method_run in method_runs:
+            method_id = method_run.group(1)  # v2, v3, etc.
+            max_abs_diff = float(method_run.group(4))
+            relative_error = float(method_run.group(5))
+            significant_error_elements = int(method_run.group(6))
+            
+            dataset_validations[base_name][method_id].append({
+                'max_abs_diff': max_abs_diff,
+                'relative_error': relative_error,
+                'significant_error_elements': significant_error_elements
+            })
+    
+    # Convert to results format similar to timing results
+    for dataset, methods in dataset_validations.items():
+        result = {'name': dataset}
+        
+        for method_id, validations in methods.items():
+            if validations:
+                # Calculate averages for each metric
+                avg_max_abs_diff = np.mean([v['max_abs_diff'] for v in validations])
+                avg_relative_error = np.mean([v['relative_error'] for v in validations])
+                avg_sig_error_elements = np.mean([v['significant_error_elements'] for v in validations])
+                
+                result[f"{method_id}_max_abs_diff"] = avg_max_abs_diff
+                result[f"{method_id}_relative_error"] = avg_relative_error
+                result[f"{method_id}_sig_error_elements"] = avg_sig_error_elements
+        
+        validation_results.append(result)
+    
+    return validation_results
+
+def print_error_tables(validation_results, method_names):
+    """Print formatted error tables with datasets as rows and methods as columns"""
+    
+    if not validation_results:
+        print("No validation data found.")
+        return
+    
+    # Sort results by dataset name
+    validation_results.sort(key=lambda x: x['name'])
+    
+    # Get all unique methods across datasets
+    all_methods = set()
+    for r in validation_results:
+        for key in r.keys():
+            if key.startswith('v') and key.endswith('_max_abs_diff'):
+                method_id = key.replace('_max_abs_diff', '')
+                all_methods.add(method_id)
+    
+    # Sort methods by version number
+    all_methods = sorted(all_methods, key=lambda x: int(x[1:]))
+    
+    print("\n" + "="*120)
+    print("ERROR ANALYSIS SUMMARY")
+    print("="*120)
+    
+    # Table 1: Max Absolute Difference
+    print("\nTable 1: Maximum Absolute Difference")
+    print("-" * 80)
+    
+    max_abs_diff_data = []
+    headers = ['Dataset'] + [f"{method} ({method_names.get(method, 'Unknown')})" for method in all_methods]
+    
+    for r in validation_results:
+        row = [r['name']]
+        for method in all_methods:
+            key = f"{method}_max_abs_diff"
+            if key in r and r[key] is not None:
+                row.append(f"{r[key]:.6e}")
+            else:
+                row.append('N/A')
+        max_abs_diff_data.append(row)
+    
+    print(tabulate(max_abs_diff_data, headers=headers, tablefmt='grid'))
+    
+    # Table 2: Relative Error
+    print("\nTable 2: Relative Error")
+    print("-" * 80)
+    
+    rel_error_data = []
+    for r in validation_results:
+        row = [r['name']]
+        for method in all_methods:
+            key = f"{method}_relative_error"
+            if key in r and r[key] is not None:
+                row.append(f"{r[key]:.6e}")
+            else:
+                row.append('N/A')
+        rel_error_data.append(row)
+    
+    print(tabulate(rel_error_data, headers=headers, tablefmt='grid'))
+    
+    # Table 3: Elements with Significant Error
+    print("\nTable 3: Elements with Significant Error")
+    print("-" * 80)
+    
+    sig_error_data = []
+    for r in validation_results:
+        row = [r['name']]
+        for method in all_methods:
+            key = f"{method}_sig_error_elements"
+            if key in r and r[key] is not None:
+                row.append(f"{r[key]:,.0f}")
+            else:
+                row.append('N/A')
+        sig_error_data.append(row)
+    
+    print(tabulate(sig_error_data, headers=headers, tablefmt='grid'))
+
+def parse_ttm_baseline_results(ttm_results_file="/tmp/ttm_results.txt"):
+    """
+    Parse TTM baseline results from the benchmark results file.
+    
+    Parameters:
+    -----------
+    ttm_results_file : str
+        Path to the TTM results file (default: /tmp/ttm_results.txt)
+    
+    Returns:
+    --------
+    dict
+        Dictionary mapping dataset names to TTM kernel times in seconds
+    """
+    ttm_results = {}
+    
+    try:
+        with open(ttm_results_file, 'r') as f:
+            lines = f.readlines()
+        
+        # Skip header line
+        for line in lines[1:]:
+            line = line.strip()
+            if line:
+                parts = line.split(',')
+                if len(parts) >= 2:
+                    dataset = parts[0].strip()
+                    time_str = parts[1].strip()
+                    
+                    if time_str != 'ERROR':
+                        try:
+                            # Convert to milliseconds to match TTMC log format
+                            time_val = float(time_str) * 1000  # Convert seconds to milliseconds
+                            ttm_results[dataset] = time_val
+                        except ValueError:
+                            print(f"Warning: Could not parse time value '{time_str}' for dataset '{dataset}'")
+                    else:
+                        print(f"Warning: TTM benchmark failed for dataset '{dataset}'")
+        
+        print(f"Loaded TTM baseline results for {len(ttm_results)} datasets")
+        return ttm_results
+    
+    except FileNotFoundError:
+        print(f"Warning: TTM results file not found: {ttm_results_file}")
+        return {}
+    except Exception as e:
+        print(f"Error reading TTM results file: {e}")
+        return {}
+
+def integrate_ttm_baseline(results, ttm_results, method_names):
+    """
+    Integrate TTM baseline results into the main results data structure.
+    
+    Parameters:
+    -----------
+    results : list
+        List of dictionaries containing timing data for each dataset
+    ttm_results : dict
+        Dictionary mapping dataset names to TTM kernel times
+    
+    Returns:
+    --------
+    list
+        Updated results with TTM baseline data integrated
+    """
+    for r in results:
+        dataset_name = r['name']
+        if dataset_name in ttm_results:
+            # Add TTM baseline as 'v11 parti' method
+            r['parti'] = ttm_results[dataset_name]
+            r['parti_times'] = [ttm_results[dataset_name]]  # Single measurement
+            r['parti_std'] = 0.0  # No standard deviation for single measurement
+            r['parti_runs'] = 1
+            r['parti_cv'] = 0.0  # Coefficient of variation is 0 for single measurement
+    method_names['parti'] = 'PARTI'
+    return results, method_names
+
 def main():
     parser = argparse.ArgumentParser(description='Parse TTMC log files and create performance plots')
     parser.add_argument('log_file', help='Path to the TTMC log file')
@@ -431,6 +668,8 @@ def main():
                         help='Maximum value for the y-axis (default: 5.0)')
     parser.add_argument('-s', '--skip', nargs='+',
                         help='Methods to skip in the plot (e.g., -s v2 v6)')
+    parser.add_argument('-e', '--error-analysis', action='store_true',
+                        help='Perform error analysis and display error tables')
     args = parser.parse_args()
     
     # Parse log file
@@ -444,8 +683,21 @@ def main():
     if contraction_choice:
         print(f"Found contraction choice: {contraction_choice}")
     
-    # Calculate speedups
+    # Handle TTM baseline integration if parti is specified as baseline
     baseline_method = args.baseline
+    if baseline_method == 'parti':
+        print("Loading TTM baseline results from ParTI benchmark...")
+        ttm_results = parse_ttm_baseline_results()
+        if ttm_results:
+            # Integrate TTM baseline results into main results
+            results, method_names = integrate_ttm_baseline(results, ttm_results, method_names)
+            print(f"Integrated TTM baseline for {len([r for r in results if 'parti' in r])} datasets")
+        else:
+            print("Warning: No TTM baseline results found. Cannot use 'parti' as baseline.")
+            print("Please run the TTM benchmark first or choose a different baseline method.")
+            return
+    
+    # Calculate speedups
     results = calculate_speedups(results, baseline_method)
     
     # Print summary
@@ -461,30 +713,20 @@ def main():
             if key.startswith('v') and not key.endswith(('_times', '_std', '_runs', '_cv', '_speedup', '_speedup_std')):
                 all_methods.add(key)
     
+    if baseline_method == 'parti':
+        all_methods.add('parti')
     # Sort methods by version number
-    all_methods = sorted(all_methods, key=lambda x: int(x[1:]))
+    all_methods = sorted(all_methods, key=lambda x: int(x[1:]) if x[1:].isdigit() else float('inf'))
     
     print("\nPerformance Summary (Average Times):")
     print("-" * 100)
     
-    # Calculate column widths for better formatting
-    name_width = 25
-    method_widths = {}
-    for method in all_methods:
-        method_display = f"{method} ({method_names.get(method, 'Unknown')})"
-        method_widths[method] = max(len(method_display) + 5, 15)  # Add buffer for time value
-    
-    # Print header for all methods
-    header = f"{'Dataset':<{name_width}}"
-    for method in all_methods:
-        method_display = f"{method} ({method_names.get(method, 'Unknown')})"
-        header += f"{method_display:<{method_widths[method]}}"
-    header += "best method"
-    print(header)
-    print("-" * 100)
+    # Prepare data for tabulate
+    performance_data = []
+    headers = ['Dataset'] + [f"{method} ({method_names.get(method, 'Unknown')})" for method in all_methods] + ['Best Method']
     
     for r in results:
-        row = f"{r['name']:<{name_width}}"
+        row = [r['name']]
         min_time = float('inf')
         best_method = "N/A"
         best_method_time = None
@@ -496,7 +738,7 @@ def main():
                 best_method = f"{method} ({method_names.get(method, 'Unknown')})"
                 best_method_time = r[method]
 
-        # Second pass to print row with best method highlighted
+        # Second pass to format times and highlight best method
         for method in all_methods:
             if method in r and r[method] is not None:
                 time_val = r[method]
@@ -511,37 +753,46 @@ def main():
                 # Highlight the best method's time
                 if time_val == best_method_time:
                     time_str = f"*{time_str}*"
-                row += f"|{time_str:<{method_widths[method]}}"
+                row.append(time_str)
             else:
-                row += f"|{'N/A':<{method_widths[method]}}"
+                row.append('N/A')
 
-        row += best_method
-        print(row)
+        row.append(best_method)
+        performance_data.append(row)
+    
+    print(tabulate(performance_data, headers=headers, tablefmt='grid'))
     
     print("\nSpeedup Summary (relative to {}: {}):".format(baseline_method, method_names.get(baseline_method, 'Unknown')))
     print("-" * 100)
     
-    # Print header for speedup values
-    header = f"{'Dataset':<{name_width}}"
-    for method in all_methods:
-        method_display = f"{method} ({method_names.get(method, 'Unknown')})"
-        header += f"{method_display:<{method_widths[method]}}"
-    print(header)
-    print("-" * 100)
+    # Prepare data for speedup tabulate
+    speedup_data = []
+    speedup_headers = ['Dataset'] + [f"{method} ({method_names.get(method, 'Unknown')})" for method in all_methods]
     
     for r in results:
         # Skip datasets with no baseline timing
         if baseline_method not in r or r[baseline_method] is None:
             continue
             
-        row = f"{r['name']:<{name_width}}"
+        row = [r['name']]
         for method in all_methods:
             speedup_key = f"{method}_speedup"
             if speedup_key in r and r[speedup_key] is not None:
-                row += f"{r[speedup_key]:.2f}x{'':<{method_widths[method]-5}}"
+                row.append(f"{r[speedup_key]:.2f}x")
             else:
-                row += f"{'N/A':<{method_widths[method]}}"
-        print(row)
+                row.append('N/A')
+        speedup_data.append(row)
+    
+    print(tabulate(speedup_data, headers=speedup_headers, tablefmt='grid'))
+    
+    # Perform error analysis if requested
+    if args.error_analysis:
+        print("\nPerforming error analysis...")
+        validation_results = parse_validation_data(args.log_file)
+        if validation_results:
+            print_error_tables(validation_results, method_names)
+        else:
+            print("No validation data found in log file.")
     
     # Create and save the speedup plot
     plot_speedups(results, baseline_method, method_names, contraction_choice, 
