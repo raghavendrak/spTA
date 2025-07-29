@@ -34,8 +34,8 @@ rm -f ttmc_v*
 echo "Finding contraction methods..."
 method_files=(v*.cu)
 method_numbers=()
-skip_methods=(1 2 6 11 12)  # Skip method 1 (v1_cpu_5loop.cu)
-# skip_methods=(1 2 3 4 5 6 8 9 10 11  )  # Skip method 1 (v1_cpu_5loop.cu)
+# skip_methods=(1 2 6 11 12)  # Skip method 1 (v1_cpu_5loop.cu)
+skip_methods=(1 2 3 4 6 8)  # Skip method 1 (v1_cpu_5loop.cu)
 
 for file in "${method_files[@]}"; do
     if [[ $file =~ v([0-9]+)_ ]]; then
@@ -81,6 +81,7 @@ VERBOSE=false
 CSF_FILE=""
 VERIFY=false  # Default: don't verify results
 RUNS=1        # Default: run each method once
+BENCHMARK=""
 
 # Parse command-line arguments
 while [[ $# -gt 0 ]]; do
@@ -110,6 +111,10 @@ while [[ $# -gt 0 ]]; do
             RUNS="$2"
             shift 2
             ;;
+        -b|--benchmark)
+            BENCHMARK="$2"
+            shift 2
+            ;;
         *.csf)
             # If argument ends with .csf, it's a CSF file
             CSF_FILE="$1"
@@ -132,6 +137,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 echo "Using factor ranks: R1=$RANK_1, R2=$RANK_2"
+if [ "$BENCHMARK" = "parti" ]; then
+    ./run_ttm_benchmark.sh $RANK_1 $RANK_2
+fi
+
 if [ "$VERBOSE" = true ]; then
     echo "Verbose mode enabled"
 fi
@@ -277,7 +286,7 @@ process_all_csf_files() {
     
     # Find all .csf files in the directory
     echo "Processing all .csf files in $dir..."
-    find "$dir" -maxdepth 1 -name "*.csf" | while read -r file; do
+    find "$dir" -maxdepth 1 -name "*.csf" | sort | while read -r file; do
         run_contractions "$file"
     done
 
@@ -298,10 +307,10 @@ process_all_csf_files() {
 generate_plots() {
     echo "Generating performance plots..."
     if [ -n "$NCM" ]; then
-        python parse_logs.py "TTMC_ncm_${NCM}.log" -o "speedup_ncm_${NCM}.png" -s "v2"
+        python parse_logs.py "TTMC_ncm_${NCM}.log" -o "Speedup_ncm_${NCM}.png" -s "v2" -b "$BENCHMARK"
     else
         for ncm in 0 1 2; do
-            python parse_logs.py "TTMC_ncm_${ncm}.log" -o "speedup_ncm_${ncm}.png" -s "v2"
+            python parse_logs.py "TTMC_ncm_${ncm}.log" -o "speedup_ncm_${ncm}.png" -s "v2" -b "$BENCHMARK"
         done
     fi
 }
