@@ -2,6 +2,19 @@
 
 # Script to benchmark TTM operations on all tensors
 # This script generates matrices, runs TTM chain tests, and extracts kernel times
+# Usage: ./run_ttm_benchmark.sh <r1> <r2>
+
+# Check command line arguments
+if [ $# -ne 2 ]; then
+    echo "Usage: $0 <r1> <r2>"
+    echo "Example: $0 10 10"
+    exit 1
+fi
+
+R1="$1"
+R2="$2"
+
+echo "Running TTM benchmark with r1=$R1, r2=$R2"
 
 TENSOR_DIR="/home/bhaskar/tensors_dataset"
 GENERATE_MATRIX="/home/bhaskar/spTA/Week_11_TTMC_GPU/generate_matrix.out"
@@ -13,7 +26,7 @@ RESULTS_FILE="/tmp/ttm_results.txt"
 > "$RESULTS_FILE"
 > "$LOG_FILE"
 
-echo "Starting TTM benchmark for all tensors..."
+echo "Starting TTM benchmark for all tensors with r1=$R1, r2=$R2..."
 echo "Dataset,Total_CUDA_TTM_Kernel_Time(s)" > "$RESULTS_FILE"
 
 # Function to extract TTM kernel times from log output
@@ -55,8 +68,8 @@ for tensor_file in "$TENSOR_DIR"/*.tns; do
     fi
     
     # Generate matrices
-    echo "  Generating matrices for $base_name..."
-    matrix_output=$("$GENERATE_MATRIX" "$tensor_file" 2>&1)
+    echo "  Generating matrices for $base_name with r1=$R1, r2=$R2..."
+    matrix_output=$("$GENERATE_MATRIX" "$tensor_file" "$R1" "$R2" 2>&1)
     if [[ $? -ne 0 ]]; then
         echo "  Error generating matrices for $base_name"
         continue
