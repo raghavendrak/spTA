@@ -309,7 +309,7 @@ void GPU_4loop_host_func(
       cudaDeviceSynchronize();
       auto end = std::chrono::high_resolution_clock::now();
       auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-      cout << "Method: GPU_4L_CM2, Time: " << duration / 1000.0 << " ms" << endl;        
+      cout << "Method: 2D-grid-2D-tb-cm-W, Time: " << duration / 1000.0 << " ms" << endl;        
     }
     /*
     else if(contraction == 2){

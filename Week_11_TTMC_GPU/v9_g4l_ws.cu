@@ -307,7 +307,7 @@ void GPU_4loop_host_func(
     // uint64_t mode_1_idx_offset, mode_2_ptr_offset, mode_2_idx_offset, mode_1_idx_num_elements;
     // Launch kernels
     if (contraction == 0 || contraction == 1) {
-      dim3 gridDim(16,16);
+      dim3 gridDim(32, 128);
       dim3 blockDim(32, 32);
       int sharedMemBytes = f2 * sizeof(float);
 
@@ -319,7 +319,7 @@ void GPU_4loop_host_func(
       cudaDeviceSynchronize();
       auto end = std::chrono::high_resolution_clock::now();
       auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-      cout << "Method: GPU_4L_WS2, Time: " << duration / 1000.0 << " ms" << endl;
+      cout << "Method: 2D-grid-2D-tb-ws-W, Time: " << duration / 1000.0 << " ms" << endl;
         
     }
     /*

@@ -356,7 +356,7 @@ void GPU_4loop_host_func(
       auto end = std::chrono::high_resolution_clock::now();
       auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
       
-      cout << "Method: GPU_4L_STREAMS, Time: " << duration / 1000.0 << " ms" << endl;
+      cout << "Method: streams, Time: " << duration / 1000.0 << " ms" << endl;
     }
     else if(contraction == 2){
       float* buffer_for_ncm_2;
