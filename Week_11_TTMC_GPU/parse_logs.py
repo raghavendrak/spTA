@@ -614,6 +614,7 @@ def parse_ttm_baseline_results(ttm_results_file="/tmp/ttm_results.txt"):
                         try:
                             # Convert to milliseconds to match TTMC log format
                             time_val = float(time_str) * 1000  # Convert seconds to milliseconds
+                            time_val = time_val / 10 # I made run the parti kernel 10 times, so divide by 10 to get the average time
                             ttm_results[dataset] = time_val
                         except ValueError:
                             print(f"Warning: Could not parse time value '{time_str}' for dataset '{dataset}'")

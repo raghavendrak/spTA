@@ -43,6 +43,7 @@ def parse_results_file(results_file):
                     else:
                         try:
                             time_val = float(time_str)
+                            time_val /= 10 #the kernel is runnning 10 times
                             results.append([dataset, f"{time_val:.6f}"])
                         except ValueError:
                             results.append([dataset, 'ERROR'])

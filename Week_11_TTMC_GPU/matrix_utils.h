@@ -20,6 +20,32 @@ void generate_matrix(uint64_t rows, uint64_t cols, unsigned int seed, float*& ar
     arr[i] = dist(gen);
   }
 }
+// Function to compare results against reference implementation based on relative error
+bool compare_results(float* result, float* reference, uint64_t size, float tolerance = 1e-5) {
+    float max_diff = 0.0;
+    float max_val = 0.0;
+    int errors = 0;
+    float rel_error = 0.0;
+    
+    for (uint64_t i = 0; i < size; i++) {
+        float diff = std::fabs(result[i] - reference[i]);
+        max_diff = std::max(max_diff, diff);
+        max_val = std::max(max_val, std::fabs(reference[i]));
+        rel_error = diff / std::fabs(reference[i]);
+        
+        if (rel_error > tolerance && std::fabs(reference[i]) > tolerance) {
+            errors++;
+        }
+    }
+    
+    rel_error = (max_val > 0) ? max_diff / max_val : max_diff;
+    
+    std::cout << "Validation: Max absolute diff = " << max_diff 
+         << ", Relative error = " << rel_error 
+         << ", Elements with significant error = " << errors << std::endl;
+         
+    return (rel_error < tolerance && errors == 0);
+}
 
 // Function to compare two matrices
 bool compare_results1(float*& C1, float*& C2, uint64_t size,  float tolerance = 1e-6)
@@ -38,8 +64,8 @@ bool compare_results1(float*& C1, float*& C2, uint64_t size,  float tolerance = 
   return true;
 }
 
-// Function to compare results against reference implementation
-bool compare_results(float* result, float* reference, uint64_t size, float tolerance = 1e-5) {
+// Function to compare results against reference implementation based on absolute difference
+bool compare_results2(float* result, float* reference, uint64_t size, float tolerance = 1e-5) {
     float max_diff = 0.0;
     float max_val = 0.0;
     int errors = 0;
