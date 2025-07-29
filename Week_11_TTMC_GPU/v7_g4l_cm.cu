@@ -30,7 +30,7 @@ __global__ void GPU_4L_CM_device_func_ncm_0(
   uint32_t f1, uint32_t f2,  int num_warps)
 {
   extern __shared__ float buf[];
-  // int buf_size = num_warps * f2;
+  // int buf_size = num_warps * f2     +    f1 * f2 ;
   int buf_index;
 
   uint64_t i_ptr = blockIdx.x;
@@ -39,6 +39,14 @@ __global__ void GPU_4L_CM_device_func_ncm_0(
   uint32_t warp_size = 32;
   uint32_t warp_id = threadIdx.x / warp_size;
   int tid_in_warp = threadIdx.x % warp_size;
+
+  // buf_index = threadIdx.x;
+  // if(buf_index < f1 * f2){
+  //   buf[num_warps * f2 + buf_index] = 0.0;
+  // }
+  for(int buf_idx = threadIdx.x; buf_idx < f1 * f2; buf_idx += blockDim.x){
+    buf[num_warps * f2 + buf_idx] = 0.0;
+  }
 
   for(uint64_t j_ptr_offset = mode_1_ptr[i_ptr]; j_ptr_offset < mode_1_ptr[i_ptr + 1]; j_ptr_offset += num_warps){
     uint64_t j_ptr =  j_ptr_offset + warp_id;
@@ -72,11 +80,24 @@ __global__ void GPU_4L_CM_device_func_ncm_0(
         for(uint32_t s_offset = 0; s_offset < f2; s_offset += warp_size){
           uint32_t s = s_offset + tid_in_warp;
           if(s < f2){
-            atomicAdd(&arr_O[i * f1* f2 + r * f2 + s], buf[warp_id * f2 + s] * arr_A[j * f1 + r]);
+            // atomicAdd(&arr_O[i * f1* f2 + r * f2 + s], buf[warp_id * f2 + s] * arr_A[j * f1 + r]);
+            atomicAdd(&buf[num_warps * f2 + r * f2 + s], buf[warp_id * f2 + s] * arr_A[j * f1 + r]);
           }
         }
       }
-      
+    }
+  }
+  __syncthreads();
+  
+  for(uint32_t r_offset = 0; r_offset < f1; r_offset += num_warps){
+    uint32_t r = r_offset + warp_id;
+    if(r < f1){
+      for(uint32_t s_offset = 0; s_offset < f2; s_offset += warp_size){
+        uint32_t s = s_offset + tid_in_warp;
+        if(s < f2){
+          atomicAdd(&arr_O[i * f1* f2 + r * f2 + s], buf[num_warps * f2 + r * f2 + s]);
+        }
+      }
     }
   }
 }
@@ -188,7 +209,7 @@ void GPU_4L_CM_host_func(
       // dim3 blockDim(1024);
       int block_size = 512, warp_size = 32;
       int num_warps = (block_size + warp_size - 1) / warp_size;
-      int sharedMemBytes =  num_warps * f2 * sizeof(float);
+      int sharedMemBytes =  num_warps * f2 * sizeof(float) + f1 * f2 * sizeof(float);
       
       auto start = std::chrono::high_resolution_clock::now();
       GPU_4L_CM_device_func_ncm_0<<<grid_size, block_size, sharedMemBytes>>>(
@@ -200,7 +221,7 @@ void GPU_4L_CM_host_func(
       cudaDeviceSynchronize();
       auto end = std::chrono::high_resolution_clock::now();
       auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-      cout << "Method: GPU_4L_CM, Time: " << duration / 1000.0 << " ms" << endl;
+      cout << "Method: 1D-grid-1D-tb-cm-W, Time: " << duration / 1000.0 << " ms" << endl;
     }
     else if (contraction == 1) {
     
