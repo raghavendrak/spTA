@@ -148,56 +148,22 @@ CSFTensor readCSFTensor(const string& filename) {
 }
 
 // Modified version of getCSFArrays to handle separate arrays for each mode
-void getCSFArrays(const CSFTensor& tensor, 
-                 uint64_t** mode_0_ptr, uint64_t** mode_0_idx,
-                 uint64_t** mode_1_ptr, uint64_t** mode_1_idx,
-                 uint64_t** mode_2_ptr, uint64_t** mode_2_idx,
-                 float** values, int* order) {
-    // Set the order
-    *order = tensor.order;
-    
-    if (tensor.order != 3) {
-        throw runtime_error("Only 3rd order tensors are supported");
+// Generic, zero-copy version for N-dimensional tensors
+inline void getCSFArrays(const CSFTensor& tensor,
+                        std::vector<uint64_t*>& mode_ptrs,
+                        std::vector<uint64_t*>& mode_idxs,
+                        float*& values,
+                        int& order) {
+    order = tensor.order;
+    mode_ptrs.resize(order);
+    mode_idxs.resize(order);
+    for (int i = 0; i < order; ++i) {
+        mode_ptrs[i] = const_cast<uint64_t*>(tensor.ptrs[i].data());
+        mode_idxs[i] = const_cast<uint64_t*>(tensor.idxs[i].data());
     }
-    
-    // Copy pointers and indices for each mode
-    *mode_0_ptr = new uint64_t[tensor.ptrs[0].size()];
-    *mode_0_idx = new uint64_t[tensor.idxs[0].size()];
-    *mode_1_ptr = new uint64_t[tensor.ptrs[1].size()];
-    *mode_1_idx = new uint64_t[tensor.idxs[1].size()];
-    *mode_2_ptr = new uint64_t[tensor.ptrs[2].size()];
-    *mode_2_idx = new uint64_t[tensor.idxs[2].size()];
-    
-    // Copy data for mode 0
-    for (size_t i = 0; i < tensor.ptrs[0].size(); i++) {
-        (*mode_0_ptr)[i] = tensor.ptrs[0][i];
-    }
-    for (size_t i = 0; i < tensor.idxs[0].size(); i++) {
-        (*mode_0_idx)[i] = tensor.idxs[0][i];
-    }
-    
-    // Copy data for mode 1
-    for (size_t i = 0; i < tensor.ptrs[1].size(); i++) {
-        (*mode_1_ptr)[i] = tensor.ptrs[1][i];
-    }
-    for (size_t i = 0; i < tensor.idxs[1].size(); i++) {
-        (*mode_1_idx)[i] = tensor.idxs[1][i];
-    }
-    
-    // Copy data for mode 2
-    for (size_t i = 0; i < tensor.ptrs[2].size(); i++) {
-        (*mode_2_ptr)[i] = tensor.ptrs[2][i];
-    }
-    for (size_t i = 0; i < tensor.idxs[2].size(); i++) {
-        (*mode_2_idx)[i] = tensor.idxs[2][i];
-    }
-    
-    // Copy values
-    *values = new float[tensor.values.size()];
-    for (size_t i = 0; i < tensor.values.size(); i++) {
-        (*values)[i] = tensor.values[i];
-    }    
+    values = const_cast<float*>(tensor.values.data());
 }
+
 
 // Helper functions to calculate matrix dimensions based on contraction mode
 uint64_t getMatrixDim1(const vector<uint64_t>& dimensions, int contraction_mode) {

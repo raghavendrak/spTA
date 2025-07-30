@@ -15,13 +15,20 @@ using namespace std;
 /*Start of CPU 4 loop Method*/
 
 // Function to perform contraction based on the inputs using 4 for loops
-void performContraction_cpu_2(uint64_t*& mode_0_ptr,uint64_t*& mode_0_idx,
-                        uint64_t*& mode_1_ptr, uint64_t*& mode_1_idx,
-                        uint64_t*& mode_2_ptr, uint64_t*& mode_2_idx,
-                        float*& values, float*& arr_A, float*& arr_B,  
-                        float*& arr_O, uint64_t& arr_A_size, uint64_t& arr_B_size, uint64_t& arr_O_size, int& contraction, 
-                        uint64_t& l, uint64_t& m, uint64_t& n, uint64_t& f1, uint64_t& f2) 
+void performContraction_cpu_2(
+    uint64_t** mode_ptrs, uint64_t** mode_idxs,
+    float* values, float* arr_A, float* arr_B, float* arr_O,
+    uint64_t arr_A_size, uint64_t arr_B_size, uint64_t arr_O_size, int contraction,
+    uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2)
 {
+  // Assign local variables for backward-compatible logic
+  uint64_t* mode_0_ptr = mode_ptrs[0];
+  uint64_t* mode_1_ptr = mode_ptrs[1];
+  uint64_t* mode_2_ptr = mode_ptrs[2];
+  uint64_t* mode_0_idx = mode_idxs[0];
+  uint64_t* mode_1_idx = mode_idxs[1];
+  uint64_t* mode_2_idx = mode_idxs[2];
+
   uint64_t i, j, k, index_A, index_B, index_O;
   float value;
                             
@@ -216,17 +223,11 @@ int main(int argc, char* argv[]) {
             cout << "Nonzeros: " << tensor.values.size() << endl;
         }
         
-        // Convert CSF tensor to arrays
-        uint64_t *mode_0_ptr, *mode_0_idx;
-        uint64_t *mode_1_ptr, *mode_1_idx;
-        uint64_t *mode_2_ptr, *mode_2_idx;
-        float *values;
+        // Convert CSF tensor to arrays (N-dimensional, zero-copy)
+        std::vector<uint64_t*> mode_ptrs, mode_idxs;
+        float* values;
         int order;
-        
-        getCSFArrays(tensor, &mode_0_ptr, &mode_0_idx, 
-                    &mode_1_ptr, &mode_1_idx, 
-                    &mode_2_ptr, &mode_2_idx, 
-                    &values, &order);
+        getCSFArrays(tensor, mode_ptrs, mode_idxs, values, order);
         
         // Calculate matrix dimensions based on contraction mode
         uint64_t matrix_dim1 = getMatrixDim1(tensor.dimensions, ncm);
@@ -247,7 +248,7 @@ int main(int argc, char* argv[]) {
         if (verbose) {
             cout << "Matrix A dimensions: " << matrix_dim1 << " x " << rank1 << endl;
             cout << "Matrix B dimensions: " << matrix_dim2 << " x " << rank2 << endl;
-            cout << "Output dimensions: " << out_dim1 << " x " << out_dim2 << endl;
+            cout << "Output dimensions: " << out_dim1 << " x " << rank1 << " x " << rank2 << endl;
         }
         
         // Allocate output array
@@ -260,9 +261,7 @@ int main(int argc, char* argv[]) {
         auto start = std::chrono::high_resolution_clock::now();
         
         performContraction_cpu_2(
-            mode_0_ptr, mode_0_idx,
-            mode_1_ptr, mode_1_idx,
-            mode_2_ptr, mode_2_idx,
+          mode_ptrs.data(), mode_idxs.data(),
             values, arr_A, arr_B, arr_O,
             arr_A_size, arr_B_size, arr_O_size, ncm,
             tensor.dimensions[0], tensor.dimensions[1], tensor.dimensions[2], rank1, rank2
@@ -279,13 +278,6 @@ int main(int argc, char* argv[]) {
         }
         
         // Clean up
-        delete[] mode_0_ptr;
-        delete[] mode_0_idx;
-        delete[] mode_1_ptr;
-        delete[] mode_1_idx;
-        delete[] mode_2_ptr;
-        delete[] mode_2_idx;
-        delete[] values;
         delete[] arr_A;
         delete[] arr_B;
         free(arr_O);
