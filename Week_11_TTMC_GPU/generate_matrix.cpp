@@ -98,15 +98,12 @@ void writeMatrixToCOOFile(const std::string& filename, uint64_t rows, uint64_t c
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <coo_file> [rank1] [rank2] [rank3] [--coo]" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <coo_file> [rank1] [rank2] .... [--coo]" << std::endl;
         std::cerr << "  --coo  : Generate matrices in COO format (default is dense format)" << std::endl;
         return 1;
     }
 
     std::string cooFileName = argv[1];
-    
-    // Default ranks
-    std::vector<int> ranks = {30, 30, 30};
     
     // Check for format flag
     bool useCOOFormat = false;
@@ -115,27 +112,38 @@ int main(int argc, char* argv[]) {
             useCOOFormat = true;
         }
     }
-    
-    // Process non-flag arguments for ranks
-    std::vector<std::string> nonFlagArgs;
-    for (int i = 1; i < argc; ++i) {
-        if (argv[i][0] != '-') {
-            nonFlagArgs.push_back(argv[i]);
-        }
+
+    // Open COO file and read first line as tensor order
+    std::ifstream cooFile(cooFileName);
+    if (!cooFile.is_open()) {
+        std::cerr << "Error: Could not open COO file '" << cooFileName << "'" << std::endl;
+        return 1;
     }
-    
-    // First non-flag arg is the filename, rest are ranks
-    for (size_t i = 1; i < nonFlagArgs.size() && i <= 3; ++i) {
+    int tensorOrder = -1;
+    cooFile >> tensorOrder;
+    if (tensorOrder <= 0) {
+        std::cerr << "Error: Invalid tensor order read from COO file: " << tensorOrder << std::endl;
+        return 1;
+    }
+    cooFile.close();
+
+    // Require next 'order' command line args as ranks
+    int expectedArgc = 2 + tensorOrder; // program, coo file, ranks...
+    std::vector<int> ranks;
+    for (int i = 0, argi = 2; i < tensorOrder; ++i, ++argi) {
+        if (argi >= argc || argv[argi][0] == '-') {
+            std::cerr << "Error: Expected " << tensorOrder << " ranks after COO file name, got " << (argi-2) << std::endl;
+            return 1;
+        }
         try {
-            ranks[i-1] = std::stoi(nonFlagArgs[i]);
+            ranks.push_back(std::stoi(argv[argi]));
         } catch (const std::exception& e) {
-            std::cerr << "Warning: Invalid rank argument '" << nonFlagArgs[i] 
-                      << "', using default rank: " << e.what() << std::endl;
+            std::cerr << "Error: Invalid rank argument '" << argv[argi] << "': " << e.what() << std::endl;
+            return 1;
         }
     }
 
-    // Read COO file
-    int tensorOrder;
+    // Read COO file for dimensions (reuse existing logic)
     std::vector<uint64_t> dimensions;
     if (!readCOOFile(cooFileName, tensorOrder, dimensions)) {
         return 1;
@@ -150,7 +158,7 @@ int main(int argc, char* argv[]) {
     std::cout << std::endl;
 
     std::cout << "Ranks: ";
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < tensorOrder; ++i) {
         std::cout << ranks[i] << " ";
     }
     std::cout << std::endl;
@@ -163,7 +171,7 @@ int main(int argc, char* argv[]) {
     // Generate matrices for TTM operation
     // For TTM, each matrix should have dimensions [R × I_n]
     // where I_n is the size of the tensor in mode n, and R is the rank
-    for (int i = 1; i < tensorOrder && i < 3; ++i) {
+    for (int i = 1; i < tensorOrder; ++i) {
         // For TTM, Matrix U should have dimensions [R × I_n]
         // where R is the rank (nrows) and I_n is the dimension of mode n (ncols)
         uint64_t rows = ranks[i]; // Rank for this mode

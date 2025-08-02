@@ -15,164 +15,175 @@ using namespace std;
 /*Start of CPU 4 loop Method*/
 
 // Function to perform contraction based on the inputs using 4 for loops
-void performContraction_cpu_2(
+void cpu_factorize_n_fuse(
     uint64_t** mode_ptrs, uint64_t** mode_idxs,
-    float* values, float* arr_A, float* arr_B, float* arr_O,
-    uint64_t arr_A_size, uint64_t arr_B_size, uint64_t arr_O_size, int contraction,
-    uint64_t l, uint64_t m, uint64_t n, uint64_t f1, uint64_t f2)
+    float* values, float* factor_matrices[],
+    float* arr_O, int ncm,
+    uint64_t ranks[], int order, uint64_t dimensions[])
 {
-  // Assign local variables for backward-compatible logic
-  uint64_t* mode_0_ptr = mode_ptrs[0];
-  uint64_t* mode_1_ptr = mode_ptrs[1];
-  uint64_t* mode_2_ptr = mode_ptrs[2];
-  uint64_t* mode_0_idx = mode_idxs[0];
-  uint64_t* mode_1_idx = mode_idxs[1];
-  uint64_t* mode_2_idx = mode_idxs[2];
+  if(order == 3){
+    uint64_t i, j, k, index_A, index_B, index_O;
+    float value;
+    if(ncm == 0){
 
-  uint64_t i, j, k, index_A, index_B, index_O;
-  float value;
-                            
-  if(contraction == 0){
-    float* buffer = allocate_aligned_array(f2);    // buffer for mode-s
-
-    // Traverse through CSF tensor pointer and indices arrays for all modes
-    for (uint64_t i_ptr = 0; i_ptr < mode_0_ptr[1]; ++i_ptr) {
-      i = mode_0_idx[i_ptr] ;                         // Index in the mode 'i'
-      
-      for (uint64_t j_ptr = mode_1_ptr[i_ptr]; j_ptr < mode_1_ptr[i_ptr + 1]; ++j_ptr) {
-        j = mode_1_idx[j_ptr] ;                     // Index for 'j' mode in CSF
-        
-        memset(buffer, 0, f2 * sizeof(float));             // Set the entire memory block to 0
-        
-        for (uint64_t k_ptr = mode_2_ptr[j_ptr]; k_ptr < mode_2_ptr[j_ptr + 1]; ++k_ptr) {
-          k = mode_2_idx[k_ptr] ;                 // Index for 'k' mode in CSF
-
-          value = values[k_ptr];                  // CSF value for the above i, j, k
-
-          for (uint64_t s = 0; s < f2; ++s) {
-
-            // Compute linearized indices for matrices B based on the contraction string
-            index_B = k * f2 + s;
-
-            buffer[s] += value * arr_B[index_B];                        
-          }
-        }
-
-        for (uint64_t r = 0; r < f1; ++r) {
-            
-          // Compute linearized indices for matrices B based on the contraction string
-          index_A = j * f1 + r;
-          for (uint64_t s = 0; s < f2; ++s) {
-
-            // For mode-1 linearized output
-            index_O = i * f1 * f2 + r * f2 + s;
-
-            // Perform contraction
-            arr_O[index_O] += buffer[s] * arr_A[index_A];              
-          }
-        }
-      }
-    }
-    std::free(buffer);
-  }
-  else if(contraction == 1){
-    float* buffer = allocate_aligned_array(f2);    // buffer for mode-s
-    
-    // Traverse through CSF tensor pointer and indices arrays for all modes
-    for (uint64_t i_ptr = 0; i_ptr < mode_0_ptr[1]; ++i_ptr) {
-      i = mode_0_idx[i_ptr] ;                         // Index in the mode 'i'
-
-      for (uint64_t j_ptr = mode_1_ptr[i_ptr]; j_ptr < mode_1_ptr[i_ptr + 1]; ++j_ptr) {
-        j = mode_1_idx[j_ptr] ;                     // Index for 'j' mode in CSF
-
-        memset(buffer, 0, f2 * sizeof(float));             // Set the entire memory block to 0
-
-        for (uint64_t k_ptr = mode_2_ptr[j_ptr]; k_ptr < mode_2_ptr[j_ptr + 1]; ++k_ptr) {
-          k = mode_2_idx[k_ptr] ;                 // Index for 'k' mode in CSF
-
-          value = values[k_ptr];                  // CSF value for the above i, j, k
-
-          for (uint64_t s = 0; s < f2; ++s) {
-
-            // Compute linearized indices for matrices B based on the contraction string
-            index_B = k * f2 + s;
-
-            // Perform contraction
-            buffer[s] += value * arr_B[index_B];            
-          }
-        }
-
-        for (uint64_t r = 0; r < f1; ++r) {
-          // Compute linearized indices for matrices A, B based on the contraction string
-          index_A = i * f1 + r;
-          for (uint64_t s = 0; s < f2; ++s) {
-
-            // For mode-1 linearized output 
-            index_O = j * f1 * f2 + r * f2 + s;
-
-            // Perform contraction
-            arr_O[index_O] += buffer[s] * arr_A[index_A];              
-          }
-        }
-      }
-    }
-    std::free(buffer);
-  }
-  else if(contraction == 2){
-    float* buffer = allocate_aligned_array(n*f2);    // buffer for mode-k and mode-s
-    bool* k_buffer = new bool[n];  // buffer for k-indices
-    uint64_t index_buf = 0;
-
-    // Traverse through CSF tensor pointer and indices arrays for all modes
-    for (uint64_t i_ptr = 0; i_ptr < mode_0_ptr[1]; ++i_ptr) {
-      i = mode_0_idx[i_ptr] ;                          // Index in the mode 'i'
-
-      memset(buffer, 0, n * f2 * sizeof(float));             // Set the entire memory block to 0
-      memset(k_buffer, 0, n * sizeof(bool)); //initialize to false
-      for (uint64_t j_ptr = mode_1_ptr[i_ptr]; j_ptr < mode_1_ptr[i_ptr + 1]; ++j_ptr) {
-        j = mode_1_idx[j_ptr] ;                      // Index for 'j' mode in CSF
-
-        for (uint64_t k_ptr = mode_2_ptr[j_ptr]; k_ptr < mode_2_ptr[j_ptr + 1]; ++k_ptr) {
-          k = mode_2_idx[k_ptr] ;                  // Index for 'k' mode in CSF
-          k_buffer[k] = true;
-
-          value = values[k_ptr];                   // CSF value for the above i, j, k
-
-          for (uint64_t s = 0; s < f2; ++s) {
-
-            // Compute linearized indices for matrices B based on the contraction string
-            index_B = j * f2 + s;
-
-            index_buf = k * f2 + s; 
-
-            buffer[index_buf] += value * arr_B[index_B];
-          }
-        }
-      }
-
-      for (uint64_t z = 0; z < n ; ++z) {
-        if(k_buffer[z]){
-          k = z;
-          for (uint64_t r = 0; r < f1; ++r) {
+      uint64_t f1 = ranks[1];
+      uint64_t f2 = ranks[2];
+      float* arr_A = factor_matrices[1];
+      float* arr_B = factor_matrices[2];
+      float* buffer = allocate_aligned_array(f2);    // buffer for mode-s
   
-            // Compute linearized indices for matrices A based on the contraction string
-            index_A = i * f1 + r;
+      // Traverse through CSF tensor pointer and indices arrays for all modes
+      for (uint64_t i_ptr = 0; i_ptr < mode_ptrs[0][1]; ++i_ptr) {
+        i = mode_idxs[0][i_ptr] ;                         // Index in the mode 'i'
+        
+        for (uint64_t j_ptr = mode_ptrs[1][i_ptr]; j_ptr < mode_ptrs[1][i_ptr + 1]; ++j_ptr) {
+          j = mode_idxs[1][j_ptr] ;                     // Index for 'j' mode in CSF
+          
+          memset(buffer, 0, f2 * sizeof(float));             // Set the entire memory block to 0
+          
+          for (uint64_t k_ptr = mode_ptrs[2][j_ptr]; k_ptr < mode_ptrs[2][j_ptr + 1]; ++k_ptr) {
+            k = mode_idxs[2][k_ptr] ;                 // Index for 'k' mode in CSF
+  
+            value = values[k_ptr];                  // CSF value for the above i, j, k
+  
             for (uint64_t s = 0; s < f2; ++s) {
-        
-              // For mode-1 linearized output 
-              index_O = k * f1 * f2 + r * f2 + s;
   
-              index_buf = k * f2 + s; 
+              // Compute linearized indices for matrices B based on the contraction string
+              index_B = k * f2 + s;
   
-              arr_O[index_O] += buffer[index_buf] * arr_A[index_A] ;        
+              buffer[s] += value * arr_B[index_B];                        
+            }
+          }
+  
+          for (uint64_t r = 0; r < f1; ++r) {
+              
+            // Compute linearized indices for matrices B based on the contraction string
+            index_A = j * f1 + r;
+            for (uint64_t s = 0; s < f2; ++s) {
+  
+              // For mode-1 linearized output
+              index_O = i * f1 * f2 + r * f2 + s;
+  
+              // Perform contraction
+              arr_O[index_O] += buffer[s] * arr_A[index_A];              
             }
           }
         }
       }
+      std::free(buffer);
     }
-    std::free(buffer);
-    delete [] k_buffer;
-  } 
+    else if(ncm == 1){
+      uint64_t f1 = ranks[0];
+      uint64_t f2 = ranks[2];
+      float* arr_A = factor_matrices[0];
+      float* arr_B = factor_matrices[2];
+      
+      float* buffer = allocate_aligned_array(f2);    // buffer for mode-s
+      
+      // Traverse through CSF tensor pointer and indices arrays for all modes
+      for (uint64_t i_ptr = 0; i_ptr < mode_ptrs[0][1]; ++i_ptr) {
+        i = mode_idxs[0][i_ptr] ;                         // Index in the mode 'i'
+  
+        for (uint64_t j_ptr = mode_ptrs[1][i_ptr]; j_ptr < mode_ptrs[1][i_ptr + 1]; ++j_ptr) {
+          j = mode_idxs[1][j_ptr] ;                     // Index for 'j' mode in CSF
+  
+          memset(buffer, 0, f2 * sizeof(float));             // Set the entire memory block to 0
+  
+          for (uint64_t k_ptr = mode_ptrs[2][j_ptr]; k_ptr < mode_ptrs[2][j_ptr + 1]; ++k_ptr) {
+            k = mode_idxs[2][k_ptr] ;                 // Index for 'k' mode in CSF
+  
+            value = values[k_ptr];                  // CSF value for the above i, j, k
+  
+            for (uint64_t s = 0; s < f2; ++s) {
+  
+              // Compute linearized indices for matrices B based on the contraction string
+              index_B = k * f2 + s;
+  
+              // Perform contraction
+              buffer[s] += value * arr_B[index_B];            
+            }
+          }
+  
+          for (uint64_t r = 0; r < f1; ++r) {
+            // Compute linearized indices for matrices A, B based on the contraction string
+            index_A = i * f1 + r;
+            for (uint64_t s = 0; s < f2; ++s) {
+  
+              // For mode-1 linearized output 
+              index_O = j * f1 * f2 + r * f2 + s;
+  
+              // Perform contraction
+              arr_O[index_O] += buffer[s] * arr_A[index_A];              
+            }
+          }
+        }
+      }
+      std::free(buffer);
+    }
+    else if(ncm == 2){
+      uint64_t f1 = ranks[0];
+      uint64_t f2 = ranks[1];
+      float* arr_A = factor_matrices[0];
+      float* arr_B = factor_matrices[1];
+      uint64_t n = dimensions[ncm];
+      float* buffer = allocate_aligned_array(n*f2);    // buffer for mode-k and mode-s
+      bool* k_buffer = new bool[n];  // buffer for k-indices
+      uint64_t index_buf = 0;
+  
+      // Traverse through CSF tensor pointer and indices arrays for all modes
+      for (uint64_t i_ptr = 0; i_ptr < mode_ptrs[0][1]; ++i_ptr) {
+        i = mode_idxs[0][i_ptr] ;                          // Index in the mode 'i'
+  
+        memset(buffer, 0, n * f2 * sizeof(float));             // Set the entire memory block to 0
+        memset(k_buffer, 0, n * sizeof(bool)); //initialize to false
+        for (uint64_t j_ptr = mode_ptrs[1][i_ptr]; j_ptr < mode_ptrs[1][i_ptr + 1]; ++j_ptr) {
+          j = mode_idxs[1][j_ptr] ;                      // Index for 'j' mode in CSF
+  
+          for (uint64_t k_ptr = mode_ptrs[2][j_ptr]; k_ptr < mode_ptrs[2][j_ptr + 1]; ++k_ptr) {
+            k = mode_idxs[2][k_ptr] ;                  // Index for 'k' mode in CSF
+            k_buffer[k] = true;
+  
+            value = values[k_ptr];                   // CSF value for the above i, j, k
+  
+            for (uint64_t s = 0; s < f2; ++s) {
+  
+              // Compute linearized indices for matrices B based on the contraction string
+              index_B = j * f2 + s;
+  
+              index_buf = k * f2 + s; 
+  
+              buffer[index_buf] += value * arr_B[index_B];
+            }
+          }
+        }
+  
+        for (uint64_t z = 0; z < n ; ++z) {
+          if(k_buffer[z]){
+            k = z;
+            for (uint64_t r = 0; r < f1; ++r) {
+    
+              // Compute linearized indices for matrices A based on the contraction string
+              index_A = i * f1 + r;
+              for (uint64_t s = 0; s < f2; ++s) {
+          
+                // For mode-1 linearized output 
+                index_O = k * f1 * f2 + r * f2 + s;
+    
+                index_buf = k * f2 + s; 
+    
+                arr_O[index_O] += buffer[index_buf] * arr_A[index_A] ;        
+              }
+            }
+          }
+        }
+      }
+      std::free(buffer);
+      delete [] k_buffer;
+    } 
+  }
+  else if(order == 4){
+    
+  }
 }
 
 /*End of CPU 4 loop Method*/
@@ -184,7 +195,7 @@ void performContraction_cpu_2(
 int main(int argc, char* argv[]) {
     bool verbose = false;
     string csf_file;
-    uint64_t rank1 = 30, rank2 = 30;
+    std::vector<uint64_t> ranks;
     int ncm = 0;
     
     // Parse command line arguments
@@ -192,10 +203,11 @@ int main(int argc, char* argv[]) {
         string arg = argv[i];
         if (arg == "-v" || arg == "--verbose") {
             verbose = true;
-        } else if (arg == "-r1" && i + 1 < argc) {
-            rank1 = atoi(argv[++i]);
-        } else if (arg == "-r2" && i + 1 < argc) {
-            rank2 = atoi(argv[++i]);
+        } else if ((arg == "-r" || arg == "--ranks") && i + 1 < argc) {
+          // Collect all numbers after -r/--ranks until next arg or end
+          while (i + 1 < argc && argv[i + 1][0] != '-') {
+              ranks.push_back(static_cast<uint64_t>(atoi(argv[++i])));
+          }
         } else if ((arg == "-n" || arg == "--ncm") && i + 1 < argc) {
             ncm = atoi(argv[++i]);
         } else if (csf_file.empty()) {
@@ -207,8 +219,7 @@ int main(int argc, char* argv[]) {
         cerr << "Usage: " << argv[0] << " [options] <csf_file>" << endl;
         cerr << "Options:" << endl;
         cerr << "  -v, --verbose      Enable verbose output" << endl;
-        cerr << "  -r1 <rank>         Set first factor matrix rank (default 30)" << endl;
-        cerr << "  -r2 <rank>         Set second factor matrix rank (default 30)" << endl;
+        cerr << "  -r, --ranks <r1> [r2 ...]  Set all factor matrix ranks (space separated)" << endl;
         cerr << "  -n, --ncm <mode>   Set contraction mode (0, 1, or 2, default 0)" << endl;
         return 1;
     }
@@ -229,42 +240,44 @@ int main(int argc, char* argv[]) {
         int order;
         getCSFArrays(tensor, mode_ptrs, mode_idxs, values, order);
         
-        // Calculate matrix dimensions based on contraction mode
-        uint64_t matrix_dim1 = getMatrixDim1(tensor.dimensions, ncm);
-        uint64_t matrix_dim2 = getMatrixDim2(tensor.dimensions, ncm);
-        uint64_t out_dim1 = getOutputDim1(tensor.dimensions, ncm);
-        
-        // Generate factor matrices
-        float *arr_A = nullptr, *arr_B = nullptr;
-        generate_matrix(matrix_dim1, rank1, 42, arr_A);
-        generate_matrix(matrix_dim2, rank2, 43, arr_B);
-        
-        // Prepare output matrix dimensions
-        uint64_t out_dim2 = rank1 * rank2;
-        uint64_t arr_A_size = matrix_dim1 * rank1;
-        uint64_t arr_B_size = matrix_dim2 * rank2;
-        uint64_t arr_O_size = out_dim1 * out_dim2;
-        
-        if (verbose) {
-            cout << "Matrix A dimensions: " << matrix_dim1 << " x " << rank1 << endl;
-            cout << "Matrix B dimensions: " << matrix_dim2 << " x " << rank2 << endl;
-            cout << "Output dimensions: " << out_dim1 << " x " << rank1 << " x " << rank2 << endl;
+        // Check that number of ranks matches tensor order
+        if (ranks.size() < static_cast<size_t>(order)) {
+          cerr << "Error: Number of ranks (" << ranks.size() << ") does not match tensor order (" << order << ")." << endl;
+          return 1;
+        }
+
+        // Generate 'order' number of factor matrices
+        std::vector<float*> factor_matrices(order, nullptr);
+        std::vector<uint64_t> factor_sizes(order);
+        for (int i = 0; i < order; ++i) {
+          generate_matrix(tensor.dimensions[i], ranks[i], 42 + i, factor_matrices[i]);
+          factor_sizes[i] = tensor.dimensions[i] * ranks[i];
         }
         
-        // Allocate output array
+        if (verbose) {
+          for (int i = 0; i < order; ++i) {
+              cout << "Factor matrix " << i << ": " << tensor.dimensions[i] << " x " << ranks[i] << endl;
+          }
+        }
+        
+        // Output tensor: 
+        uint64_t arr_O_size = 1;
+        for (int i = 0; i < order; ++i){
+          if(i != ncm) arr_O_size *= ranks[i];
+          else arr_O_size *= tensor.dimensions[i];
+        }
         float* arr_O = allocate_aligned_array(arr_O_size);
         
-        // Run this implementation (CPU 4-loop - reference)
+        // Run this implementation (CPU factorize-n-fuse)
         if (verbose) {
-            cout << "Running CPU 4-loop implementation..." << endl;
+            cout << "Running CPU factorize and fuse implementation..." << endl;
         }
         auto start = std::chrono::high_resolution_clock::now();
         
-        performContraction_cpu_2(
+        cpu_factorize_n_fuse(
           mode_ptrs.data(), mode_idxs.data(),
-            values, arr_A, arr_B, arr_O,
-            arr_A_size, arr_B_size, arr_O_size, ncm,
-            tensor.dimensions[0], tensor.dimensions[1], tensor.dimensions[2], rank1, rank2
+            values, factor_matrices.data(), arr_O,
+            ncm, ranks.data(), order, tensor.dimensions.data()
         );
         
         auto end = std::chrono::high_resolution_clock::now();
@@ -272,14 +285,15 @@ int main(int argc, char* argv[]) {
         
         // Report results
         if (verbose) {
-            cout << "Method: CPU_4L, Time: " << duration / 1000.0 << " ms" << endl;
+            cout << "Method: CPU_FnF, Time: " << duration / 1000.0 << " ms" << endl;
         } else {
-            cout << "Method: CPU_4L, Time: " << duration / 1000.0 << " ms" << endl;
+            cout << "Method: CPU_FnF, Time: " << duration / 1000.0 << " ms" << endl;
         }
         
         // Clean up
-        delete[] arr_A;
-        delete[] arr_B;
+        for(int i = 0; i < order; i++){
+          free(factor_matrices[i]);
+        }
         free(arr_O);
         
         return 0;

@@ -2,31 +2,39 @@
 
 # Script to benchmark TTM operations on all tensors
 # This script generates matrices, runs TTM chain tests, and extracts kernel times
-# Usage: ./run_ttm_benchmark.sh <r1> <r2>
+# Usage: ./run_ttm_benchmark.sh <r1> <r2> ... <rankN>
 
 # Check command line arguments
-if [ $# -ne 2 ]; then
-    echo "Usage: $0 <r1> <r2>"
+if [ $# -lt 1 ]; then
+    echo "Usage: $0 <rank1> <rank2> ... <rankN>"
     echo "Example: $0 10 10"
     exit 1
 fi
 
-R1="$1"
-R2="$2"
+RANKS=("$@")
 
-echo "Running TTM benchmark with r1=$R1, r2=$R2"
+echo -n "Running TTM benchmark with ranks:"
+for r in "${RANKS[@]}"; do
+    echo -n " $r"
+done
+echo
 
 TENSOR_DIR="/home/bhaskar/tensors_dataset"
 GENERATE_MATRIX="/home/bhaskar/spTA/Week_11_TTMC_GPU/generate_matrix.out"
 TTM_TEST="/home/bhaskar/ParTI/build/tests/test_ttm_chain"
-LOG_FILE="/tmp/ttm_benchmark.log"
-RESULTS_FILE="/tmp/ttm_results.txt"
+LOG_FILE="/home/bhaskar/spTA/Week_11_TTMC_GPU/ttm_benchmark.log"
+RESULTS_FILE="/home/bhaskar/spTA/Week_11_TTMC_GPU/ttm_results.txt"
 
 # Clear previous results
 > "$RESULTS_FILE"
 > "$LOG_FILE"
 
-echo "Starting TTM benchmark for all tensors with r1=$R1, r2=$R2..."
+echo -n "Starting TTM benchmark for all tensors with ranks:"
+for r in "${RANKS[@]}"; do
+    echo -n " $r"
+done
+echo
+
 echo "Dataset,Total_CUDA_TTM_Kernel_Time(s)" > "$RESULTS_FILE"
 
 # Function to extract TTM kernel times from log output
@@ -68,8 +76,12 @@ for tensor_file in "$TENSOR_DIR"/*.tns; do
     fi
     
     # Generate matrices
-    echo "  Generating matrices for $base_name with r1=$R1, r2=$R2..."
-    matrix_output=$("$GENERATE_MATRIX" "$tensor_file" "$R1" "$R2" 2>&1)
+    echo "  Generating matrices for $base_name with ranks:"
+    for r in "${RANKS[@]}"; do
+        echo -n " $r"
+    done
+    echo
+    matrix_output=$("$GENERATE_MATRIX" "$tensor_file" "${RANKS[@]}" 2>&1)
     if [[ $? -ne 0 ]]; then
         echo "  Error generating matrices for $base_name"
         continue
@@ -78,17 +90,37 @@ for tensor_file in "$TENSOR_DIR"/*.tns; do
     # Check if matrices were generated
     dim1_matrix="${TENSOR_DIR}/${base_name}_dim1.tns"
     dim2_matrix="${TENSOR_DIR}/${base_name}_dim2.tns"
-    
-    if [[ ! -f "$dim1_matrix" || ! -f "$dim2_matrix" ]]; then
-        echo "  Error: Matrices not generated for $base_name"
+    dim3_matrix="${TENSOR_DIR}/${base_name}_dim3.tns"
+
+    # Read tensor order from first line of tensor_file
+    tensor_order=$(head -n 1 "$tensor_file")
+    if [[ -z "$tensor_order" ]]; then
+        echo "  Error: Could not read tensor order from $tensor_file"
         continue
     fi
-    
-    # Run TTM chain test
-    echo "  Running TTM chain test for $base_name..."
-    ttm_output=$("$TTM_TEST" --dev 48 "$tensor_file" "$dim2_matrix" "$dim1_matrix" -l 2 2>&1)
+
+    if [[ "$tensor_order" -eq 3 ]]; then
+        if [[ ! -f "$dim1_matrix" || ! -f "$dim2_matrix" ]]; then
+            echo "  Error: Matrices not generated for $base_name (order 3)"
+            continue
+        fi
+        # Run TTM chain test for 3D
+        echo "  Running TTM chain test for $base_name (order 3)..."
+        ttm_output=$("$TTM_TEST" --dev 48 "$tensor_file" "$dim2_matrix" "$dim1_matrix" -l 2 2>&1)
+    elif [[ "$tensor_order" -eq 4 ]]; then
+        if [[ ! -f "$dim1_matrix" || ! -f "$dim2_matrix" || ! -f "$dim3_matrix" ]]; then
+            echo "  Error: Matrices not generated for $base_name (order 4)"
+            continue
+        fi
+        # Run TTM chain test for 4D
+        echo "  Running TTM chain test for $base_name (order 4)..."
+        ttm_output=$("$TTM_TEST" --dev 48 "$tensor_file" "$dim3_matrix" "$dim2_matrix" "$dim1_matrix" -l 3 2>&1)
+    else
+        echo "  Error: Unsupported tensor order $tensor_order for $base_name"
+        continue
+    fi
     ttm_exit_code=$?
-    
+
     # Log the output for debugging
     echo "=== $base_name ===" >> "$LOG_FILE"
     echo "$ttm_output" >> "$LOG_FILE"
@@ -97,6 +129,7 @@ for tensor_file in "$TENSOR_DIR"/*.tns; do
     if [[ $ttm_exit_code -eq 0 ]]; then
         # Extract TTM kernel times
         total_time=$(extract_ttm_times "$ttm_output")
+        total_time=$(echo "$total_time / 10" | bc -l) #the kernel is runnning 10 times
         echo "  Total TTM kernel time for $base_name: ${total_time}s"
         echo "$base_name,$total_time" >> "$RESULTS_FILE"
     else

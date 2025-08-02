@@ -5,7 +5,7 @@
 # 2. Converting to CSF format using COO_to_CSF_file
 
 # Configuration - Set the path to your tensors dataset directory
-TENSORS_PATH="../../tensors_dataset"  # Change this to your tensors directory path
+TENSORS_PATH="../../tensors_dataset/4d_tensors"  # Change this to your tensors directory path
 
 rm COO_to_CSF_file
 # Ensure COO_to_CSF_file is compiled

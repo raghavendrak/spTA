@@ -63,7 +63,7 @@ def main():
         print(f"Total CUDA TTM time: {total_time:.6f}s")
     else:
         # Parse and display results file
-        results_file = "/tmp/ttm_results.txt"
+        results_file = "/home/bhaskar/spTA/Week_11_TTMC_GPU/ttm_results.txt"
         results = parse_results_file(results_file)
         
         if results:

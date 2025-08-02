@@ -581,14 +581,14 @@ def print_error_tables(validation_results, method_names):
     
     print(tabulate(sig_error_data, headers=headers, tablefmt='grid'))
 
-def parse_ttm_baseline_results(ttm_results_file="/tmp/ttm_results.txt"):
+def parse_ttm_baseline_results(ttm_results_file="/home/bhaskar/spTA/Week_11_TTMC_GPU/ttm_results.txt"):
     """
     Parse TTM baseline results from the benchmark results file.
     
     Parameters:
     -----------
     ttm_results_file : str
-        Path to the TTM results file (default: /tmp/ttm_results.txt)
+        Path to the TTM results file (default: /home/bhaskar/spTA/Week_11_TTMC_GPU/ttm_results.txt)
     
     Returns:
     --------
@@ -614,7 +614,7 @@ def parse_ttm_baseline_results(ttm_results_file="/tmp/ttm_results.txt"):
                         try:
                             # Convert to milliseconds to match TTMC log format
                             time_val = float(time_str) * 1000  # Convert seconds to milliseconds
-                            time_val = time_val / 10 # I made run the parti kernel 10 times, so divide by 10 to get the average time
+                            time_val = time_val 
                             ttm_results[dataset] = time_val
                         except ValueError:
                             print(f"Warning: Could not parse time value '{time_str}' for dataset '{dataset}'")

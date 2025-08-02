@@ -35,7 +35,7 @@ echo "Finding contraction methods..."
 method_files=(v*.cu)
 method_numbers=()
 # skip_methods=(1 2 6 11 12)  # Skip method 1 (v1_cpu_5loop.cu)
-skip_methods=(1 2 3 4 6 8)  # Skip method 1 (v1_cpu_5loop.cu)
+skip_methods=(1 2 3 4 6 8 11)  # Skip method 1 (v1_cpu_5loop.cu)
 
 for file in "${method_files[@]}"; do
     if [[ $file =~ v([0-9]+)_ ]]; then
@@ -87,13 +87,13 @@ BENCHMARK=""
 while [[ $# -gt 0 ]]; do
     key="$1"
     case $key in
-        -r1|--rank1)
-            RANK_1="$2"
-            shift 2
-            ;;
-        -r2|--rank2)
-            RANK_2="$2"
-            shift 2
+        -r|--ranks)
+            RANKS=()
+            shift
+            while [[ $# -gt 0 && ! $1 =~ ^- ]]; do
+                RANKS+=("$1")
+                shift
+            done
             ;;
         -n|--ncm)
             NCM="$2"
@@ -136,9 +136,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-echo "Using factor ranks: R1=$RANK_1, R2=$RANK_2"
+echo -n "Using factor ranks:"
+for r in "${RANKS[@]}"; do
+    echo -n " $r"
+    done
+    echo
 if [ "$BENCHMARK" = "parti" ]; then
-    ./run_ttm_benchmark.sh $RANK_1 $RANK_2
+    ./run_ttm_benchmark.sh "${RANKS[@]}"
 fi
 
 if [ "$VERBOSE" = true ]; then
@@ -205,7 +209,9 @@ run_contractions() {
             local cmd_options=()
             
             # Add rank options
-            cmd_options+=("-r1" "$RANK_1" "-r2" "$RANK_2")
+            if [ ${#RANKS[@]} -gt 0 ]; then
+                cmd_options+=("-r" "${RANKS[@]}")
+            fi
             
             # If NCM is specified, run only that contraction type
             # Otherwise, run all three contraction types (0, 1, 2)
