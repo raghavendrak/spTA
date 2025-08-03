@@ -85,6 +85,62 @@ __global__ void GPU_AAO(
   }
 }
 
+__constant__ uint64_t ofst_arr[8];  
+__global__ void GPU_AAO_O4(
+  const uint64_t* __restrict__ meta_data, const float* __restrict__ values, 
+  const float* __restrict__ factor_matrices, const uint64_t* __restrict__ fact_ofst,
+  float* __restrict__ arr_O, const uint64_t* __restrict__ ranks, int ncm, int order)
+{
+  // Compute thread index
+  uint64_t j_ptr = blockIdx.x * blockDim.x + threadIdx.x;
+
+  // Find the i_ptr associated with the current j_ptr 
+  int64_t i_ptr = -1;
+  for (uint64_t p = 0; p < meta_data[1]; ++p) {
+    // if (mode_1_ptr[p] <= j_ptr && j_ptr < mode_1_ptr[p + 1]) {
+    if (meta_data[ofst_arr[2] + p] <= j_ptr && j_ptr < meta_data[ofst_arr[2] + p + 1]) {
+      i_ptr = p;
+      break;
+    }
+  }
+  uint64_t i, j, k, l;
+  // if ((i_ptr >= 0 && i_ptr < mode_0_ptr[1]) && 
+  //     ( j_ptr < size_mode_1_idx) ) 
+  if ((i_ptr >= 0 && i_ptr < meta_data[1]) && 
+      ( j_ptr < ofst_arr[4] - ofst_arr[3]) ) 
+  {
+    for (uint64_t k_ptr = meta_data[ofst_arr[4] + j_ptr]; k_ptr < meta_data[ofst_arr[4] + j_ptr + 1]; ++k_ptr) {
+    
+      for(uint64_t l_ptr = meta_data[ofst_arr[6] + k_ptr]; l_ptr < meta_data[ofst_arr[6] + k_ptr + 1]; ++l_ptr){
+
+        i = meta_data[ofst_arr[1] + i_ptr] ;
+        j = meta_data[ofst_arr[3] + j_ptr] ;
+        k = meta_data[ofst_arr[5] + k_ptr] ;
+        l = meta_data[ofst_arr[7] + l_ptr] ;
+
+        for(uint64_t r = 0; r < ranks[1]; ++r){
+
+          for(uint64_t s = 0; s < ranks[2]; ++s){
+            
+            for(uint64_t t = 0; t < ranks[3]; ++t){
+              
+              atomicAdd(&arr_O[ i * ranks[1] * ranks[2] * ranks[3]
+                              + r * ranks[2] * ranks[3]
+                              + s * ranks[3]
+                              + t] 
+                              , values[l_ptr] * 
+                              factor_matrices[ j * ranks[1] + r] *
+                              factor_matrices[fact_ofst[1] + k * ranks[2] + s] *
+                              factor_matrices[fact_ofst[2] + l * ranks[3] + t]
+              );
+            }
+          }
+          
+        }
+      }
+    }
+  }
+}
 /*End of device function for GPU All At Once Method*/
 /////////////////////////////////////////////////////////////////////
 
@@ -97,78 +153,164 @@ void gpu_all_at_once(
   float* arr_O, uint64_t arr_O_size,
   int ncm, uint64_t ranks[], int order,
   uint64_t size_mode_ptr[], uint64_t size_mode_idx[])
-{
-  // Allocate device memory
-  uint64_t *d_mode_0_ptr, *d_mode_0_idx, *d_mode_1_ptr, *d_mode_1_idx, *d_mode_2_ptr, *d_mode_2_idx;
-  float *d_values, *d_arr_A, *d_arr_B, *d_arr_O;
+{ 
+  if(order == 3){
+    // Allocate device memory
+    uint64_t *d_mode_0_ptr, *d_mode_0_idx, *d_mode_1_ptr, *d_mode_1_idx, *d_mode_2_ptr, *d_mode_2_idx;
+    float *d_values, *d_arr_A, *d_arr_B, *d_arr_O;
 
-  uint64_t total_values = size_mode_idx[2];
-  int idx_A, idx_B;
-  if(ncm == 0){
-    idx_A = 1;
-    idx_B = 2;
-  }else if(ncm == 1){
-    idx_A = 0;
-    idx_B = 2;
-  }else if(ncm == 2){
-    idx_A = 0;
-    idx_B = 1;
+    uint64_t total_values = size_mode_idx[2];
+    int idx_A, idx_B;
+    if(ncm == 0){
+      idx_A = 1;
+      idx_B = 2;
+    }else if(ncm == 1){
+      idx_A = 0;
+      idx_B = 2;
+    }else if(ncm == 2){
+      idx_A = 0;
+      idx_B = 1;
+    }
+
+    cudaMalloc(&d_mode_0_ptr, sizeof(uint64_t) * size_mode_ptr[0]);
+    cudaMalloc(&d_mode_0_idx, sizeof(uint64_t) * size_mode_idx[0]);
+    cudaMalloc(&d_mode_1_ptr, sizeof(uint64_t) * size_mode_ptr[1]);
+    cudaMalloc(&d_mode_1_idx, sizeof(uint64_t) * size_mode_idx[1]);
+    cudaMalloc(&d_mode_2_ptr, sizeof(uint64_t) * size_mode_ptr[2]);
+    cudaMalloc(&d_mode_2_idx, sizeof(uint64_t) * size_mode_idx[2]);
+    cudaMalloc(&d_values, sizeof(float) * total_values);
+    cudaMalloc(&d_arr_A, sizeof(float) * factor_sizes[idx_A]);
+    cudaMalloc(&d_arr_B, sizeof(float) * factor_sizes[idx_B]);
+    cudaMalloc(&d_arr_O, sizeof(float) * arr_O_size);
+
+    // Copy data from host to device
+    cudaMemcpy(d_mode_0_ptr, mode_ptrs[0], sizeof(uint64_t) * size_mode_ptr[0], cudaMemcpyHostToDevice);
+    cudaMemcpy(d_mode_0_idx, mode_idxs[0], sizeof(uint64_t) * size_mode_idx[0], cudaMemcpyHostToDevice);
+    cudaMemcpy(d_mode_1_ptr, mode_ptrs[1], sizeof(uint64_t) * size_mode_ptr[1], cudaMemcpyHostToDevice);
+    cudaMemcpy(d_mode_1_idx, mode_idxs[1], sizeof(uint64_t) * size_mode_idx[1], cudaMemcpyHostToDevice);
+    cudaMemcpy(d_mode_2_ptr, mode_ptrs[2], sizeof(uint64_t) * size_mode_ptr[2], cudaMemcpyHostToDevice);
+    cudaMemcpy(d_mode_2_idx, mode_idxs[2], sizeof(uint64_t) * size_mode_idx[2], cudaMemcpyHostToDevice);
+    cudaMemcpy(d_values, values, sizeof(float) * total_values, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_arr_A, factor_matrices[idx_A], sizeof(float) * factor_sizes[idx_A], cudaMemcpyHostToDevice);
+    cudaMemcpy(d_arr_B, factor_matrices[idx_B], sizeof(float) * factor_sizes[idx_B], cudaMemcpyHostToDevice);
+    cudaMemset(d_arr_O, 0, sizeof(float) * arr_O_size);
+
+    // Kernel launch parameters
+    int threadsPerBlock = 256;
+    int blocksPerGrid = (size_mode_idx[1] + threadsPerBlock - 1) / threadsPerBlock;
+
+    auto start = std::chrono::high_resolution_clock::now();
+    // Launch appropriate kernel based on contraction type
+    GPU_AAO<<<blocksPerGrid, threadsPerBlock>>>(
+      d_mode_0_ptr, d_mode_0_idx, d_mode_1_ptr, d_mode_1_idx, d_mode_2_ptr, d_mode_2_idx,
+      d_values, d_arr_A, d_arr_B, d_arr_O, ranks[0], ranks[1], ncm,
+      size_mode_ptr[0], size_mode_ptr[1], size_mode_ptr[2], 
+      size_mode_idx[0], size_mode_idx[1], size_mode_idx[2]
+    );
+    cudaDeviceSynchronize();
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+    cout << "Method: GPU_AAO, Time: " << duration / 1000.0 << " ms" << endl;
+
+    // Copy results back to host
+    cudaMemcpy(arr_O, d_arr_O, sizeof(float) * arr_O_size, cudaMemcpyDeviceToHost);
+
+    // Free device memory
+    cudaFree(d_mode_0_ptr);
+    cudaFree(d_mode_0_idx);
+    cudaFree(d_mode_1_ptr);
+    cudaFree(d_mode_1_idx);
+    cudaFree(d_mode_2_ptr);
+    cudaFree(d_mode_2_idx);
+    cudaFree(d_values);
+    cudaFree(d_arr_A);
+    cudaFree(d_arr_B);
+    cudaFree(d_arr_O);
   }
+  else if(order == 4){
+    //linearize the mode pointers and indices arrays
+    uint64_t size = 0;
+    uint64_t offset[2 * order];
+    for(int i = 0; i < order; i++){
+      offset[2*i] = size;
+      size += size_mode_ptr[i] ;
+      offset[2*i+1] = size;
+      size += size_mode_idx[i] ;
+    }
+    
+    cudaMemcpyToSymbol(ofst_arr, offset, sizeof(uint64_t) * 2 * order);
 
-  cudaMalloc(&d_mode_0_ptr, sizeof(uint64_t) * size_mode_ptr[0]);
-  cudaMalloc(&d_mode_0_idx, sizeof(uint64_t) * size_mode_idx[0]);
-  cudaMalloc(&d_mode_1_ptr, sizeof(uint64_t) * size_mode_ptr[1]);
-  cudaMalloc(&d_mode_1_idx, sizeof(uint64_t) * size_mode_idx[1]);
-  cudaMalloc(&d_mode_2_ptr, sizeof(uint64_t) * size_mode_ptr[2]);
-  cudaMalloc(&d_mode_2_idx, sizeof(uint64_t) * size_mode_idx[2]);
-  cudaMalloc(&d_values, sizeof(float) * total_values);
-  cudaMalloc(&d_arr_A, sizeof(float) * factor_sizes[idx_A]);
-  cudaMalloc(&d_arr_B, sizeof(float) * factor_sizes[idx_B]);
-  cudaMalloc(&d_arr_O, sizeof(float) * arr_O_size);
+    uint64_t* d_meta_data;
+    float* d_values;
+    cudaMalloc(&d_meta_data, sizeof(uint64_t) * size);
+    cudaMalloc(&d_values, sizeof(float) * size_mode_idx[order - 1]);
 
-  // Copy data from host to device
-  cudaMemcpy(d_mode_0_ptr, mode_ptrs[0], sizeof(uint64_t) * size_mode_ptr[0], cudaMemcpyHostToDevice);
-  cudaMemcpy(d_mode_0_idx, mode_idxs[0], sizeof(uint64_t) * size_mode_idx[0], cudaMemcpyHostToDevice);
-  cudaMemcpy(d_mode_1_ptr, mode_ptrs[1], sizeof(uint64_t) * size_mode_ptr[1], cudaMemcpyHostToDevice);
-  cudaMemcpy(d_mode_1_idx, mode_idxs[1], sizeof(uint64_t) * size_mode_idx[1], cudaMemcpyHostToDevice);
-  cudaMemcpy(d_mode_2_ptr, mode_ptrs[2], sizeof(uint64_t) * size_mode_ptr[2], cudaMemcpyHostToDevice);
-  cudaMemcpy(d_mode_2_idx, mode_idxs[2], sizeof(uint64_t) * size_mode_idx[2], cudaMemcpyHostToDevice);
-  cudaMemcpy(d_values, values, sizeof(float) * total_values, cudaMemcpyHostToDevice);
-  cudaMemcpy(d_arr_A, factor_matrices[idx_A], sizeof(float) * factor_sizes[idx_A], cudaMemcpyHostToDevice);
-  cudaMemcpy(d_arr_B, factor_matrices[idx_B], sizeof(float) * factor_sizes[idx_B], cudaMemcpyHostToDevice);
-  cudaMemset(d_arr_O, 0, sizeof(float) * arr_O_size);
+    for(int i = 0; i < order; i++){
+      cudaMemcpy(d_meta_data + offset[2*i], mode_ptrs[i], sizeof(uint64_t) * size_mode_ptr[i], cudaMemcpyHostToDevice);
+      cudaMemcpy(d_meta_data + offset[2*i+1], mode_idxs[i], sizeof(uint64_t) * size_mode_idx[i], cudaMemcpyHostToDevice);
+    }
+    cudaMemcpy(d_values, values, sizeof(float) * size_mode_idx[order - 1], cudaMemcpyHostToDevice);
 
-  // Kernel launch parameters
-  int threadsPerBlock = 256;
-  int blocksPerGrid = (size_mode_idx[1] + threadsPerBlock - 1) / threadsPerBlock;
+    size = 0;
+    for(int i = 0; i < order; i++){
+      if(i != ncm){
+        size += factor_sizes[i];
+      } 
+    }
+    float* d_factor_matrices;
+    cudaMalloc(&d_factor_matrices, sizeof(float) * size);
+    
+    uint64_t fact_ofst[order-1];
+    int idx = 0;
+    size = 0;
+    for(int i = 0; i < order; i++){
+      if(i != ncm){
+        fact_ofst[idx] = size;
+        idx++;
+        cudaMemcpy(d_factor_matrices + size, factor_matrices[i], sizeof(float) * factor_sizes[i], cudaMemcpyHostToDevice);
+        size += factor_sizes[i];
+      }    
+    }
+    uint64_t* d_fact_ofst;
+    cudaMalloc(&d_fact_ofst, sizeof(uint64_t) * (order-1));
+    cudaMemcpy(d_fact_ofst, fact_ofst, sizeof(uint64_t) * (order-1), cudaMemcpyHostToDevice);
 
-  auto start = std::chrono::high_resolution_clock::now();
-  // Launch appropriate kernel based on contraction type
-  GPU_AAO<<<blocksPerGrid, threadsPerBlock>>>(
-    d_mode_0_ptr, d_mode_0_idx, d_mode_1_ptr, d_mode_1_idx, d_mode_2_ptr, d_mode_2_idx,
-    d_values, d_arr_A, d_arr_B, d_arr_O, ranks[0], ranks[1], ncm,
-    size_mode_ptr[0], size_mode_ptr[1], size_mode_ptr[2], 
-    size_mode_idx[0], size_mode_idx[1], size_mode_idx[2]
-  );
-  cudaDeviceSynchronize();
-  auto end = std::chrono::high_resolution_clock::now();
-  auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-  cout << "Method: GPU_AAO, Time: " << duration / 1000.0 << " ms" << endl;
+    float* d_arr_O;
+    cudaMalloc(&d_arr_O, sizeof(float) * arr_O_size);
+    cudaMemset(d_arr_O, 0, sizeof(float) * arr_O_size);
 
-  // Copy results back to host
-  cudaMemcpy(arr_O, d_arr_O, sizeof(float) * arr_O_size, cudaMemcpyDeviceToHost);
+    uint64_t* d_ranks;
+    cudaMalloc(&d_ranks, sizeof(uint64_t) * order);
+    cudaMemcpy(d_ranks, ranks, sizeof(uint64_t) * order, cudaMemcpyHostToDevice);
 
-  // Free device memory
-  cudaFree(d_mode_0_ptr);
-  cudaFree(d_mode_0_idx);
-  cudaFree(d_mode_1_ptr);
-  cudaFree(d_mode_1_idx);
-  cudaFree(d_mode_2_ptr);
-  cudaFree(d_mode_2_idx);
-  cudaFree(d_values);
-  cudaFree(d_arr_A);
-  cudaFree(d_arr_B);
-  cudaFree(d_arr_O);
+    // Kernel launch parameters
+    int threadsPerBlock = 256;
+    int blocksPerGrid = (size_mode_idx[1] + threadsPerBlock - 1) / threadsPerBlock;
+
+    auto start = std::chrono::high_resolution_clock::now();
+    // Launch appropriate kernel based on contraction type
+    GPU_AAO_O4<<<blocksPerGrid, threadsPerBlock>>>(
+      d_meta_data, d_values,
+      d_factor_matrices, d_fact_ofst,
+      d_arr_O, d_ranks, ncm, order
+    );
+    cudaDeviceSynchronize();
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+    cout << "Method: GPU_AAO, Time: " << duration / 1000.0 << " ms" << endl;
+
+    // Copy results back to host
+    cudaMemcpy(arr_O, d_arr_O, sizeof(float) * arr_O_size, cudaMemcpyDeviceToHost);
+
+
+    cudaFree(d_meta_data);
+    cudaFree(d_values);
+    cudaFree(d_factor_matrices);
+    cudaFree(d_arr_O);
+    cudaFree(d_ranks);
+    cudaFree(d_fact_ofst);
+  }
+    
 }
 
 /*End of host function for GPU All At Once Method*/
@@ -219,8 +361,7 @@ int main(int argc, char* argv[]) {
         CSFTensor tensor = readCSFTensor(csf_file);
         
         if (verbose) {
-            cout << "Loaded tensor from " << csf_file << endl;
-            cout << "Tensor dimensions: " << tensor.dimensions[0] << " x " << tensor.dimensions[1] << " x " << tensor.dimensions[2] << endl;
+            cout << "Loaded tensor from " << csf_file << endl;           
             cout << "Nonzeros: " << tensor.values.size() << endl;
         }
         

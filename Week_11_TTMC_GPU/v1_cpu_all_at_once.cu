@@ -133,7 +133,54 @@ void cpu_all_at_once(uint64_t** mode_ptrs, uint64_t** mode_idxs,
     
   }
   else if(order == 4){
-    
+    uint64_t i, j, k, l;
+    float value;
+    if(ncm == 0){
+      // Traverse through CSF tensor pointer and indices arrays for all modes
+      for (uint64_t i_ptr = 0; i_ptr < mode_ptrs[0][1]; ++i_ptr) {
+        i = mode_idxs[0][i_ptr];                         // Index in the mode 'i'
+  
+        for (uint64_t j_ptr = mode_ptrs[1][i_ptr]; j_ptr < mode_ptrs[1][i_ptr + 1]; ++j_ptr) {
+          j = mode_idxs[1][j_ptr];                     // Index for 'j' mode in CSF
+  
+          for (uint64_t k_ptr = mode_ptrs[2][j_ptr]; k_ptr < mode_ptrs[2][j_ptr + 1]; ++k_ptr) {
+            k = mode_idxs[2][k_ptr];                 // Index for 'k' mode in CSF
+            
+            for (uint64_t l_ptr = mode_ptrs[3][k_ptr]; l_ptr < mode_ptrs[3][k_ptr + 1]; ++l_ptr) {
+              l = mode_idxs[3][l_ptr];                 // Index for 'l' mode in CSF
+              value = values[l_ptr];                  // CSF value for the above i, j, k, l
+
+              for (uint64_t r = 0; r < ranks[1]; ++r) {
+
+                for(uint64_t s = 0; s < ranks[2]; ++s){
+                 
+                  for(uint64_t t = 0; t < ranks[3]; ++t){
+
+                    arr_O[  i * ranks[1] * ranks[2] * ranks[3]
+                          + r * ranks[2] * ranks[3]
+                          + s * ranks[3]
+                          + t] 
+                          += value * 
+                          factor_matrices[1][j * ranks[1] + r] *
+                          factor_matrices[2][k * ranks[2] + s] *
+                          factor_matrices[3][l * ranks[3] + t];  
+                  }   
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    else if(ncm == 1){
+      
+    }
+    else if(ncm == 2){
+      
+    }
+    else if(ncm == 3){
+      
+    }
   }
 }
 /*End of CPU All At Once Method*/
@@ -185,7 +232,6 @@ int main(int argc, char* argv[]) {
         
         if (verbose) {
             cout << "Loaded tensor from " << csf_file << endl;
-            cout << "Tensor dimensions: " << tensor.dimensions[0] << " x " << tensor.dimensions[1] << " x " << tensor.dimensions[2] << endl;
             cout << "Nonzeros: " << tensor.values.size() << endl;
         }
         
