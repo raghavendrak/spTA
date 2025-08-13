@@ -457,7 +457,7 @@ int main(int argc, char* argv[]) {
       
       if (verbose) {
           cout << "Loaded tensor from " << csf_file << endl;
-          cout << "Tensor dimensions: " << tensor.dimensions[0] << " x " << tensor.dimensions[1] << " x " << tensor.dimensions[2] << endl;
+          
           cout << "Nonzeros: " << tensor.values.size() << endl;
       }
       

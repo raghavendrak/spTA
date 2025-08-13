@@ -95,7 +95,8 @@ __global__ void GPU_4L_CM_device_func_ncm_0(
       for(uint32_t s_offset = 0; s_offset < f2; s_offset += warp_size){
         uint32_t s = s_offset + tid_in_warp;
         if(s < f2){
-          atomicAdd(&arr_O[i * f1* f2 + r * f2 + s], buf[num_warps * f2 + r * f2 + s]);
+          arr_O[i * f1* f2 + r * f2 + s] += buf[num_warps * f2 + r * f2 + s];
+          // atomicAdd(&arr_O[i * f1* f2 + r * f2 + s], buf[num_warps * f2 + r * f2 + s]);
         }
       }
     }
@@ -377,7 +378,7 @@ int main(int argc, char* argv[]) {
       
       if (verbose) {
           cout << "Loaded tensor from " << csf_file << endl;
-          cout << "Tensor dimensions: " << tensor.dimensions[0] << " x " << tensor.dimensions[1] << " x " << tensor.dimensions[2] << endl;
+          
           cout << "Nonzeros: " << tensor.values.size() << endl;
       }
       
@@ -402,7 +403,9 @@ int main(int argc, char* argv[]) {
       std::vector<float*> factor_matrices(order, nullptr);
       std::vector<uint64_t> factor_sizes(order);
       for (int i = 0; i < order; ++i) {
-        generate_matrix(tensor.dimensions[i], ranks[i], 42 + i, factor_matrices[i]);
+        if(i != ncm){
+          generate_matrix(tensor.dimensions[i], ranks[i], 42 + i, factor_matrices[i]);
+        }
         factor_sizes[i] = tensor.dimensions[i] * ranks[i];
       }
 

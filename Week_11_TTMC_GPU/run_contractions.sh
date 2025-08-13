@@ -35,7 +35,7 @@ echo "Finding contraction methods..."
 method_files=(v*.cu)
 method_numbers=()
 # skip_methods=(1 2 6 11 12)  # Skip method 1 (v1_cpu_5loop.cu)
-skip_methods=(1 2 3 4 6 8 11)  # Skip method 1 (v1_cpu_5loop.cu)
+skip_methods=(1 2 6 7 8 9 10 )  # Skip method 1 (v1_cpu_5loop.cu)
 
 for file in "${method_files[@]}"; do
     if [[ $file =~ v([0-9]+)_ ]]; then
@@ -294,6 +294,9 @@ process_all_csf_files() {
     echo "Processing all .csf files in $dir..."
     find "$dir" -maxdepth 1 -name "*.csf" | sort | while read -r file; do
         run_contractions "$file"
+        # if head -n 1 "$file" | grep -q '^# Tensor order: 4'; then
+        #     run_contractions "$file"
+        # fi
     done
 
     if [ -z "$NCM" ]; then
