@@ -29,7 +29,7 @@
 using namespace std;
 
 // Data type definitions
-#define DTYPE float
+#define DTYPE double
 #define ITYPE size_t
 
 // CUDA error checking
@@ -120,6 +120,8 @@ public:
 class Options {
 public:
     ITYPE R = 32;
+    ITYPE S = 32;  // Added S parameter for TTMC
+    ITYPE R3 = 32; // Added R3 parameter for TTMC
     ITYPE mode = 0;
     ITYPE impType = 1;
     ITYPE warpPerSlice = 4;
@@ -130,6 +132,7 @@ public:
     ITYPE MIfbTh = 1;
     bool verbose = false;
     bool correctness = false; 
+    bool isTTMC = false; // Added isTTMC flag
     string inFileName; 
     string outFileName; 
     ITYPE nBin = 10;
@@ -140,11 +143,14 @@ public:
 
     void print() {
         std::cout << "R = " << R << '\n';
+        std::cout << "S = " << S << '\n';
+        std::cout << "R3 = " << R3 << '\n';
         std::cout << "mode = " << mode << '\n';
         std::cout << "impType = " << impType << '\n';
         std::cout << "warpPerSlice = " << warpPerSlice << '\n';
         std::cout << "nTiles = " << nTile << '\n';
         std::cout << "verbose = " << verbose << '\n';
+        std::cout << "isTTMC = " << isTTMC << '\n';
 
         if(inFileName.empty()){
             cout << "Provide input file path. Program will exit." << endl;
@@ -163,12 +169,15 @@ public:
 inline void print_help_and_exit() {
     printf("options:\n\
         -R rank/feature : set the rank (default 32)\n\
+        -S S parameter : set the S parameter for TTMC (default 32)\n\
+        -3 R3 parameter : set the R3 parameter for TTMC (default 32)\n\
         -m mode : set the mode of MTTKRP (default 0)\n\
         -t implementation type: 1: COO CPU, 2: HCSR CPU, 3: COO GPU 4: HCSR GPU 8: B-CSF 10: HB-CSF (default 1) \n\
         -f fiber-splitting threshold: set the maximum length (nnz) for each fiber. Longer fibers will be split (default inf)\n\
         -w warp per slice: set number of WARPs assign to per slice  (default 4)\n\
-        -i output file name: e.g., ../dataset/delicious.tns \n\
-        -o output file name: if not set not output file will be written\n");
+        -i input file name: e.g., ../dataset/delicious.tns \n\
+        -o output file name: if not set not output file will be written\n\
+        -T TTMC flag: set to 1 to enable TTMC mode (default 0)\n");
        
     exit(1);
 }
@@ -186,6 +195,12 @@ inline Options parse_cmd_options(int argc, char **argv) {
         switch (argv[i - 1][1]) {
         case 'R':
             param.R = atoi(argv[i]);
+            break;
+        case 'S':
+            param.S = atoi(argv[i]);
+            break;
+        case '3':
+            param.R3 = atoi(argv[i]);
             break;
         case 'm':
             param.mode = atoi(argv[i]);
@@ -222,6 +237,12 @@ inline Options parse_cmd_options(int argc, char **argv) {
                 param.correctness = true;
             else
                 param.correctness = false;
+            break;
+        case 'T':
+            if(atoi(argv[i]) == 1)
+                param.isTTMC = true;
+            else
+                param.isTTMC = false;
             break;
         case 'i':
             param.inFileName = argv[i];
@@ -344,6 +365,14 @@ inline int create_mats(const Tensor &X, Matrix *U, const Options &Opt, bool ata)
         mode = X.modeOrder[m];
         U[mode].nRows =  X.dims[mode];
         U[mode].nCols =  R;
+        if(Opt.isTTMC){
+          if(X.ndims == 3){
+            U[mode].nCols = R * Opt.S;
+          }
+          else{
+            U[mode].nCols = R * Opt.S * Opt.R3;
+          }
+        }
         if(ata)  
             U[mode].nCols = U[mode].nRows;
         U[mode].vals = (DTYPE*)malloc(U[mode].nRows * U[mode].nCols * sizeof(DTYPE));
@@ -448,6 +477,34 @@ int MTTKRP_COO_CPU(const Tensor &X, Matrix *U, const Options &Opt){
     delete[] curMode;
     return 0;
 }
+int TTMC_COO_CPU(const Tensor &X, Matrix *U, const Options &Opt){
+    int *curMode = new int [X.ndims];
+    ITYPE R = Opt.R;
+    ITYPE S = Opt.S;
+    for (int m = 0; m < X.ndims; ++m)
+        curMode[m] = (m + Opt.mode) % X.ndims;
+           
+    ITYPE mode0 = curMode[0];
+    ITYPE mode1 = curMode[1];
+    ITYPE mode2 = curMode[2];
+    
+    for(ITYPE x=0; x<X.totNnz; ++x) {
+        DTYPE tmp_val = 0;
+        ITYPE idx0 = X.inds[mode0][x];
+        ITYPE idx1 = X.inds[mode1][x];
+        ITYPE idx2 = X.inds[mode2][x];
+       
+        for(ITYPE r=0; r<R; ++r) {
+            for(ITYPE s=0; s<S; ++s) {
+                tmp_val = X.vals[x] * U[mode1].vals[idx1 * R + r] * U[mode2].vals[idx2 * S + s];
+                U[mode0].vals[idx0 * R * S + r * S + s] += tmp_val;
+            }
+        }
+    }
+    
+    delete[] curMode;
+    return 0;
+}
 
 int MTTKRP_COO_CPU_4D(const Tensor &X, Matrix *U, const Options &Opt){
     ITYPE R = Opt.R;
@@ -466,6 +523,34 @@ int MTTKRP_COO_CPU_4D(const Tensor &X, Matrix *U, const Options &Opt){
         for(ITYPE r=0; r<R; ++r) {            
             tmp_val = X.vals[x] * U[mode1].vals[idx1 * R + r] * U[mode2].vals[idx2 * R + r] * U[mode3].vals[idx3 * R + r];
             U[mode0].vals[idx0 * R + r] += tmp_val;
+        }
+    }
+    return 0;
+}
+int TTMC_COO_CPU_4D(const Tensor &X, Matrix *U, const Options &Opt){
+    ITYPE R = Opt.R;
+    ITYPE S = Opt.S;
+    ITYPE T = Opt.R3;
+
+    ITYPE mode0 = X.modeOrder[0];
+    ITYPE mode1 = X.modeOrder[1];
+    ITYPE mode2 = X.modeOrder[2];
+    ITYPE mode3 = X.modeOrder[3];
+    
+    for(ITYPE x=0; x<X.totNnz; ++x) {
+        DTYPE tmp_val = 0;
+        ITYPE idx0 = X.inds[mode0][x];
+        ITYPE idx1 = X.inds[mode1][x];
+        ITYPE idx2 = X.inds[mode2][x];
+        ITYPE idx3 = X.inds[mode3][x];
+       
+        for(ITYPE r=0; r<R; ++r) {            
+            for(ITYPE s=0; s<S; ++s) {
+                for(ITYPE t=0; t<T; ++t) {
+                    tmp_val = X.vals[x] * U[mode1].vals[idx1 * R + r] * U[mode2].vals[idx2 * S + s] * U[mode3].vals[idx3 * T + t];
+                    U[mode0].vals[idx0 * R * S * T + r * S * T + s * T + t] += tmp_val;
+                }
+            }
         }
     }
     return 0;
@@ -746,20 +831,26 @@ __global__ void mttkrp_HCSR_kernel_smllBin(DTYPE * vals, ITYPE *dfbrIdx0, ITYPE 
     DTYPE tmp = 0, tmp_val;
                   
     if(slc < nSlices){ 	    
-        unsigned int mappedSlc = dSlcMapperBin[slc];
-        unsigned int idx0 = dfbrIdx0[mappedSlc];
+        unsigned int mappedSlc = dSlcMapperBin[slc]; //i_ptr
+        unsigned int idx0 = dfbrIdx0[mappedSlc]; //i
         int fb_st = fbrPtr0[mappedSlc];
         int fb_end = fbrPtr0[mappedSlc+1];
 
+        // j is parallelized across warps
+        //fbr = j_ptr
         for (int fbr = fb_st + workId; fbr < fb_end; fbr+=warpPerSlice){
             tmp_val = 0;
+            //serial k loop
+            //x = k_ptr
             for(unsigned int x = fbrPtr1[fbr]; x < fbrPtr1[fbr+1]; ++x) {
 
-                unsigned int idx2 = dInds2[x];                
+                unsigned int idx2 = dInds2[x];    //k
+                // r is parallelized across threads in a warp
                 for(unsigned int r=laneId; r<R; r+=32) {
                     tmp_val += vals[x] * dU2[idx2 * R + r]; 
                 }
             }
+            //idx1 = j
             unsigned int idx1 = fbrIdx1[fbr];// dInds1[fbrPtr1[fbr]];    
             for(unsigned int r=laneId; r<R; r+=32) {  
                 tmp += tmp_val * dU1[idx1 * R + r] ;     
@@ -900,7 +991,358 @@ __global__ void mttkrp_HCSR_kernel_hvyBin_4D(DTYPE * vals, ITYPE *dfbrIdx0, ITYP
     }
 }
 
-// Main B-CSF GPU implementation
+// CUDA kernels for B-CSF TTMC
+__global__ void ttmc_HCSR_kernel_smllBin(DTYPE * vals, ITYPE *dfbrIdx0, ITYPE *dSlcMapperBin, ITYPE *dInds2, ITYPE *fbrPtr0,
+  ITYPE *fbrPtr1, ITYPE *fbrIdx1, unsigned int nSlices, DTYPE *dU0, DTYPE * dU1, DTYPE *dU2, 
+  ITYPE mode, ITYPE R, ITYPE S, ITYPE warpPerSlice, int logOfWPC, int TbPerSlc, int LogOfTPS){
+  unsigned int tId = threadIdx.x;
+  unsigned int laneId = tId & 31;
+  unsigned int gId = (blockIdx.x * blockDim.x + tId);
+  unsigned int workId = (tId & ((1 << (5 + logOfWPC)) - 1)) >> 5;  
+  unsigned int slc = gId >> (5 + logOfWPC); // 5: minimum 1 WARP (2^5) 
+  DTYPE tmp = 0, tmp_val;
+                
+  if(slc < nSlices){ 	    
+    unsigned int mappedSlc = dSlcMapperBin[slc]; //i_ptr
+    unsigned int idx0 = dfbrIdx0[mappedSlc]; //i
+    int fb_st = fbrPtr0[mappedSlc];
+    int fb_end = fbrPtr0[mappedSlc+1];
+
+    // j is parallelized across warps
+    //fbr = j_ptr
+    for (int fbr = fb_st + workId; fbr < fb_end; fbr+=warpPerSlice){
+      tmp_val = 0;
+      //serial k loop
+      //x = k_ptr
+      for(unsigned int x = fbrPtr1[fbr]; x < fbrPtr1[fbr+1]; ++x) {
+
+        unsigned int idx2 = dInds2[x];    //k
+        // s is parallelized across threads in a warp
+        for(unsigned int s=laneId; s<S; s+=32) {
+          tmp_val += vals[x] * dU2[idx2 * S + s]; 
+        }
+      }
+      //idx1 = j
+      unsigned int idx1 = fbrIdx1[fbr];// dInds1[fbrPtr1[fbr]];
+      for(unsigned int r=0; r<R; ++r) {  
+        for(unsigned int s=laneId; s<S; s+=32) {  
+          tmp += tmp_val * dU1[idx1 * R + r] ;     
+        }
+      }
+    }
+    for(unsigned int r=0; r<R; ++r) {  
+      for(unsigned int s=laneId; s<S; s+=32) {  
+        atomicAdd(&dU0[idx0 * R * S + r * S + s], tmp);      
+      }
+    }
+  }
+}
+
+__global__ void ttmc_HCSR_kernel_hvyBin(DTYPE * vals, ITYPE *dfbrIdx0, ITYPE *dSlcMapperBin, ITYPE *dInds2, ITYPE *fbrPtr0,
+  ITYPE *fbrPtr1, ITYPE *fbrIdx1, unsigned int nSlices, DTYPE *dU0, DTYPE * dU1, DTYPE *dU2, 
+  ITYPE mode, ITYPE R, ITYPE S, ITYPE warpPerSlice, int logOfWPC, int TbPerSlc, int logOfTPS){
+  
+  unsigned int laneId = threadIdx.x & 31;
+  unsigned int workId = threadIdx.x >> 5;
+  unsigned int slc = blockIdx.x >> logOfTPS;
+  unsigned int localBId = blockIdx.x & (TbPerSlc -1);
+  
+  DTYPE tmp = 0, tmp_val;
+                
+  if(slc < nSlices){
+    unsigned int mappedSlc = dSlcMapperBin[slc];
+    unsigned int idx0 = dfbrIdx0[mappedSlc];
+    unsigned int nFbr = fbrPtr0[mappedSlc+1] - fbrPtr0[mappedSlc];		
+    unsigned int fbrPerTb = (nFbr + TbPerSlc - 1 ) >> logOfTPS; 
+    unsigned int fb_st = fbrPtr0[mappedSlc] + localBId * fbrPerTb ;
+    unsigned int fb_end = fbrPtr0[mappedSlc] + (localBId + 1) * fbrPerTb ;
+
+    // j is parallelized across warps
+    //fbr = j_ptr
+    for (int fbr = fb_st + workId; fbr < fb_end; fbr+=warpPerSlice){
+      tmp_val = 0;
+      //serial k loop
+      //x = k_ptr
+      for(unsigned int x = fbrPtr1[fbr]; x < fbrPtr1[fbr+1]; ++x) {
+
+        unsigned int idx2 = dInds2[x];    //k
+        // s is parallelized across threads in a warp
+        for(unsigned int s=laneId; s<S; s+=32) {
+          tmp_val += vals[x] * dU2[idx2 * S + s]; 
+        }
+      }
+      //idx1 = j
+      unsigned int idx1 = fbrIdx1[fbr];// dInds1[fbrPtr1[fbr]];
+      for(unsigned int r=0; r<R; ++r) {  
+        for(unsigned int s=laneId; s<S; s+=32) {  
+          tmp += tmp_val * dU1[idx1 * R + r] ;     
+        }
+      }
+    }
+    for(unsigned int r=0; r<R; ++r) {  
+      for(unsigned int s=laneId; s<S; s+=32) {  
+        atomicAdd(&dU0[idx0 * R * S + r * S + s], tmp);      
+      }
+    } 
+  }
+}
+
+// Main B-CSF-TTMC GPU implementation
+int TTMC_B_HCSR_GPU(TiledTensor *TiledX, Matrix *U, const Options &Opt){
+    // Allocate and memcpy GPU memory 
+    ITYPE *dInds2, *dInds3, *dfbrPtr0, *dfbrIdx0, *dfbrPtr1, *dfbrIdx1, *dFbrPtr2, *dFbrIdx2, *dSlcMapperBin, *dFbrLikeSlcInds;
+    DTYPE *dVals;
+    ITYPE dLoc = 0, dSlcLoc = 0, dSlcIdxLoc = 0, dFbrLoc =0,  dFbrIdxLoc =0, dBinLoc = 0, dFbrLoc2 =0;
+    ITYPE totNnz = 0, totSlcPtr = 0, totSlcIdx = 0, totFbrPtr = 0, totFbrIdx = 0, totFbrPtr2 = 0;
+
+    ITYPE mode0 = TiledX[0].modeOrder[0];
+    ITYPE mode1 = TiledX[0].modeOrder[1];
+    ITYPE mode2 = TiledX[0].modeOrder[2];
+    ITYPE mode3 =((TiledX[0].ndims == 4) ? TiledX[0].modeOrder[3] : 0) ;
+
+    for (int tile = 0; tile < Opt.nTile; ++tile){
+        totNnz += TiledX[tile].totNnz;
+        totSlcPtr += TiledX[tile].fbrPtr[0].size() ;
+        totSlcIdx += TiledX[tile].fbrIdx[0].size() ;
+        totFbrPtr += TiledX[tile].fbrPtr[1].size() ;
+        totFbrIdx += TiledX[tile].fbrIdx[1].size() ;
+        totFbrPtr2 += ((TiledX[tile].ndims == 4) ? TiledX[tile].fbrPtr[2].size() : 0) ;
+    }
+
+    double t0 = seconds();
+    checkCuda(cudaMalloc((void**) &dVals, totNnz * sizeof(DTYPE)), 0);
+    checkCuda(cudaMalloc((void**) &dfbrPtr0, totSlcPtr * sizeof(ITYPE)), 0);
+    checkCuda(cudaMalloc((void**) &dfbrIdx0, totSlcIdx * sizeof(ITYPE)), 0);
+    checkCuda(cudaMalloc((void**) &dSlcMapperBin, totSlcPtr * sizeof(ITYPE)), 0);
+    checkCuda(cudaMalloc((void**) &dfbrPtr1, totFbrPtr * sizeof(ITYPE)), 0);
+    checkCuda(cudaMalloc((void**) &dfbrIdx1, totFbrIdx * sizeof(ITYPE)), 0);
+    checkCuda(cudaMalloc((void**) &dFbrLikeSlcInds, totFbrIdx * sizeof(ITYPE)), 0);
+
+    if(TiledX[0].ndims == 3)
+        checkCuda(cudaMalloc((void**) &dInds2, totNnz * sizeof(ITYPE)), 0);
+
+    if(TiledX[0].ndims == 4){
+        checkCuda(cudaMalloc((void**) &dFbrIdx2, totFbrPtr2 * sizeof(ITYPE)), 0);
+        checkCuda(cudaMalloc((void**) &dFbrPtr2, totFbrPtr2 * sizeof(ITYPE)), 0);
+        checkCuda(cudaMalloc((void**) &dInds3, totNnz * sizeof(ITYPE)), 0);
+    }
+
+    // cuda memcopy for tiled parts
+    for (int tile = 0; tile < Opt.nTile; ++tile){	
+        if(tile > 0) {
+            dLoc += TiledX[tile-1].totNnz;
+            dSlcLoc += TiledX[tile - 1].fbrPtr[0].size();
+            dSlcIdxLoc += TiledX[tile - 1].fbrIdx[0].size(); 
+            dFbrLoc += TiledX[tile - 1].fbrPtr[1].size();
+            dFbrIdxLoc += TiledX[tile - 1].fbrIdx[1].size();
+            dFbrLoc2 += ((TiledX[tile].ndims == 4) ? TiledX[tile - 1].fbrPtr[2].size() : 0) ;
+        }
+
+        checkCuda(cudaMemcpy(dVals + dLoc, &(TiledX[tile].vals[0]), TiledX[tile].totNnz * sizeof(DTYPE),cudaMemcpyHostToDevice), 0);
+        checkCuda(cudaMemcpy(dfbrPtr0 + dSlcLoc, &(TiledX[tile].fbrPtr[0][0]), TiledX[tile].fbrPtr[0].size() * sizeof(ITYPE),cudaMemcpyHostToDevice), 0);
+        checkCuda(cudaMemcpy(dfbrIdx0 + dSlcIdxLoc, &(TiledX[tile].fbrIdx[0][0]), TiledX[tile].fbrIdx[0].size() * sizeof(ITYPE),cudaMemcpyHostToDevice), 0);
+        checkCuda(cudaMemcpy(dfbrPtr1 + dFbrLoc, &(TiledX[tile].fbrPtr[1][0]), TiledX[tile].fbrPtr[1].size() * sizeof(ITYPE),cudaMemcpyHostToDevice), 0);
+        checkCuda(cudaMemcpy(dfbrIdx1 + dFbrIdxLoc, &(TiledX[tile].fbrIdx[1][0]), TiledX[tile].fbrIdx[1].size() * sizeof(ITYPE),cudaMemcpyHostToDevice), 0);
+        
+        if(Opt.impType == 14)
+            checkCuda(cudaMemcpy(dFbrLikeSlcInds + dFbrIdxLoc, &(TiledX[tile].fbrLikeSlcInds[0]), TiledX[tile].fbrIdx[1].size() * sizeof(ITYPE),cudaMemcpyHostToDevice), 0);
+    
+        if(TiledX[tile].ndims == 3)
+            checkCuda(cudaMemcpy(dInds2 + dLoc, &(TiledX[tile].inds[TiledX[tile].modeOrder[2]][0]), TiledX[tile].totNnz * sizeof(ITYPE),cudaMemcpyHostToDevice), 0);			
+
+        if(TiledX[tile].ndims == 4){			
+            checkCuda(cudaMemcpy(dFbrPtr2 + dFbrLoc2, &(TiledX[tile].fbrPtr[2][0]), TiledX[tile].fbrPtr[2].size() * sizeof(ITYPE),cudaMemcpyHostToDevice), 0);
+            checkCuda(cudaMemcpy(dFbrIdx2 + dFbrLoc2, &(TiledX[tile].fbrIdx[2][0]), TiledX[tile].fbrIdx[2].size() * sizeof(ITYPE),cudaMemcpyHostToDevice), 0);
+            checkCuda(cudaMemcpy(dInds3 + dLoc, &(TiledX[tile].inds[mode3][0]), TiledX[tile].totNnz * sizeof(ITYPE),cudaMemcpyHostToDevice), 0);
+        }
+
+        dBinLoc = 0;
+        for (int bin = 0; bin < Opt.nBin; ++bin){
+            if(bin > 0)
+                dBinLoc += TiledX[tile].slcMapperBin[bin-1].size();
+            checkCuda(cudaMemcpy(dSlcMapperBin + dSlcIdxLoc + dBinLoc, &(TiledX[tile].slcMapperBin[bin][0]), TiledX[tile].slcMapperBin[bin].size() * sizeof(ITYPE),cudaMemcpyHostToDevice), 0);
+        }
+    }
+    float tnsMemcpyTime = seconds() - t0;
+
+    t0 = seconds();
+    // Matrices
+    DTYPE *dU0, *dU1, *dU2, *dU3;	
+    // U0 will be output tensor of size I x R x S
+    
+    checkCuda(cudaMalloc((void**) &dU0, U[mode0].nRows * U[mode0].nCols * sizeof(DTYPE)), 0);
+    checkCuda(cudaMalloc((void**) &dU1, U[mode1].nRows * U[mode1].nCols * sizeof(DTYPE)), 0);
+    checkCuda(cudaMalloc((void**) &dU2, U[mode2].nRows * U[mode2].nCols * sizeof(DTYPE)), 0);
+
+    cudaMemset(dU0, 0,  U[mode0].nRows * U[mode0].nCols * sizeof(DTYPE));
+    checkCuda(cudaMemcpy(dU1, &(U[mode1].vals[0]), U[mode1].nRows * U[mode1].nCols * sizeof(DTYPE), cudaMemcpyHostToDevice), 0);
+    checkCuda(cudaMemcpy(dU2, &(U[mode2].vals[0]), U[mode2].nRows * U[mode2].nCols * sizeof(DTYPE), cudaMemcpyHostToDevice), 0);
+
+    float mtxMemcpyTime = seconds() - t0;
+    
+    if(Opt.verbose){
+        cout << "Tensor memory copy time: " << tnsMemcpyTime * 1000 << " ms" << endl;
+        cout << "Matrix memory copy time: " << mtxMemcpyTime * 1000 << " ms" << endl;
+        cout << "Total memory allocation and copy time: " << (tnsMemcpyTime + mtxMemcpyTime) * 1000 << " ms" << endl;
+    }
+    
+    if(TiledX[0].ndims == 4){
+        checkCuda(cudaMalloc((void**) &dU3, U[mode3].nRows * U[mode3].nCols * sizeof(DTYPE)), 0);
+        checkCuda(cudaMemcpy(dU3, &(U[mode3].vals[0]), U[mode3].nRows * U[mode3].nCols * sizeof(DTYPE), cudaMemcpyHostToDevice), 0);
+    }
+
+    // BLOCK and GRID
+    int BLOCKSIZE = 512;
+    unsigned int rowInATB = BLOCKSIZE / (Opt.warpPerSlice*32); 
+
+    if(Opt.warpPerSlice * 32 > BLOCKSIZE){
+        cout << "BLOCKSIZE is smaller than work per slice! Increase BLOCKSIZE." << endl;
+        exit(0);
+    }
+
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaStream_t streams[Opt.nBin];
+    float mili = 0, GPUTime = 0, CPUtimer = 0, allModeGPUTime = 0;
+
+    int smallBinEndsAt = 5;
+
+    // Warp per slice and threadblock per size 
+    int *warpPerSlc = new int[Opt.nBin];
+    int *logOfWarpPerSlc = new int[Opt.nBin];
+    int *TbPerSlc = new int[Opt.nBin];
+    int *logOfTbPerSlc = new int[Opt.nBin];
+
+    for (int bin = 0; bin < Opt.nBin ; ++bin){
+        TbPerSlc[bin] = 1;
+        warpPerSlc[bin] = ((bin > 0) ? 2 << (bin - 1) : 1);
+        
+        if(warpPerSlc[bin] > 16)		
+            warpPerSlc[bin] = 16;
+
+        logOfWarpPerSlc[bin] = log2(warpPerSlc[bin]);
+
+        TbPerSlc[bin] = 1;
+        logOfTbPerSlc[bin] = 0;
+        
+        if (bin >= smallBinEndsAt){
+            TbPerSlc[bin] = 1 << (bin - smallBinEndsAt + 1);
+            if(TbPerSlc[bin] > 32) TbPerSlc[bin] = 32;		
+            logOfTbPerSlc[bin] = log2(TbPerSlc[bin]);
+            warpPerSlc[bin] = 16;
+            logOfWarpPerSlc[bin] = 4;
+        }
+        
+        if(Opt.verbose ){
+            cout << "  Bin " << bin << ": " << warpPerSlc[bin] << " warps/slice, " 
+                 << TbPerSlc[bin] << " threadblocks/slice" << endl;
+        }
+    }
+
+    int slcPerTb = 1;
+    dLoc = 0, dSlcLoc = 0, dSlcIdxLoc = 0; dFbrLoc =0, dFbrIdxLoc = 0, dFbrLoc2= 0;
+
+    for (int bin = 0; bin < Opt.nBin; ++bin)
+        cudaStreamCreate(&streams[bin]);
+    
+    if(Opt.verbose)
+        cout << "Created " << Opt.nBin << " CUDA streams for parallel execution" << endl;
+
+    // MTTKRP on Opt.mode
+    int MTTKRPmode = mode0;
+        
+    for (int tile = 0; tile < Opt.nTile; ++tile){
+        dBinLoc = 0;
+        
+        if(tile > 0) {
+            dLoc += TiledX[tile-1].totNnz;
+            dSlcLoc += TiledX[tile - 1].fbrPtr[0].size(); 
+            dSlcIdxLoc += TiledX[tile - 1].fbrIdx[0].size(); 
+            dFbrLoc += TiledX[tile - 1].fbrPtr[1].size();
+            dFbrIdxLoc += TiledX[tile - 1].fbrIdx[1].size();
+            dFbrLoc2 += ((TiledX[0].ndims == 4) ? TiledX[tile - 1].fbrPtr[2].size() : 0) ;
+        }
+
+        BLOCKSIZE = 512;
+        dim3 block(BLOCKSIZE, 1, 1), grid(1, 1, 1);
+
+        int smallBinEndsAt = 5;
+        int slcPerTb = 0;
+
+        double t0 = seconds();
+        cuda_timer_start(start);
+        
+        // Process small bins
+        for (int bin = 0; bin < Opt.nBin ; ++bin){
+            if(bin < smallBinEndsAt){
+                ITYPE shSize = 0;
+                dBinLoc += ((bin > 0) ? TiledX[tile].slcMapperBin[bin-1].size() : 0);
+                grid.x = ( TbPerSlc[bin] * warpPerSlc[bin] * 32 * TiledX[tile].slcMapperBin[bin].size() + BLOCKSIZE - 1) / BLOCKSIZE;
+
+                if(Opt.verbose && TiledX[tile].slcMapperBin[bin].size() > 0)
+                    cout << "    Small bin " << bin << ": " << TiledX[tile].slcMapperBin[bin].size() << " slices, grid size: " << grid.x << endl;
+
+                if(TiledX[0].ndims == 3)
+                    ttmc_HCSR_kernel_smllBin<<<grid, block, shSize , streams[bin]>>>(dVals + dLoc, dfbrIdx0 + dSlcIdxLoc, dSlcMapperBin + dSlcIdxLoc + dBinLoc, 
+                    dInds2 + dLoc, dfbrPtr0 + dSlcLoc, dfbrPtr1 + dFbrLoc,  dfbrIdx1 + dFbrLoc, TiledX[tile].slcMapperBin[bin].size(), 
+                    dU0, dU1, dU2, Opt.mode, Opt.R, Opt.S, warpPerSlc[bin], logOfWarpPerSlc[bin], TbPerSlc[bin], logOfTbPerSlc[bin]); 
+                // else
+                    // ttmc_HCSR_kernel_smllBin_4D<<<grid, block, shSize , streams[bin]>>>(dVals + dLoc, dfbrIdx0 + dSlcIdxLoc, dSlcMapperBin + dSlcIdxLoc + dBinLoc, 
+                    // dInds3 + dLoc, dfbrPtr0 + dSlcLoc, dfbrPtr1 + dFbrLoc, dfbrIdx1 + dFbrIdxLoc, dFbrPtr2 + dFbrLoc2, dFbrIdx2 + dFbrLoc2, TiledX[tile].slcMapperBin[bin].size(), 
+                    // dU0, dU1, dU2, dU3, Opt.mode, Opt.R, warpPerSlc[bin], logOfWarpPerSlc[bin], TbPerSlc[bin], logOfTbPerSlc[bin]); 
+            }
+            // Processing heavy bin
+            else{
+                dBinLoc += TiledX[tile].slcMapperBin[bin-1].size();
+                grid.x = (TbPerSlc[bin] * warpPerSlc[bin] * 32 * TiledX[tile].slcMapperBin[bin].size() + BLOCKSIZE - 1) / BLOCKSIZE;
+                
+                if(Opt.verbose && TiledX[tile].slcMapperBin[bin].size() > 0)
+                    cout << "    Heavy bin " << bin << ": " << TiledX[tile].slcMapperBin[bin].size() << " slices, grid size: " << grid.x << endl;
+                
+                if(TiledX[0].ndims == 3)
+                    ttmc_HCSR_kernel_hvyBin<<<grid, block, 0, streams[bin]>>>(dVals + dLoc, dfbrIdx0 + dSlcIdxLoc, dSlcMapperBin + dSlcIdxLoc + dBinLoc, 
+                    dInds2 + dLoc, dfbrPtr0 + dSlcLoc, dfbrPtr1 + dFbrLoc,  dfbrIdx1 + dFbrLoc, TiledX[tile].slcMapperBin[bin].size(), 
+                    dU0, dU1, dU2, Opt.mode, Opt.R, Opt.S, warpPerSlc[bin], logOfWarpPerSlc[bin],  TbPerSlc[bin], logOfTbPerSlc[bin]); 
+                // else
+                    // ttmc_HCSR_kernel_hvyBin_4D<<<grid, block, 0, streams[bin]>>>(dVals + dLoc, dfbrIdx0 + dSlcIdxLoc, dSlcMapperBin + dSlcIdxLoc + dBinLoc, 
+                    // dInds3 + dLoc, dfbrPtr0 + dSlcLoc, dfbrPtr1 + dFbrLoc, dfbrIdx1 + dFbrIdxLoc, dFbrPtr2 + dFbrLoc2, dFbrIdx2 + dFbrLoc2, TiledX[tile].slcMapperBin[bin].size(), 
+                    // dU0, dU1, dU2, dU3, Opt.mode, Opt.R, warpPerSlc[bin], logOfWarpPerSlc[bin],  TbPerSlc[bin], logOfTbPerSlc[bin]); 
+            }
+        }
+    
+        cuda_timer_stop(start, stop, mili);
+        CPUtimer += seconds() - t0;
+        GPUTime += mili;
+
+        if(Opt.verbose){
+            cout << "Tile: " << tile << " - time: " << mili << " ms";
+            cout << " nnz: " << TiledX[tile].totNnz << " nFibers: "
+            << TiledX[tile].fbrPtr[1].size() << " nSlc " << TiledX[tile].fbrIdx[0].size();
+            cout << endl;
+        } 
+    }
+    
+    allModeGPUTime += GPUTime;
+    cout << "B-CSF-GPU-mode " << MTTKRPmode <<" :" << GPUTime << " ms" << endl;
+
+    for (int bin = 0; bin < Opt.nBin; ++bin)
+        cudaStreamDestroy(streams[bin]);
+
+    // check correctness
+    checkCuda(cudaMemcpy(&U[mode0].vals[0], dU0, U[mode0].nRows * U[mode0].nCols * sizeof(DTYPE), cudaMemcpyDeviceToHost), 0);
+
+    cudaFree(dVals); 
+    cudaFree(dU0); cudaFree(dU1); cudaFree(dU2); cudaFree(dU3);
+    cudaFree(dfbrIdx0); cudaFree(dInds2); cudaFree(dInds3); 
+    cudaFree(dfbrIdx0); cudaFree(dfbrIdx1); cudaFree(dFbrIdx2);
+    cudaFree(dfbrPtr0); cudaFree(dfbrPtr1); cudaFree(dFbrPtr2);
+    cudaFree(dFbrLikeSlcInds);
+
+    return 0;
+}
+
+// Main B-CSF-MTTKRP GPU implementation
 int MTTKRP_B_HCSR_GPU(TiledTensor *TiledX, Matrix *U, const Options &Opt){
     /* Allocate and memcpy GPU memory */
     ITYPE *dInds2, *dInds3, *dfbrPtr0, *dfbrIdx0, *dfbrPtr1, *dfbrIdx1, *dFbrPtr2, *dFbrIdx2, *dSlcMapperBin, *dFbrLikeSlcInds;
@@ -1155,8 +1597,8 @@ int MTTKRP_B_HCSR_GPU(TiledTensor *TiledX, Matrix *U, const Options &Opt){
 
 // Main function
 int main(int argc, char* argv[]){ 
-    cudaDeviceSetCacheConfig(cudaFuncCachePreferL1);
-    Options Opt = parse_cmd_options(argc, argv);
+  cudaDeviceSetCacheConfig(cudaFuncCachePreferL1);
+  Options Opt = parse_cmd_options(argc, argv);
 
     Tensor X;
     load_tensor(X, Opt);
@@ -1178,11 +1620,14 @@ int main(int argc, char* argv[]){
         }
         cout << endl;
         cout << "Total non-zeros: " << X.totNnz << endl;
-        cout << "Rank: " << Opt.R << endl;
+        cout << "Rank R: " << Opt.R << endl;
+        cout << "Rank S: " << Opt.S << endl;
+        cout << "Rank R3: " << Opt.R3 << endl;
         cout << "Mode: " << Opt.mode << endl;
         cout << "Number of tiles: " << Opt.nTile << endl;
         cout << "Warp per slice: " << Opt.warpPerSlice << endl;
         cout << "Number of bins: " << Opt.nBin << endl;
+        cout << "TTMC mode: " << (Opt.isTTMC ? "enabled" : "disabled") << endl;
     }  
     
     // B-CSF implementation (type 8)
@@ -1234,7 +1679,15 @@ int main(int argc, char* argv[]){
             cout << "Sorted mode: " << X.modeOrder[0] << " " << X.modeOrder[1] << " " <<X.modeOrder[2] << endl;
         if(Opt.verbose)
             cout << "Starting GPU computation..." << endl;
-        MTTKRP_B_HCSR_GPU(TiledX, U, Opt);
+        
+        if(Opt.isTTMC){
+          TTMC_B_HCSR_GPU(TiledX, U, Opt);
+        }
+        else{
+          MTTKRP_B_HCSR_GPU(TiledX, U, Opt);
+        }
+        if(Opt.verbose)
+        cout << "GPU computation completed successfully!" << endl;
     }
     else {
         cout << "This implementation is for B-CSF (type 8) only. Use -t 8 to run B-CSF." << endl;
@@ -1273,7 +1726,12 @@ int main(int argc, char* argv[]){
             cout << "Running COO CPU for correctness check on mode " << mode << endl;
         
         double t0 = seconds();
-        ((X.ndims == 3) ? MTTKRP_COO_CPU(X, U, Opt) : MTTKRP_COO_CPU_4D(X, U, Opt));
+        if(Opt.isTTMC){
+          (X.ndims == 3) ? TTMC_COO_CPU(X, U, Opt) : TTMC_COO_CPU_4D(X, U, Opt);
+        }
+        else{
+          ((X.ndims == 3) ? MTTKRP_COO_CPU(X, U, Opt) : MTTKRP_COO_CPU_4D(X, U, Opt));
+        }
         double cpu_time = seconds() - t0;
         
         if(Opt.verbose){
