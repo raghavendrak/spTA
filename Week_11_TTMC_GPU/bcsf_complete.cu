@@ -1001,7 +1001,8 @@ __global__ void ttmc_HCSR_kernel_smllBin(DTYPE * vals, ITYPE *dfbrIdx0, ITYPE *d
   unsigned int workId = (tId & ((1 << (5 + logOfWPC)) - 1)) >> 5;  
   unsigned int slc = gId >> (5 + logOfWPC); // 5: minimum 1 WARP (2^5) 
   DTYPE tmp = 0, tmp_val;
-                
+  
+  
   if(slc < nSlices){ 	    
     unsigned int mappedSlc = dSlcMapperBin[slc]; //i_ptr
     unsigned int idx0 = dfbrIdx0[mappedSlc]; //i
@@ -1026,15 +1027,16 @@ __global__ void ttmc_HCSR_kernel_smllBin(DTYPE * vals, ITYPE *dfbrIdx0, ITYPE *d
       unsigned int idx1 = fbrIdx1[fbr];// dInds1[fbrPtr1[fbr]];
       for(unsigned int r=0; r<R; ++r) {  
         for(unsigned int s=laneId; s<S; s+=32) {  
-          tmp += tmp_val * dU1[idx1 * R + r] ;     
+        //   tmp += tmp_val * dU1[idx1 * R + r] ;     
+          atomicAdd(&dU0[idx0 * R * S + r * S + s], tmp_val * dU1[idx1 * R + r]);      
         }
       }
     }
-    for(unsigned int r=0; r<R; ++r) {  
-      for(unsigned int s=laneId; s<S; s+=32) {  
-        atomicAdd(&dU0[idx0 * R * S + r * S + s], tmp);      
-      }
-    }
+    // for(unsigned int r=0; r<R; ++r) {  
+    //   for(unsigned int s=laneId; s<S; s+=32) {  
+    //     atomicAdd(&dU0[idx0 * R * S + r * S + s], tmp);      
+    //   }
+    // }
   }
 }
 
