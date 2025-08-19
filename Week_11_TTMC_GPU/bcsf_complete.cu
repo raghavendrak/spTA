@@ -29,7 +29,7 @@
 using namespace std;
 
 // Data type definitions
-#define DTYPE double
+#define DTYPE float
 #define ITYPE size_t
 
 // CUDA error checking
@@ -431,7 +431,7 @@ inline void correctness_check(DTYPE *out, DTYPE *COOout, int nr, int nc){
     cout << std::fixed;
     for (int i = 0; i < nr; ++i){
         for (int j = 0; j < nc; ++j){
-            DTYPE diff = abs(out[i * nc + j] - COOout[i * nc + j]);
+            DTYPE diff = abs(out[i * nc + j] - COOout[i * nc + j])/abs(COOout[i * nc + j]);
             if( diff > precision){
                 if(diff > maxDiff)
                     maxDiff = diff;
@@ -1027,6 +1027,7 @@ __global__ void ttmc_HCSR_kernel_smllBin(DTYPE * vals, ITYPE *dfbrIdx0, ITYPE *d
       unsigned int idx1 = fbrIdx1[fbr];// dInds1[fbrPtr1[fbr]];
       for(unsigned int r=0; r<R; ++r) {  
         for(unsigned int s=laneId; s<S; s+=32) {  
+          //each thread should have a bufer of length R if  we want to touch global memory only once
         //   tmp += tmp_val * dU1[idx1 * R + r] ;     
           atomicAdd(&dU0[idx0 * R * S + r * S + s], tmp_val * dU1[idx1 * R + r]);      
         }
@@ -1058,6 +1059,7 @@ __global__ void ttmc_HCSR_kernel_hvyBin(DTYPE * vals, ITYPE *dfbrIdx0, ITYPE *dS
     unsigned int fbrPerTb = (nFbr + TbPerSlc - 1 ) >> logOfTPS; 
     unsigned int fb_st = fbrPtr0[mappedSlc] + localBId * fbrPerTb ;
     unsigned int fb_end = fbrPtr0[mappedSlc] + (localBId + 1) * fbrPerTb ;
+    fb_end = (fb_end > fbrPtr0[mappedSlc+1]) ? fbrPtr0[mappedSlc+1] : fb_end;
 
     // j is parallelized across warps
     //fbr = j_ptr
@@ -1077,15 +1079,15 @@ __global__ void ttmc_HCSR_kernel_hvyBin(DTYPE * vals, ITYPE *dfbrIdx0, ITYPE *dS
       unsigned int idx1 = fbrIdx1[fbr];// dInds1[fbrPtr1[fbr]];
       for(unsigned int r=0; r<R; ++r) {  
         for(unsigned int s=laneId; s<S; s+=32) {  
-          tmp += tmp_val * dU1[idx1 * R + r] ;     
+          atomicAdd(&dU0[idx0 * R * S + r * S + s], tmp_val * dU1[idx1 * R + r]);     
         }
       }
     }
-    for(unsigned int r=0; r<R; ++r) {  
-      for(unsigned int s=laneId; s<S; s+=32) {  
-        atomicAdd(&dU0[idx0 * R * S + r * S + s], tmp);      
-      }
-    } 
+    // for(unsigned int r=0; r<R; ++r) {  
+    //   for(unsigned int s=laneId; s<S; s+=32) {  
+    //     atomicAdd(&dU0[idx0 * R * S + r * S + s], tmp);      
+    //   }
+    // } 
   }
 }
 
@@ -1763,8 +1765,14 @@ int main(int argc, char* argv[]){
     delete[] U;
     delete[] X.dims;
 
-    if(Opt.verbose)
+    if(Opt.verbose){
+      if(Opt.isTTMC){
+        cout << "TTMC computation completed successfully!" << endl;
+      }
+      else{
         cout << "MTTKRP computation completed successfully!" << endl;
+      }
+    }
 
     return 0;
 }
