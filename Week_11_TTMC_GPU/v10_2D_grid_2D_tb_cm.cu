@@ -304,7 +304,7 @@ void gpu_2D_grid_2D_tb_cm(
     // uint64_t mode_1_idx_offset, mode_2_ptr_offset, mode_2_idx_offset, mode_1_idx_num_elements;
     // Launch kernels
     if (ncm == 0 || ncm == 1) {
-      dim3 gridDim(32, 128);
+      dim3 gridDim( (size_mode_idx[1] + size_mode_idx[0] - 1)/size_mode_idx[0], size_mode_idx[0]);
       dim3 blockDim(32, 32); //blockDim.x has to be 32 since above kernel is assuming the code
       int sharedMemBytes = f2 * sizeof(float);
 

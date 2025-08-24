@@ -35,16 +35,11 @@ __global__ void GPU_4loop_ws(
   float value, A_val;
   unsigned mask;
 
-  // j_ptr = j_ptr_offset + blockIdx.x;
-  // j = mode_1_idx[j_ptr];
-  // // uint64_t nnz_k = mode_2_ptr[j_ptr+1] - mode_2_ptr[j_ptr];
-  
-  
+  // for(uint64_t i_ptr_offset = 0; i_ptr_offset < size_mode_0_idx; i_ptr_offset += gridDim.y){
+    // uint64_t i_ptr = i_ptr_offset + blockIdx.y;
+    uint64_t i_ptr = blockIdx.y;
 
-  for(uint64_t i_ptr_offset = 0; i_ptr_offset < size_mode_0_idx; i_ptr_offset += gridDim.y){
-    uint64_t i_ptr = i_ptr_offset + blockIdx.y;
-
-    if(i_ptr < size_mode_0_idx){
+    // if(i_ptr < size_mode_0_idx){
 
       uint64_t i = mode_0_idx[i_ptr];
       for(uint64_t j_ptr_offset = mode_1_ptr[i_ptr]; j_ptr_offset < mode_1_ptr[i_ptr + 1]; j_ptr_offset += gridDim.x){
@@ -64,7 +59,7 @@ __global__ void GPU_4loop_ws(
           // parallelize s across warps
           // block dimesion is 32 x 32. 
           // hence, each row of thread block will form a warp 
-          // each row of thread block(a warp) picks a k, thus a nonzero of input tensor
+          // each column of thread block(a warp) picks a k, thus a nonzero of input tensor
           for(k_ptr_offset = mode_2_ptr[j_ptr]; k_ptr_offset < mode_2_ptr[j_ptr + 1]; k_ptr_offset += blockDim.x){
             k_ptr =  k_ptr_offset + threadIdx.x;
             if(k_ptr < mode_2_ptr[j_ptr + 1]){
@@ -72,7 +67,7 @@ __global__ void GPU_4loop_ws(
               value = values[k_ptr];
               k = mode_2_idx[k_ptr];
               
-              //Each thread in a warp picks a 's'
+              //Each thread in a warp picks same 's'
               for(s_offset = 0; s_offset < f2; s_offset += blockDim.y){ 
                 s = s_offset + threadIdx.y;
                 if(s < f2){
@@ -136,8 +131,8 @@ __global__ void GPU_4loop_ws(
           }
         }
       }
-    }
-  }
+    // }
+  // }
 }
 
 __global__ void GPU_4loop_streams_ncm_2_part_1(
@@ -319,7 +314,7 @@ void gpu_2D_grid_2D_tb_ws(
     // uint64_t mode_1_idx_offset, mode_2_ptr_offset, mode_2_idx_offset, mode_1_idx_num_elements;
     // Launch kernels
     if (ncm == 0 || ncm == 1) {
-      dim3 gridDim(32, 128);
+      dim3 gridDim( (size_mode_idx[1] + size_mode_idx[0] - 1)/size_mode_idx[0], size_mode_idx[0]);
       dim3 blockDim(32, 32);
       int sharedMemBytes = f2 * sizeof(float);
 
