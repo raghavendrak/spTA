@@ -365,7 +365,7 @@ inline int create_mats(const Tensor &X, Matrix *U, const Options &Opt, bool ata)
         mode = X.modeOrder[m];
         U[mode].nRows =  X.dims[mode];
         U[mode].nCols =  R;
-        if(Opt.isTTMC){
+        if(Opt.isTTMC && m == Opt.mode){
           if(X.ndims == 3){
             U[mode].nCols = R * Opt.S;
           }
