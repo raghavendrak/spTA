@@ -56,7 +56,7 @@ extract_ttm_times() {
 # Function to clean up generated matrices
 cleanup_matrices() {
     local base_name="$1"
-    rm -f "${TENSOR_DIR}/${base_name}_dim1.tns" "${TENSOR_DIR}/${base_name}_dim2.tns" 2>/dev/null
+    rm -f "${TENSOR_DIR}/${base_name}_dim1.tns" "${TENSOR_DIR}/${base_name}_dim2.tns" "${TENSOR_DIR}/${base_name}_dim3.tns" 2>/dev/null
 }
 
 # Process each tensor file

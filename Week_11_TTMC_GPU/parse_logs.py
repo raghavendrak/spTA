@@ -763,6 +763,64 @@ def main():
     
     print(tabulate(performance_data, headers=headers, tablefmt='grid'))
     
+    # Generate CSV version with times in milliseconds and best time column
+    print("\n=== CSV Format (Times in milliseconds) ===")
+    
+    # Convert times to milliseconds and create CSV data
+    csv_performance_data = []
+    csv_headers = ['Dataset'] + [f"{method} ({method_names.get(method, 'Unknown')})" for method in all_methods] + ['Best Method'] + ['Best Time']
+    
+    for r in results:
+        csv_row = [r['name']]
+        min_time = float('inf')
+        best_method = "N/A"
+        best_method_time = None
+
+        # First pass to find best method and its time
+        for method in all_methods:
+            if method in r and r[method] is not None and r[method] < min_time:
+                min_time = r[method]
+                best_method = f"{method} ({method_names.get(method, 'Unknown')})"
+                best_method_time = r[method]
+
+        # Second pass to format times in milliseconds only (no units)
+        for method in all_methods:
+            if method in r and r[method] is not None:
+                time_val = r[method]
+                # Convert all times to milliseconds and format without units
+                if time_val >= 1e6:
+                    # Assuming very large values are in microseconds, convert to ms
+                    time_ms = time_val / 1000
+                elif time_val >= 1000:
+                    # Assuming values >= 1000 are already in milliseconds
+                    time_ms = time_val
+                else:
+                    # Values < 1000 are already in milliseconds
+                    time_ms = time_val
+                csv_row.append(f"{time_ms:.2f}")
+            else:
+                csv_row.append('N/A')
+
+        csv_row.append(best_method)
+        # Add best time in milliseconds
+        if best_method_time is not None:
+            if best_method_time >= 1e6:
+                best_time_ms = best_method_time / 1000
+            elif best_method_time >= 1000:
+                best_time_ms = best_method_time
+            else:
+                best_time_ms = best_method_time
+            csv_row.append(f"{best_time_ms:.2f}")
+        else:
+            csv_row.append('N/A')
+        csv_performance_data.append(csv_row)
+    
+    # Print CSV header
+    print(','.join(csv_headers))
+    # Print CSV data
+    for csv_row in csv_performance_data:
+        print(','.join(str(cell) for cell in csv_row))
+    
     print("\nSpeedup Summary (relative to {}: {}):".format(baseline_method, method_names.get(baseline_method, 'Unknown')))
     print("-" * 100)
     
