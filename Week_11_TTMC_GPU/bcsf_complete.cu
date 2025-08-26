@@ -436,7 +436,7 @@ inline void correctness_check(DTYPE *out, DTYPE *COOout, int nr, int nc){
       if( diff > precision){
         if(diff > maxDiff)
         maxDiff = diff;
-        if(mismatch < 5 && j == 0)
+        if(mismatch < 2 )
         cout << "mismatch at (" << i <<"," << j <<") got: " << out[i * nc +j] << " exp: " << COOout[i * nc +j] << endl;
         mismatch++;
       }
@@ -770,13 +770,15 @@ inline int make_TiledBin(TiledTensor *TiledX, const Options & Opt, int tile){
     UB.push_back((1 << i) * THREADLOAD + 1);
     LB.push_back(UB[i] >> 1);
   }
+  
 
   LB[0] = 0;   UB[0] = 3;  // 1 WARP
   LB[1] = 2;   UB[1] = 5;  // 2 WARP
   LB[2] = 4;   UB[2] = 9;  // 4 WARP
   LB[3] = 8;   UB[3] = 17; // 8 WARP
   LB[4] = 16;   UB[4] = 1025;  // 16 WARP = 1 TB
-  LB[5] = 1024;   UB[5] = 4 * TB + 1; // 32 WARP =2 TB
+
+  LB[5] = 0;   UB[5] = 4 * TB + 1; // 32 WARP =2 TB
   LB[6] = 4 * TB;   UB[6] = 8 * TB + 1; // 64 WARP =4 TB
   LB[7] = 8 * TB;   UB[7] = 16 * TB + 1; // 128 WARP =8 TB
   LB[8] = 16 * TB;   UB[8] = 32 * TB + 1;  // 256 WARP = 16 TB
@@ -1051,7 +1053,7 @@ ITYPE mode, ITYPE R, ITYPE S, ITYPE warpPerSlice, int logOfWPC, int TbPerSlc, in
   unsigned int slc = blockIdx.x >> logOfTPS;
   unsigned int localBId = blockIdx.x & (TbPerSlc -1);
   
-  DTYPE tmp = 0, tmp_val;
+  // DTYPE tmp = 0, tmp_val;
           
   if(slc < nSlices){
     unsigned int mappedSlc = dSlcMapperBin[slc];
@@ -1062,33 +1064,119 @@ ITYPE mode, ITYPE R, ITYPE S, ITYPE warpPerSlice, int logOfWPC, int TbPerSlc, in
     unsigned int fb_end = fbrPtr0[mappedSlc] + (localBId + 1) * fbrPerTb ;
     fb_end = (fb_end > fbrPtr0[mappedSlc+1]) ? fbrPtr0[mappedSlc+1] : fb_end;
 
+    extern __shared__ DTYPE buf[];
+    for(int buf_idx = threadIdx.x; buf_idx < R * S; buf_idx += blockDim.x){
+      buf[warpPerSlice * S + buf_idx] = 0.0;
+    }
+    
   // j is parallelized across warps
   //fbr = j_ptr
-    for (int fbr = fb_st + workId; fbr < fb_end; fbr+=warpPerSlice){
-      tmp_val = 0;
+  for (int fbr = fb_st + workId; fbr < fb_end; fbr+=warpPerSlice){
+    // tmp_val = 0;
+    for(int buf_idx = workId * S + laneId; buf_idx < (workId + 1)* S; buf_idx += 32){
+      buf[buf_idx] = 0.0;
+    }
     //serial k loop
     //x = k_ptr
-      for(unsigned int x = fbrPtr1[fbr]; x < fbrPtr1[fbr+1]; ++x) {
+    for(unsigned int x = fbrPtr1[fbr]; x < fbrPtr1[fbr+1]; ++x) {
 
-        unsigned int idx2 = dInds2[x];    //k
+      unsigned int idx2 = dInds2[x];    //k
       // s is parallelized across threads in a warp
-        for(unsigned int s=laneId; s<S; s+=32) {
-          tmp_val += vals[x] * dU2[idx2 * S + s];
-        }
-      }
-    //idx1 = j
-      unsigned int idx1 = fbrIdx1[fbr];// dInds1[fbrPtr1[fbr]];
-      for(unsigned int r=0; r<R; ++r) {
-        for(unsigned int s=laneId; s<S; s+=32) {
-          atomicAdd(&dU0[idx0 * R * S + r * S + s], tmp_val * dU1[idx1 * R + r]);
-        }
+      for(unsigned int s=laneId; s<S; s+=32) {
+        buf[workId * S + s] += vals[x] * dU2[idx2 * S + s];
       }
     }
+    //idx1 = j
+    unsigned int idx1 = fbrIdx1[fbr];// dInds1[fbrPtr1[fbr]];
+    for(unsigned int r=0; r<R; ++r) {
+      for(unsigned int s=laneId; s<S; s+=32) {
+        atomicAdd(&buf[warpPerSlice * S + r * S + s], buf[workId * S + s] * dU1[idx1 * R + r]);
+      }
+    }
+  }
+  __syncthreads();
+
+  for(unsigned int r=workId; r<R; r+= warpPerSlice) {  
+    for(unsigned int s=laneId; s<S; s+=32) {  
+      atomicAdd(&dU0[idx0 * R * S + r * S + s], buf[warpPerSlice * S + r * S + s]);      
+    }
+  }
   // for(unsigned int r=0; r<R; ++r) {  
   //   for(unsigned int s=laneId; s<S; s+=32) {  
   //     atomicAdd(&dU0[idx0 * R * S + r * S + s], tmp);      
   //   }
   // } 
+  }
+}
+
+__global__ void ttmc_HCSR_kernel_hvyBin_4D(DTYPE * vals, ITYPE *dfbrIdx0, ITYPE *dSlcMapperBin, ITYPE *dInds3, ITYPE *fbrPtr0,
+  ITYPE *fbrPtr1, ITYPE *fbrIdx1, ITYPE *fbrPtr2, ITYPE *fbrIdx2, unsigned int nSlices, DTYPE *dU0, DTYPE * dU1, DTYPE *dU2, DTYPE *dU3,
+  ITYPE mode, ITYPE R, ITYPE S, ITYPE T, ITYPE warpPerSlice, int logOfWPC, int TbPerSlc, int logOfTPS){
+  extern __shared__ DTYPE buf[];
+    
+  unsigned int laneId = threadIdx.x & 31;
+  unsigned int workId = threadIdx.x >> 5;
+  unsigned int slc = blockIdx.x >> logOfTPS;
+  unsigned int localBId = blockIdx.x & (TbPerSlc -1);
+  
+  DTYPE outbuffer = 0, tmp_val = 0, outbuffer1 = 0;
+      
+  if(slc < nSlices){
+    unsigned int mappedSlc = dSlcMapperBin[slc];// i_ptr
+    unsigned int idx0 = dfbrIdx0[mappedSlc];// i
+    unsigned int nFbr = fbrPtr0[mappedSlc+1] - fbrPtr0[mappedSlc];
+    unsigned int fbrPerTb = (nFbr + TbPerSlc - 1 ) >> logOfTPS;
+    unsigned int fb_st = fbrPtr0[mappedSlc] + localBId * fbrPerTb ;
+    unsigned int fb_end = fbrPtr0[mappedSlc] + (localBId + 1) * fbrPerTb ;
+    fb_end = (fb_end > fbrPtr0[mappedSlc+1]) ? fbrPtr0[mappedSlc+1] : fb_end;
+
+    //serial j loop
+    for (int fbrS = fb_st; fbrS < fb_end && fbrS < fbrPtr0[mappedSlc+1] ; fbrS++){
+      unsigned int idx1 = fbrIdx1[fbrS];// j
+      // outbuffer1 = 0;
+      for(int buf_idx = threadIdx.x; buf_idx <  S * T; buf_idx += blockDim.x){
+        buf[buf_idx] = 0.0;
+      }
+      __syncthreads();
+
+      // k_ptr parallelized across warps
+      for (int fbr = fbrPtr1[fbrS] + workId; fbr < fbrPtr1[fbrS+1]; fbr+=warpPerSlice){ // k_ptr
+        ITYPE idx2 = fbrIdx2[fbr];// k
+        tmp_val = 0;
+        for(int buf_idx = laneId; buf_idx <  T; buf_idx += 32){
+          buf[S*T +  workId * T + buf_idx] = 0.0;
+        }
+
+        // serial l loop
+        for(unsigned int x = fbrPtr2[fbr]; x < fbrPtr2[fbr+1]; ++x) { // l_ptr
+
+          unsigned int idx3 = dInds3[x];// l
+          // t parallelized across threads in a warp
+          for(unsigned int t=laneId; t<T; t+=32)
+            buf[S*T +  workId * T + t] += vals[x] * dU3[idx3 * T + t];
+        }
+        // __syncthreads();
+        for(unsigned int s=0; s<S; ++s){
+          for(unsigned int t=laneId; t<T; t+=32){
+            atomicAdd(&buf[s*T + t], buf[S*T +  workId * T + t] * dU2[idx2 * S + s] );
+          }
+        }
+        // outbuffer1 += buf[S*T +  workId * T + s] * dU2[idx2 * S + s] ;
+      }
+      __syncthreads();
+
+      for(unsigned int r=workId; r<R; r+=warpPerSlice){
+        for(unsigned int s=0; s<S; ++s){
+          for(unsigned int t=laneId; t<T; t+=32){
+            atomicAdd(&dU0[idx0 * R * S * T + r * S * T + s * T + t], buf[s*T + t] * dU1[idx1 * R + r] );
+          }
+        }
+      }
+      // outbuffer += outbuffer1 * dU1[idx1 * R + r] ;
+    }
+    // for(unsigned int r=laneId; r<R; r+=32) {
+    //   atomicAdd(&dU0[idx0 * R + r], outbuffer);
+    // }
   }
 }
 
@@ -1280,18 +1368,20 @@ int TTMC_B_HCSR_GPU(TiledTensor *TiledX, Matrix *U, const Options &Opt){
       
       // Process small bins
     for (int bin = 0; bin < Opt.nBin ; ++bin){
+      ITYPE shSize = 0;
       if(bin < smallBinEndsAt){
-        ITYPE shSize = 0;
         dBinLoc += ((bin > 0) ? TiledX[tile].slcMapperBin[bin-1].size() : 0);
         grid.x = ( TbPerSlc[bin] * warpPerSlc[bin] * 32 * TiledX[tile].slcMapperBin[bin].size() + BLOCKSIZE - 1) / BLOCKSIZE;
 
         if(Opt.verbose && TiledX[tile].slcMapperBin[bin].size() > 0)
         cout << "    Small bin " << bin << ": " << TiledX[tile].slcMapperBin[bin].size() << " slices, grid size: " << grid.x << endl;
 
-        if(TiledX[0].ndims == 3)
-        ttmc_HCSR_kernel_smllBin<<<grid, block, shSize , streams[bin]>>>(dVals + dLoc, dfbrIdx0 + dSlcIdxLoc, dSlcMapperBin + dSlcIdxLoc + dBinLoc,
-        dInds2 + dLoc, dfbrPtr0 + dSlcLoc, dfbrPtr1 + dFbrLoc,  dfbrIdx1 + dFbrLoc, TiledX[tile].slcMapperBin[bin].size(),
-        dU0, dU1, dU2, Opt.mode, Opt.R, Opt.S, warpPerSlc[bin], logOfWarpPerSlc[bin], TbPerSlc[bin], logOfTbPerSlc[bin]);
+        if(TiledX[0].ndims == 3){
+          // shSize = warpPerSlc[bin] * Opt.S * sizeof(DTYPE) + Opt.R * Opt.S * sizeof(DTYPE);
+          ttmc_HCSR_kernel_smllBin<<<grid, block, shSize , streams[bin]>>>(dVals + dLoc, dfbrIdx0 + dSlcIdxLoc, dSlcMapperBin + dSlcIdxLoc + dBinLoc,
+            dInds2 + dLoc, dfbrPtr0 + dSlcLoc, dfbrPtr1 + dFbrLoc,  dfbrIdx1 + dFbrLoc, TiledX[tile].slcMapperBin[bin].size(),
+            dU0, dU1, dU2, Opt.mode, Opt.R, Opt.S, warpPerSlc[bin], logOfWarpPerSlc[bin], TbPerSlc[bin], logOfTbPerSlc[bin]);
+        }
           // else
         // ttmc_HCSR_kernel_smllBin_4D<<<grid, block, shSize , streams[bin]>>>(dVals + dLoc, dfbrIdx0 + dSlcIdxLoc, dSlcMapperBin + dSlcIdxLoc + dBinLoc, 
         // dInds3 + dLoc, dfbrPtr0 + dSlcLoc, dfbrPtr1 + dFbrLoc, dfbrIdx1 + dFbrIdxLoc, dFbrPtr2 + dFbrLoc2, dFbrIdx2 + dFbrLoc2, TiledX[tile].slcMapperBin[bin].size(), 
@@ -1305,14 +1395,18 @@ int TTMC_B_HCSR_GPU(TiledTensor *TiledX, Matrix *U, const Options &Opt){
         if(Opt.verbose && TiledX[tile].slcMapperBin[bin].size() > 0)
         cout << "    Heavy bin " << bin << ": " << TiledX[tile].slcMapperBin[bin].size() << " slices, grid size: " << grid.x << endl;
           
-        if(TiledX[0].ndims == 3)
-        ttmc_HCSR_kernel_hvyBin<<<grid, block, 0, streams[bin]>>>(dVals + dLoc, dfbrIdx0 + dSlcIdxLoc, dSlcMapperBin + dSlcIdxLoc + dBinLoc,
-        dInds2 + dLoc, dfbrPtr0 + dSlcLoc, dfbrPtr1 + dFbrLoc,  dfbrIdx1 + dFbrLoc, TiledX[tile].slcMapperBin[bin].size(),
-        dU0, dU1, dU2, Opt.mode, Opt.R, Opt.S, warpPerSlc[bin], logOfWarpPerSlc[bin],  TbPerSlc[bin], logOfTbPerSlc[bin]);
-          // else
-        // ttmc_HCSR_kernel_hvyBin_4D<<<grid, block, 0, streams[bin]>>>(dVals + dLoc, dfbrIdx0 + dSlcIdxLoc, dSlcMapperBin + dSlcIdxLoc + dBinLoc, 
-        // dInds3 + dLoc, dfbrPtr0 + dSlcLoc, dfbrPtr1 + dFbrLoc, dfbrIdx1 + dFbrIdxLoc, dFbrPtr2 + dFbrLoc2, dFbrIdx2 + dFbrLoc2, TiledX[tile].slcMapperBin[bin].size(), 
-        // dU0, dU1, dU2, dU3, Opt.mode, Opt.R, warpPerSlc[bin], logOfWarpPerSlc[bin],  TbPerSlc[bin], logOfTbPerSlc[bin]); 
+        if(TiledX[0].ndims == 3){
+          shSize = warpPerSlc[bin] * Opt.S * sizeof(DTYPE) + Opt.R * Opt.S * sizeof(DTYPE);
+          ttmc_HCSR_kernel_hvyBin<<<grid, block, shSize, streams[bin]>>>(dVals + dLoc, dfbrIdx0 + dSlcIdxLoc, dSlcMapperBin + dSlcIdxLoc + dBinLoc,
+          dInds2 + dLoc, dfbrPtr0 + dSlcLoc, dfbrPtr1 + dFbrLoc,  dfbrIdx1 + dFbrLoc, TiledX[tile].slcMapperBin[bin].size(),
+          dU0, dU1, dU2, Opt.mode, Opt.R, Opt.S, warpPerSlc[bin], logOfWarpPerSlc[bin],  TbPerSlc[bin], logOfTbPerSlc[bin]);
+        }
+        else{
+          shSize = Opt.S * Opt.R3 * sizeof(DTYPE) + warpPerSlc[bin] * Opt.R3 * sizeof(DTYPE);
+          ttmc_HCSR_kernel_hvyBin_4D<<<grid, block, shSize, streams[bin]>>>(dVals + dLoc, dfbrIdx0 + dSlcIdxLoc, dSlcMapperBin + dSlcIdxLoc + dBinLoc, 
+          dInds3 + dLoc, dfbrPtr0 + dSlcLoc, dfbrPtr1 + dFbrLoc, dfbrIdx1 + dFbrIdxLoc, dFbrPtr2 + dFbrLoc2, dFbrIdx2 + dFbrLoc2, TiledX[tile].slcMapperBin[bin].size(), 
+          dU0, dU1, dU2, dU3, Opt.mode, Opt.R, Opt.S, Opt.R3, warpPerSlc[bin], logOfWarpPerSlc[bin],  TbPerSlc[bin], logOfTbPerSlc[bin]); 
+        }
       }
     }
   
@@ -1602,7 +1696,6 @@ int MTTKRP_B_HCSR_GPU(TiledTensor *TiledX, Matrix *U, const Options &Opt){
 
 // Main function
 int main(int argc, char* argv[]){
-  cudaDeviceSetCacheConfig(cudaFuncCachePreferL1);
   Options Opt = parse_cmd_options(argc, argv);
 
   Tensor X;
@@ -1617,7 +1710,12 @@ int main(int argc, char* argv[]){
   zero_mat(X, U, Opt.mode);
 
   if(Opt.verbose){
-    cout << endl << "Starting MTTKRP..." << endl;
+    if(Opt.isTTMC){
+      cout << endl << "Starting TTMC..." << endl;
+    }
+    else{
+      cout << endl << "Starting MTTKRP..." << endl;
+    }
     cout << "Tensor dimensions: ";
     for(int i = 0; i < X.ndims; i++){
       cout << X.dims[i];
@@ -1630,9 +1728,9 @@ int main(int argc, char* argv[]){
     cout << "Rank R3: " << Opt.R3 << endl;
     cout << "Mode: " << Opt.mode << endl;
     cout << "Number of tiles: " << Opt.nTile << endl;
-    cout << "Warp per slice: " << Opt.warpPerSlice << endl;
+    // cout << "Warp per slice: " << Opt.warpPerSlice << endl;
     cout << "Number of bins: " << Opt.nBin << endl;
-    cout << "TTMC mode: " << (Opt.isTTMC ? "enabled" : "disabled") << endl;
+    // cout << "TTMC mode: " << (Opt.isTTMC ? "enabled" : "disabled") << endl;
   }
   
   // B-CSF implementation (type 8)
@@ -1724,7 +1822,7 @@ int main(int argc, char* argv[]){
     }
 
       // Reset matrices and run COO CPU for comparison
-    randomize_mats(X, U, Opt);
+    // randomize_mats(X, U, Opt);
     zero_mat(X, U, mode);
 
     if(Opt.verbose)
