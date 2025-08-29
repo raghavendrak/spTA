@@ -30,109 +30,81 @@ __global__ void GPU_4loop_ws(
 )
 {
   extern __shared__ float buf[];
-  uint64_t j, k, k_ptr, k_ptr_offset, index_A, index_B, index_O ;
-  int r, s, r_offset, s_offset, WARP_SIZE = 32;
+  uint64_t j, k, k_ptr, index_A, index_B, index_O ;
+  int r, s, s_offset, WARP_SIZE = 32;
   float value, A_val;
   unsigned mask;
 
-  // for(uint64_t i_ptr_offset = 0; i_ptr_offset < size_mode_0_idx; i_ptr_offset += gridDim.y){
-    // uint64_t i_ptr = i_ptr_offset + blockIdx.y;
-    uint64_t i_ptr = blockIdx.y;
+  for(uint64_t i_ptr = blockIdx.y; i_ptr < size_mode_0_idx; i_ptr += gridDim.y){
+    
+    uint64_t i = mode_0_idx[i_ptr];
 
-    // if(i_ptr < size_mode_0_idx){
+    for(uint64_t j_ptr = mode_1_ptr[i_ptr] + blockIdx.x; j_ptr < mode_1_ptr[i_ptr + 1]; j_ptr += gridDim.x){
+      j = mode_1_idx[j_ptr];
+      
+      int buf_index = threadIdx.y * blockDim.x + threadIdx.x;
+      //NOTE; WORKS ONLY IF f2 < 1024
+      if(buf_index < f2){ buf[buf_index] = 0.0;}
+      __syncthreads();
 
-      uint64_t i = mode_0_idx[i_ptr];
-      for(uint64_t j_ptr_offset = mode_1_ptr[i_ptr]; j_ptr_offset < mode_1_ptr[i_ptr + 1]; j_ptr_offset += gridDim.x){
-        uint64_t j_ptr = j_ptr_offset + blockIdx.x;
-
-        if(j_ptr < mode_1_ptr[i_ptr + 1]){
-
-          int buf_index = threadIdx.y * blockDim.x + threadIdx.x;
-
-          //NOTE; WORKS ONLY IF f2 < 1024
-          if(buf_index < f2){
-            buf[buf_index] = 0.0;
-          }
-          __syncthreads();
-
-          j = mode_1_idx[j_ptr];
-          // parallelize s across warps
-          // block dimesion is 32 x 32. 
-          // hence, each row of thread block will form a warp 
-          // each column of thread block(a warp) picks a k, thus a nonzero of input tensor
-          for(k_ptr_offset = mode_2_ptr[j_ptr]; k_ptr_offset < mode_2_ptr[j_ptr + 1]; k_ptr_offset += blockDim.x){
-            k_ptr =  k_ptr_offset + threadIdx.x;
-            if(k_ptr < mode_2_ptr[j_ptr + 1]){
-              
-              value = values[k_ptr];
-              k = mode_2_idx[k_ptr];
-              
-              //Each thread in a warp picks same 's'
-              for(s_offset = 0; s_offset < f2; s_offset += blockDim.y){ 
-                s = s_offset + threadIdx.y;
-                if(s < f2){
-                  mask = __activemask();
-                  index_B = k * f2 + s;
-                  float prod_val = value * arr_B[index_B];
-        
-                  for(int shuffle_offset = WARP_SIZE/2; shuffle_offset > 0; shuffle_offset>>=1){
-                    prod_val += __shfl_down_sync(mask, prod_val, shuffle_offset);
-                  }
-                  if(threadIdx.x == 0) buf[s] += prod_val;
-                //   atomicAdd(&buf[s], value * arr_B[index_B] );
-                }
-              }
-            }
-          }
-          __syncthreads();
+      // parallelize s across warps
+      // block dimesion is 32 x 32. 
+      // hence, each row of thread block will form a warp 
+      // each column of thread block(a warp) picks a k, thus a nonzero of input tensor
+      for(k_ptr = mode_2_ptr[j_ptr] + threadIdx.x; k_ptr < mode_2_ptr[j_ptr + 1]; k_ptr += blockDim.x){
           
-          //////////////////////////////////////////////////////////////////////////////////
-          // parallelize 'r' across warps
-          // block dimesion is 32 x 32. 
-          // hence, each row of thread block will form a warp 
-          // each row of thread block(a warp) picks a 'r'
-          if(ncm == 0){
-            for(r_offset = 0; r_offset < f1; r_offset += blockDim.y){
-              r = r_offset + threadIdx.y;
-              if(r < f1){
-                index_A = j * f1 + r;
-                A_val = arr_A[index_A];
-                //Each thread in a warp picks a 's'
-                for(s_offset = 0; s_offset < f2; s_offset += blockDim.x){
-                  s = s_offset + threadIdx.x;
-                  if(s < f2){
-                    index_O = i * f1 * f2 + r * f2  + s;
-                    //atomic add is required since different threadblocks in the same stream has same i
-                    atomicAdd(&arr_O[index_O], buf[s] * A_val);
-                  }
-                }
-                
-              }
+        value = values[k_ptr];
+        k = mode_2_idx[k_ptr];
+        
+        //Each thread in a warp picks same 's'
+        for(s_offset = 0; s_offset < f2; s_offset += blockDim.y){ 
+          s = s_offset + threadIdx.y;
+          if(s < f2){
+            mask = __activemask();
+            index_B = k * f2 + s;
+            float prod_val = value * arr_B[index_B];
+
+            for(int shuffle_offset = WARP_SIZE/2; shuffle_offset > 0; shuffle_offset>>=1){
+              prod_val += __shfl_down_sync(mask, prod_val, shuffle_offset);
             }
-          }
-          else if(ncm == 1){
-            for(r_offset = 0; r_offset < f1; r_offset += blockDim.y){
-              r = r_offset + threadIdx.y;
-              if(r < f1){
-                index_A = i * f1 + r;
-                A_val = arr_A[index_A];
-                //Each thread in a warp picks a 's'
-                for(s_offset = 0; s_offset < f2; s_offset += blockDim.x){
-                  s = s_offset + threadIdx.x;
-                  if(s < f2){
-                    index_O = j * f1 * f2 + r * f2  + s;
-                    //atomic add is required since different threadblocks in the same stream has same i
-                    atomicAdd(&arr_O[index_O], buf[s] * A_val);
-                  }
-                }
-                
-              }
-            }
+            if(threadIdx.x == 0) buf[s] += prod_val;
+          //   atomicAdd(&buf[s], value * arr_B[index_B] );
           }
         }
       }
-    // }
-  // }
+      __syncthreads();
+      
+      //////////////////////////////////////////////////////////////////////////////////
+      // parallelize 'r' across warps
+      // block dimesion is 32 x 32. 
+      // hence, each row of thread block will form a warp 
+      // each row of thread block(a warp) picks a 'r'
+      if(ncm == 0){
+        for(r = threadIdx.y; r < f1; r += blockDim.y){
+          index_A = j * f1 + r;
+          A_val = arr_A[index_A];
+          //Each thread in a warp picks a 's'
+          for(s = threadIdx.x; s < f2; s += blockDim.x){
+            index_O = i * f1 * f2 + r * f2  + s;
+            //atomic add is required since different threadblocks in the same stream has same i
+            atomicAdd(&arr_O[index_O], buf[s] * A_val);
+          }
+        }
+      }
+      else if(ncm == 1){
+        for(r = threadIdx.y; r < f1; r += blockDim.y){
+          index_A = i * f1 + r;
+          A_val = arr_A[index_A];
+          //Each thread in a warp picks a 's'
+          for(s = threadIdx.x; s < f2; s += blockDim.x){
+            index_O = j * f1 * f2 + r * f2  + s;
+            //atomic add is required since different threadblocks in the same stream has same i
+            atomicAdd(&arr_O[index_O], buf[s] * A_val);
+          }
+        }
+      }      
+    }
+  }
 }
 
 __global__ void GPU_4loop_streams_ncm_2_part_1(
@@ -315,6 +287,7 @@ void gpu_2D_grid_2D_tb_ws(
     // Launch kernels
     if (ncm == 0 || ncm == 1) {
       dim3 gridDim( (size_mode_idx[1] + size_mode_idx[0] - 1)/size_mode_idx[0], size_mode_idx[0]);
+      gridDim.y = (65535 < size_mode_idx[0]) ? 65535 : size_mode_idx[0];
       dim3 blockDim(32, 32);
       int sharedMemBytes = f2 * sizeof(float);
 
@@ -323,6 +296,7 @@ void gpu_2D_grid_2D_tb_ws(
         d_mode_0_idx, d_mode_1_ptr, d_mode_1_idx, d_mode_2_ptr, d_mode_2_idx,
         d_values, d_arr_A, d_arr_B, d_arr_O, f1, f2, ncm, size_mode_idx[0]
       );
+      cudaCheckError(cudaGetLastError());
       cudaDeviceSynchronize();
       auto end = std::chrono::high_resolution_clock::now();
       auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
