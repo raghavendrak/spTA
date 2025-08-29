@@ -30,6 +30,7 @@ __global__ void GPU_4L_CM_device_func_ncm_0(
   uint32_t f1, uint32_t f2,  int num_warps)
 {
   extern __shared__ float buf[];
+  __shared__ int s_counter;
   // int buf_size = num_warps * f2     +    f1 * f2 ;
   int buf_index;
 
@@ -47,9 +48,17 @@ __global__ void GPU_4L_CM_device_func_ncm_0(
   for(int buf_idx = threadIdx.x; buf_idx < f1 * f2; buf_idx += blockDim.x){
     buf[num_warps * f2 + buf_idx] = 0.0;
   }
+  if (threadIdx.x == 0) s_counter = 0;   // initialize once per block
+  __syncthreads();
 
-  for(uint64_t j_ptr_offset = mode_1_ptr[i_ptr]; j_ptr_offset < mode_1_ptr[i_ptr + 1]; j_ptr_offset += num_warps){
-    uint64_t j_ptr =  j_ptr_offset + warp_id;
+  // for(uint64_t j_ptr_offset = mode_1_ptr[i_ptr]; j_ptr_offset < mode_1_ptr[i_ptr + 1]; j_ptr_offset += num_warps){
+  uint64_t offset, j_ptr,j_ptr_offset =  mode_1_ptr[i_ptr];
+  unsigned int full_mask = 0xFFFFFFFFu;
+
+  while(true){
+    if(tid_in_warp == 0) offset = atomicAdd(&s_counter, 1);
+    offset = __shfl_sync(full_mask, offset, 0); // broadcast the offset to all threads in the warp
+    j_ptr = j_ptr_offset + offset;
     if(j_ptr < mode_1_ptr[i_ptr + 1]){
       uint64_t j = mode_1_idx[j_ptr];
 
@@ -85,6 +94,9 @@ __global__ void GPU_4L_CM_device_func_ncm_0(
           }
         }
       }
+    }
+    else{
+      break;
     }
   }
   __syncthreads();
@@ -220,7 +232,7 @@ void gpu_1D_grid_1D_tb_cm(
       // dim3 gridDim(size_mode_0_idx);
       int grid_size = size_mode_idx[0];
       // dim3 blockDim(1024);
-      int block_size = 512, warp_size = 32;
+      int block_size = 1024, warp_size = 32;
       int num_warps = (block_size + warp_size - 1) / warp_size;
       int sharedMemBytes =  num_warps * f2 * sizeof(float) + f1 * f2 * sizeof(float);
       
