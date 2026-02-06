@@ -412,6 +412,41 @@ int main(int argc, char* argv[]) {
         if (verbose) {
             cout << "Running GPU All At Once implementation..." << endl;
         }
+        bool stats = false;
+        if(stats){  
+          cout << csf_file << endl;
+          vector<vector<uint64_t>> nnz_length(order);
+          // Compute nnz_length for each mode, and then min, max, stddev for each
+          for(int m = 1; m < order; m++){
+            for(uint64_t ptr = 0; ptr < size_mode_ptr[m] - 1; ptr++){
+              nnz_length[m].push_back(mode_ptrs[m][ptr+1] - mode_ptrs[m][ptr]);
+            }
+            if (!nnz_length[m].empty()) {
+              // Find min and max
+              uint64_t min_val = nnz_length[m][0];
+              uint64_t max_val = nnz_length[m][0];
+              double sum = 0.0;
+              for (size_t i = 0; i < nnz_length[m].size(); ++i) {
+                if (nnz_length[m][i] < min_val) min_val = nnz_length[m][i];
+                if (nnz_length[m][i] > max_val) max_val = nnz_length[m][i];
+                sum += nnz_length[m][i];
+              }
+              double mean = sum / nnz_length[m].size();
+              // Compute standard deviation
+              double sq_sum = 0.0;
+              for (size_t i = 0; i < nnz_length[m].size(); ++i) {
+                double diff = nnz_length[m][i] - mean;
+                sq_sum += diff * diff;
+              }
+              double stddev = sqrt(sq_sum / nnz_length[m].size());
+              
+              cout << "Mode " << m << " nnz_length: min=" << min_val
+                  << ", max=" << max_val
+                  << ", stddev=" << stddev << endl;
+              
+            }
+          }
+        }
         auto start = std::chrono::high_resolution_clock::now();
         
         gpu_all_at_once(

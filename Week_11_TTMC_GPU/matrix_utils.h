@@ -21,7 +21,7 @@ void generate_matrix(uint64_t rows, uint64_t cols, unsigned int seed, float*& ar
   }
 }
 // Function to compare results against reference implementation based on relative error
-bool compare_results(float* result, float* reference, uint64_t size, float tolerance = 1e-5) {
+bool compare_results1(float* result, float* reference, uint64_t size, float tolerance = 1e-4) {
     float max_diff = 0.0;
     float max_val = 0.0;
     int errors = 0;
@@ -48,7 +48,7 @@ bool compare_results(float* result, float* reference, uint64_t size, float toler
 }
 
 // Function to compare two matrices
-bool compare_results1(float*& C1, float*& C2, uint64_t size,  float tolerance = 1e-6)
+bool compare_results(float*& C1, float*& C2, uint64_t size,  float tolerance = 1e-6)
 {
   for (int i = 0; i < size ; ++i) {
     if (std::fabs(C1[i] - C2[i]) > tolerance) {

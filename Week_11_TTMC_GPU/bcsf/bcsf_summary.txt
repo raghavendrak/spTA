@@ -1,0 +1,45 @@
+=== B-CSF Benchmark Summary ===
+Generated at: Sun Aug 24 01:22:20 AM EDT 2025
+
+Parameters:
+  Mode: 0
+  Rank R: 30
+  Rank S: 30
+  Rank R3: 30
+  TTMC flag: 1
+  Implementation type: 8
+  Fiber threshold: 128
+  Correctness check: 1
+  Verbose mode: 1
+
+Results Summary:
+Dataset,Execution_Time(ms)
+Dataset,Execution_Time(ms)
+nell-2,6.39622
+chicago-crime-comm,0.003712
+uber,0.004
+delicious-3d,100.112
+flickr-3d,42.3368
+matmul_5-5-5,0.321536
+matmul_6-3-3,0.3248
+nell-1,78.4012
+flickr-4d,0.007776
+vast-2015-mc1-3d,14.09
+delicious-4d,0.007552
+Y1,ERROR
+chicago-crime-comm_sib_3d,9.64394
+enron_sib_3d,12.2667
+flickr-4d_sib_3d,ERROR
+nips_sib_3d,13.2533
+uber_sib_3d,0.6376
+chicago-crime-geo_sib_3d,1.32813
+vast-2015-mc1-5d_sib_3d,9.6192
+darpa_sib,8.85584
+freebase_music_sib,208.077
+freebase_sampled_sib,355.415
+nips,0.00352
+enron,0.007424
+
+Detailed logs:
+  Main log: /home/bhaskar/spTA/Week_11_TTMC_GPU//bcsf_all_datasets.log
+  Results CSV: /home/bhaskar/spTA/Week_11_TTMC_GPU//bcsf_results.csv
