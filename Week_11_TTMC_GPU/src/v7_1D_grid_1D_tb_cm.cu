@@ -348,6 +348,7 @@ void gpu_1D_grid_1D_tb_cm(
 #define INCLUDED_AS_LIBRARY
 #include "v2_cpu_factorize_n_fuse.cu"
 
+#ifndef TUCKER_HOOI_SKIP_MAIN
 int main(int argc, char* argv[]) {
   bool verbose = false;
   string csf_file;
@@ -509,4 +510,5 @@ int main(int argc, char* argv[]) {
       cerr << "Error: " << e.what() << endl;
       return 1;
   }
-} 
+}
+#endif // TUCKER_HOOI_SKIP_MAIN 
