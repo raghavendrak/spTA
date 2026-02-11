@@ -30,8 +30,157 @@
 #include "csf_tensor.h"
 #include "matrix_utils.h"
 
-#define TUCKER_HOOI_SKIP_MAIN
-#include "v7_1D_grid_1D_tb_cm.cu"
+
+
+__global__ void GPU_4L_CM_device_func_ncm_0( 
+  const uint64_t* __restrict__ mode_0_idx,
+  const uint64_t* __restrict__ mode_1_ptr, const uint64_t* __restrict__ mode_1_idx,
+  const uint64_t* __restrict__ mode_2_ptr, const uint64_t* __restrict__ mode_2_idx,
+  const float* __restrict__ values, float* arr_A,  float* arr_B,  float* arr_O,
+  uint32_t f1, uint32_t f2,  int num_warps)
+{
+  extern __shared__ float buf[];
+  __shared__ int s_counter;
+  // int buf_size = num_warps * f2     +    f1 * f2 ;
+  int buf_index;
+
+  uint64_t i_ptr = blockIdx.x;
+  uint64_t i =  mode_0_idx[i_ptr];
+
+  uint32_t warp_size = 32;
+  uint32_t warp_id = threadIdx.x / warp_size;
+  int tid_in_warp = threadIdx.x % warp_size;
+
+  // buf_index = threadIdx.x;
+  // if(buf_index < f1 * f2){
+  //   buf[num_warps * f2 + buf_index] = 0.0;
+  // }
+  for(int buf_idx = threadIdx.x; buf_idx < f1 * f2; buf_idx += blockDim.x){
+    buf[num_warps * f2 + buf_idx] = 0.0;
+  }
+  if (threadIdx.x == 0) s_counter = 0;   // initialize once per block
+  __syncthreads();
+
+  // for(uint64_t j_ptr_offset = mode_1_ptr[i_ptr]; j_ptr_offset < mode_1_ptr[i_ptr + 1]; j_ptr_offset += num_warps){
+  uint64_t offset, j_ptr,j_ptr_offset =  mode_1_ptr[i_ptr];
+  unsigned int full_mask = 0xFFFFFFFFu;
+
+  while(true){
+    if(tid_in_warp == 0) offset = atomicAdd(&s_counter, 1);
+    offset = __shfl_sync(full_mask, offset, 0); // broadcast the offset to all threads in the warp
+    j_ptr = j_ptr_offset + offset;
+    if(j_ptr < mode_1_ptr[i_ptr + 1]){
+      uint64_t j = mode_1_idx[j_ptr];
+
+      // for(int buf_index = threadIdx.x; buf_index < buf_size; buf_index+= blockDim.x)
+      //   buf[buf_index] = 0.0;
+      for(int buf_idx_offset = warp_id * f2; buf_idx_offset < (warp_id + 1)* f2; buf_idx_offset += warp_size){
+        buf_index = buf_idx_offset + tid_in_warp;
+        if(buf_index < (warp_id + 1)* f2){
+          buf[buf_index] = 0.0;
+        }
+      }
+      // __syncthreads();
+
+      for(uint64_t k_ptr = mode_2_ptr[j_ptr]; k_ptr < mode_2_ptr[j_ptr + 1]; ++k_ptr){
+        uint64_t k = mode_2_idx[k_ptr];
+
+        for(uint32_t s_offset = 0; s_offset < f2; s_offset += warp_size){
+          uint32_t s = s_offset + tid_in_warp;
+          if(s < f2){
+            // atomicAdd(&buf[warp_id * f2 + s], values[k_ptr] * arr_B[k * f2 + s]);
+            buf[warp_id * f2 + s] += values[k_ptr] * arr_B[k * f2 + s];
+          }
+        }
+      }
+      // __syncthreads(); - not required because single warp execute the code serially
+
+      for(uint32_t r = 0; r < f1; ++r){
+        for(uint32_t s_offset = 0; s_offset < f2; s_offset += warp_size){
+          uint32_t s = s_offset + tid_in_warp;
+          if(s < f2){
+            // atomicAdd(&arr_O[i * f1* f2 + r * f2 + s], buf[warp_id * f2 + s] * arr_A[j * f1 + r]);
+            atomicAdd(&buf[num_warps * f2 + r * f2 + s], buf[warp_id * f2 + s] * arr_A[j * f1 + r]);
+          }
+        }
+      }
+    }
+    else{
+      break;
+    }
+  }
+  __syncthreads();
+  
+  for(uint32_t r_offset = 0; r_offset < f1; r_offset += num_warps){
+    uint32_t r = r_offset + warp_id;
+    if(r < f1){
+      for(uint32_t s_offset = 0; s_offset < f2; s_offset += warp_size){
+        uint32_t s = s_offset + tid_in_warp;
+        if(s < f2){
+          arr_O[i * f1* f2 + r * f2 + s] += buf[num_warps * f2 + r * f2 + s];
+          // atomicAdd(&arr_O[i * f1* f2 + r * f2 + s], buf[num_warps * f2 + r * f2 + s]);
+        }
+      }
+    }
+  }
+}
+
+__global__ void GPU_4L_CM_device_func_ncm_1( 
+  const uint64_t* __restrict__ mode_0_idx,
+  const uint64_t* __restrict__ mode_1_ptr, const uint64_t* __restrict__ mode_1_idx,
+  const uint64_t* __restrict__ mode_2_ptr, const uint64_t* __restrict__ mode_2_idx,
+  const float* __restrict__ values, float* arr_A,  float* arr_B,  float* arr_O,
+  uint32_t f1, uint32_t f2, int num_warps)
+{
+  extern __shared__ float buf[];
+  int buf_index;
+  
+  uint64_t i_ptr = blockIdx.x;
+  uint64_t i =  mode_0_idx[i_ptr];
+
+  uint32_t warp_size = 32;
+  uint32_t warp_id = threadIdx.x / warp_size;
+  int tid_in_warp = threadIdx.x % warp_size;
+
+  for(uint64_t j_ptr_offset = mode_1_ptr[i_ptr]; j_ptr_offset < mode_1_ptr[i_ptr + 1]; j_ptr_offset += num_warps){
+    uint64_t j_ptr =  j_ptr_offset + warp_id;
+    if(j_ptr < mode_1_ptr[i_ptr + 1]){
+      uint64_t j = mode_1_idx[j_ptr];
+
+      for(int buf_idx_offset = warp_id * f2; buf_idx_offset < (warp_id + 1)* f2; buf_idx_offset += warp_size){
+        buf_index = buf_idx_offset + tid_in_warp;
+        if(buf_index < (warp_id + 1)* f2){
+          buf[buf_index] = 0.0;
+        }
+      }
+      // __syncthreads();
+
+      for(uint64_t k_ptr = mode_2_ptr[j_ptr]; k_ptr < mode_2_ptr[j_ptr + 1]; ++k_ptr){
+        uint64_t k = mode_2_idx[k_ptr];
+
+        for(uint32_t s_offset = 0; s_offset < f2; s_offset += warp_size){
+          uint32_t s = s_offset + tid_in_warp;
+          if(s < f2){
+            // atomicAdd(&buf[warp_id * f2 + s], values[k_ptr] * arr_B[k * f2 + s]);
+            buf[warp_id * f2 + s] += values[k_ptr] * arr_B[k * f2 + s];
+          }
+        }
+      }
+      // __syncthreads();
+      
+      for(uint32_t r = 0; r < f1; ++r){
+        for(uint32_t s_offset = 0; s_offset < f2; s_offset += warp_size){
+          uint32_t s = s_offset + tid_in_warp;
+          if(s < f2){
+            atomicAdd(&arr_O[j * f1* f2 + r * f2 + s], buf[warp_id * f2 + s] * arr_A[i * f1 + r]);
+          }
+        }
+      }
+      
+    }
+  }
+}
+
 
 // --- NCM-2 TTMc kernels (from v5_gpu_streams.cu) ---
 // Part 1: accumulate values * B into buffer indexed by (k, s)
@@ -173,15 +322,13 @@ float reconstruct_element(uint64_t i, uint64_t j, uint64_t k,
 // For large tensors (> max_sample nnz), use first max_sample and scale for speed
 void compute_frobenius_error(const CSFTensor& tensor,
   const float* G, const float* A0, const float* A1, const float* A2,
-  uint64_t R0, uint64_t R1, uint64_t R2,
-  float& norm_X_sq, float& norm_diff_sq) {
+  uint64_t R0, uint64_t R1, uint64_t R2
+  ) {
   const auto& ptrs = tensor.ptrs;
   const auto& idxs = tensor.idxs;
   const auto& values = tensor.values;
 
-  norm_X_sq = 0;
-  norm_diff_sq = 0;
-  const uint64_t max_sample = 200000;
+  const uint64_t max_sample = 10;
 
   uint64_t count = 0;
   for (uint64_t i_ptr = 0; i_ptr < ptrs[0][1]; i_ptr++) {
@@ -192,61 +339,98 @@ void compute_frobenius_error(const CSFTensor& tensor,
         uint64_t k = idxs[2][k_ptr];
         float x_val = values[k_ptr];
         float x_rec = reconstruct_element(i, j, k, G, A0, A1, A2, R0, R1, R2);
-        norm_X_sq += x_val * x_val;
         float diff = x_val - x_rec;
-        norm_diff_sq += diff * diff;
+        std::cout << "x_val: " << x_val << ", x_rec: " << x_rec << ", diff: " << diff << "\n";
         if (++count >= max_sample) goto done;
       }
     }
   }
 done:
-  if (count < tensor.values.size() && count > 0) {
-    // double scale = (double)tensor.values.size() / count;
-    // norm_X_sq *= scale;
-    // norm_diff_sq *= scale;
-  }
+  return;
 }
 
-// GPU SVD - input A is M x N (column-major), output first R cols of U to d_factor
-// d_A is overwritten; d_factor should be pre-allocated M*R
-void gpu_svd_update_factor(cusolverDnHandle_t cusolverH,
+// Truncated SVD via eigendecomposition of Gram matrix.
+// Input: d_A is M x N column-major. Output: top R left singular vectors in d_factor (M x R col-major).
+// When M > N (typical for Tucker HOOI): eigendecompose A^T A (N x N), recover U = A V Sigma^{-1}.
+// When M <= N: eigendecompose A A^T (M x M), eigenvectors are directly U.
+// Much faster than full SVD when R << min(M,N).
+void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_t cublasH,
   float* d_A, int M, int N, int R,
   float* d_factor) {
-  int min_mn = std::min(M, N);
-  int lda = M;
+  float alpha = 1.0f, beta = 0.0f;
+  int K = std::min(M, N);  // Gram matrix dimension
+  R = std::min(R, K);
 
-  float *d_S = nullptr, *d_U = nullptr, *d_VT_dummy = nullptr, *d_work = nullptr;
-  int *d_info = nullptr;
+  if (M > N) {
+    // Gram = A^T A (N x N)
+    float* d_Gram;
+    CHECK_CUDA(cudaMalloc(&d_Gram, sizeof(float) * N * N));
+    CHECK_CUBLAS(cublasSgemm(cublasH, CUBLAS_OP_T, CUBLAS_OP_N,
+      N, N, M, &alpha, d_A, M, d_A, M, &beta, d_Gram, N));
 
-  CHECK_CUDA(cudaMalloc(&d_S, sizeof(float) * min_mn));
-  CHECK_CUDA(cudaMalloc(&d_U, sizeof(float) * M * min_mn));
-  CHECK_CUDA(cudaMalloc(&d_VT_dummy, sizeof(float)));  // jobvt='N' does not use VT
-  CHECK_CUDA(cudaMalloc(&d_info, sizeof(int)));
+    // Eigendecompose: eigenvalues ascending in d_W, eigenvectors in columns of d_Gram
+    float *d_W;
+    CHECK_CUDA(cudaMalloc(&d_W, sizeof(float) * N));
+    int lwork = 0;
+    CHECK_CUSOLVER(cusolverDnSsyevd_bufferSize(cusolverH, CUSOLVER_EIG_MODE_VECTOR,
+      CUBLAS_FILL_MODE_UPPER, N, d_Gram, N, d_W, &lwork));
+    float *d_work;
+    int *d_info;
+    CHECK_CUDA(cudaMalloc(&d_work, sizeof(float) * lwork));
+    CHECK_CUDA(cudaMalloc(&d_info, sizeof(int)));
+    CHECK_CUSOLVER(cusolverDnSsyevd(cusolverH, CUSOLVER_EIG_MODE_VECTOR,
+      CUBLAS_FILL_MODE_UPPER, N, d_Gram, N, d_W, d_work, lwork, d_info));
 
-  int lwork = 0;
-  CHECK_CUSOLVER(cusolverDnSgesvd_bufferSize(cusolverH, M, N, &lwork));
-  CHECK_CUDA(cudaMalloc(&d_work, sizeof(float) * lwork));
+    // Top R eigenvectors are the last R columns (ascending order)
+    // d_V_R points to column (N-R) of d_Gram, shape (N, R)
+    float* d_V_R = d_Gram + (long long)(N - R) * N;
 
-  CHECK_CUSOLVER(cusolverDnSgesvd(cusolverH, 'S', 'N',
-    M, N, d_A, lda, d_S, d_U, M, d_VT_dummy, 1, d_work, lwork, nullptr, d_info));
+    // U_R = A × V_R, shape (M, R) — unnormalized
+    CHECK_CUBLAS(cublasSgemm(cublasH, CUBLAS_OP_N, CUBLAS_OP_N,
+      M, R, N, &alpha, d_A, M, d_V_R, N, &beta, d_factor, M));
 
-  int info;
-  CHECK_CUDA(cudaMemcpy(&info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
-  if (info != 0) std::cerr << "SVD devInfo = " << info << "\n";
+    // Normalize each column: scale by 1/sigma_i = 1/sqrt(lambda_i)
+    float* h_W = new float[N];
+    CHECK_CUDA(cudaMemcpy(h_W, d_W, sizeof(float) * N, cudaMemcpyDeviceToHost));
+    for (int j = 0; j < R; j++) {
+      float sigma = std::sqrt(std::max(h_W[N - R + j], 1e-12f));
+      float scale = 1.0f / sigma;
+      CHECK_CUBLAS(cublasSscal(cublasH, M, &scale, d_factor + (long long)j * M, 1));
+    }
+    delete[] h_W;
 
-  // Copy first R columns of U to d_factor
-  int cols_to_copy = std::min(R, min_mn);
-  CHECK_CUDA(cudaMemcpy(d_factor, d_U, M * cols_to_copy * sizeof(float), cudaMemcpyDeviceToDevice));
-  if (R > min_mn) {
-    // Pad with zeros if R > min_mn (unusual)
-    CHECK_CUDA(cudaMemset(d_factor + M * min_mn, 0, M * (R - min_mn) * sizeof(float)));
+    CHECK_CUDA(cudaFree(d_Gram));
+    CHECK_CUDA(cudaFree(d_W));
+    CHECK_CUDA(cudaFree(d_work));
+    CHECK_CUDA(cudaFree(d_info));
+  } else {
+    // M <= N: Gram = A A^T (M x M), eigenvectors are directly U
+    float* d_Gram;
+    CHECK_CUDA(cudaMalloc(&d_Gram, sizeof(float) * M * M));
+    CHECK_CUBLAS(cublasSgemm(cublasH, CUBLAS_OP_N, CUBLAS_OP_T,
+      M, M, N, &alpha, d_A, M, d_A, M, &beta, d_Gram, M));
+
+    float *d_W;
+    CHECK_CUDA(cudaMalloc(&d_W, sizeof(float) * M));
+    int lwork = 0;
+    CHECK_CUSOLVER(cusolverDnSsyevd_bufferSize(cusolverH, CUSOLVER_EIG_MODE_VECTOR,
+      CUBLAS_FILL_MODE_UPPER, M, d_Gram, M, d_W, &lwork));
+    float *d_work;
+    int *d_info;
+    CHECK_CUDA(cudaMalloc(&d_work, sizeof(float) * lwork));
+    CHECK_CUDA(cudaMalloc(&d_info, sizeof(int)));
+    CHECK_CUSOLVER(cusolverDnSsyevd(cusolverH, CUSOLVER_EIG_MODE_VECTOR,
+      CUBLAS_FILL_MODE_UPPER, M, d_Gram, M, d_W, d_work, lwork, d_info));
+
+    // Top R eigenvectors are the last R columns — these are U directly
+    CHECK_CUDA(cudaMemcpy(d_factor, d_Gram + (long long)(M - R) * M,
+      sizeof(float) * M * R, cudaMemcpyDeviceToDevice));
+
+    CHECK_CUDA(cudaFree(d_Gram));
+    CHECK_CUDA(cudaFree(d_W));
+    CHECK_CUDA(cudaFree(d_work));
+    CHECK_CUDA(cudaFree(d_info));
   }
-
-  CHECK_CUDA(cudaFree(d_S));
-  CHECK_CUDA(cudaFree(d_U));
-  CHECK_CUDA(cudaFree(d_VT_dummy));
-  CHECK_CUDA(cudaFree(d_work));
-  CHECK_CUDA(cudaFree(d_info));
 }
 
 // compute_core_gpu removed: core tensor is now computed directly via
@@ -480,7 +664,7 @@ int main(int argc, char* argv[]) {
         CHECK_CUDA(cudaMalloc(&d_factor, sizeof(float) * M * ranks[n]));
         CHECK_CUDA(cudaMemcpy(d_mat, mat_colmajor.data(), sizeof(float) * M * N, cudaMemcpyHostToDevice));
 
-        gpu_svd_update_factor(cusolverH, d_mat, static_cast<int>(M), static_cast<int>(N),
+        gpu_truncated_svd_update_factor(cusolverH, cublasH, d_mat, static_cast<int>(M), static_cast<int>(N),
           static_cast<int>(ranks[n]), d_factor);
 
         // U is column-major (M, R); convert to row-major and update CPU factor
@@ -575,22 +759,10 @@ int main(int argc, char* argv[]) {
     CHECK_CUDA(cudaFree(d_values));
 
     // 5. Reconstruct and verify Frobenius error
-    float norm_X_sq, norm_diff_sq;
     compute_frobenius_error(tensor, G_core, factors[0], factors[1], factors[2],
-      R0, R1, R2, norm_X_sq, norm_diff_sq);
-
-    float norm_X = std::sqrt(norm_X_sq);
-    float norm_diff = std::sqrt(norm_diff_sq);
-    float rel_error = (norm_X > 1e-10f) ? (norm_diff / norm_X) : norm_diff;
+      R0, R1, R2);
 
     std::cout << "Tucker HOOI completed in " << num_iters << " iterations, " << total_ms << " ms\n";
-    std::cout << "Frobenius norm of input: " << norm_X << "\n";
-    std::cout << "Reconstruction error ||X - X_rec||_F: " << norm_diff << "\n";
-    std::cout << "Relative Frobenius error: " << rel_error << "\n";
-
-    if (verbose) {
-      std::cout << "Fit (||G||_F^2): " << prev_fit << "\n";
-    }
 
     // Cleanup
     for (int i = 0; i < 3; i++) delete[] factors[i];

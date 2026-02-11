@@ -87,7 +87,7 @@ mkdir -p "$OUTPUT_DIR"
 # Paths
 TENSOR_DIR="/home/bhaskar/tensors_dataset"
 # SOURCE_FILE="bcsf_3.cu"
-SOURCE_FILE="bcsf_complete.cu"
+SOURCE_FILE="../bcsf/bcsf_complete.cu"
 EXECUTABLE="bcsf"
 LOG_FILE="$OUTPUT_DIR/bcsf_all_datasets.log"
 RESULTS_FILE="$OUTPUT_DIR/bcsf_results.csv"
