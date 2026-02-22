@@ -13,14 +13,12 @@ using namespace std;
 void cpu_all_at_once(uint64_t** mode_ptrs, uint64_t** mode_idxs,
                         float*& values, float* factor_matrices[],  
                         float*& arr_O, int& ncm, 
-                        uint64_t ranks[], int order) 
+                        uint64_t rank, int order) 
 { 
   if(order == 3){
     uint64_t i, j, k, index_A, index_B, index_O;
     float value;
     if(ncm == 0){
-      uint64_t f1 = ranks[1];
-      uint64_t f2 = ranks[2];
       float* arr_A = factor_matrices[1];
       float* arr_B = factor_matrices[2];
       // Traverse through CSF tensor pointer and indices arrays for all modes
@@ -36,26 +34,24 @@ void cpu_all_at_once(uint64_t** mode_ptrs, uint64_t** mode_idxs,
             value = values[k_ptr];                  // CSF value for the above i, j, k
   
             // Iterate over the matrix dimensions 
-            for (uint64_t r = 0; r < f1; ++r) {
+            for (uint64_t r = 0; r < rank; ++r) {
                 
-              index_A = j * f1 + r;
-              for (uint64_t s = 0; s < f2; ++s) {
-  
-                // Compute linearized indices for matrices A, B based on the contraction string
-                index_B = k * f2 + s;
-  
-                // For mode-1 linearized output 
-                index_O = i * f1 * f2 + r * f2 + s;
-  
-                // Perform contraction
-                arr_O[index_O] += value * arr_A[index_A] * arr_B[index_B];
-                  
-              }
+              index_A = j * rank + r;
+
+              // Compute linearized indices for matrices A, B based on the contraction string
+              index_B = k * rank + r;
+
+              // For mode-1 linearized output 
+              index_O = i * rank + r;
+
+              // Perform contraction
+              arr_O[index_O] += value * arr_A[index_A] * arr_B[index_B];
             }
           }
         }
       }
     }
+    /*
     else if(ncm == 1){
       uint64_t f1 = ranks[0];
       uint64_t f2 = ranks[2];
@@ -130,8 +126,9 @@ void cpu_all_at_once(uint64_t** mode_ptrs, uint64_t** mode_idxs,
         }
       }
     }
-    
+    */
   }
+  /*
   else if(order == 4){
     uint64_t i, j, k, l;
     float value;
@@ -182,18 +179,19 @@ void cpu_all_at_once(uint64_t** mode_ptrs, uint64_t** mode_idxs,
       
     }
   }
+  */
 }
 /*End of CPU All At Once Method*/
 //////////////////////////////////////////////////////////////////// 
 
 // Include the reference implementation for validation
 #define INCLUDED_AS_LIBRARY
-#include "v2_cpu_factorize_n_fuse.cu"
+#include "v13_mttkrp_cpu_factorize_n_fuse.cu"
 
 int main(int argc, char* argv[]) {
     bool verbose = false;
     string csf_file;
-    std::vector<uint64_t> ranks;
+    uint64_t rank;
     int ncm = 0;
     bool verify = false;  // Default: don't verify results
     
@@ -202,11 +200,9 @@ int main(int argc, char* argv[]) {
         string arg = argv[i];
         if (arg == "-v" || arg == "--verbose") {
             verbose = true;
-        } else if ((arg == "-r" || arg == "--ranks") && i + 1 < argc) {
+        } else if ((arg == "-r" || arg == "--rank") && i + 1 < argc) {
             // Collect all numbers after -r/--ranks until next arg or end
-            while (i + 1 < argc && argv[i + 1][0] != '-') {
-                ranks.push_back(static_cast<uint64_t>(atoi(argv[++i])));
-            }
+            rank = static_cast<uint64_t>(atoi(argv[++i]));
         } else if ((arg == "-n" || arg == "--ncm") && i + 1 < argc) {
             ncm = atoi(argv[++i]);
         } else if (arg == "--verify") {
@@ -220,7 +216,7 @@ int main(int argc, char* argv[]) {
         cerr << "Usage: " << argv[0] << " [options] <csf_file>" << endl;
         cerr << "Options:" << endl;
         cerr << "  -v, --verbose      Enable verbose output" << endl;
-        cerr << "  -r, --ranks <r1> [r2 ...]  Set all factor matrix ranks (space separated)" << endl;
+        cerr << "  -r, --rank <rank>  Set factor matrix rank" << endl;
         cerr << "  -n, --ncm <mode>   Set contraction mode (0, 1, or 2, default 0)" << endl;
         cerr << "  --verify           Verify results against reference implementation" << endl;
         return 1;
@@ -241,31 +237,27 @@ int main(int argc, char* argv[]) {
         int order;
         getCSFArrays(tensor, mode_ptrs, mode_idxs, values, order);
         
-        // Check that number of ranks matches tensor order
-        if (ranks.size() < static_cast<size_t>(order)) {
-            cerr << "Error: Number of ranks (" << ranks.size() << ") does not match tensor order (" << order << ")." << endl;
-            return 1;
-        }
+        // // Check that number of ranks matches tensor order
+        // if (ranks.size() < static_cast<size_t>(order)) {
+        //     cerr << "Error: Number of ranks (" << ranks.size() << ") does not match tensor order (" << order << ")." << endl;
+        //     return 1;
+        // }
 
         // Generate 'order' number of factor matrices
         std::vector<float*> factor_matrices(order, nullptr);
         std::vector<uint64_t> factor_sizes(order);
         for (int i = 0; i < order; ++i) {
-          generate_matrix(tensor.dimensions[i], ranks[i], 42 + i, factor_matrices[i]);
-          factor_sizes[i] = tensor.dimensions[i] * ranks[i];
+          generate_matrix(tensor.dimensions[i], rank, 42 + i, factor_matrices[i]);
+          factor_sizes[i] = tensor.dimensions[i] * rank;
         }
 
         if (verbose) {
           for (int i = 0; i < order; ++i) {
-              cout << "Factor matrix " << i << ": " << tensor.dimensions[i] << " x " << ranks[i] << endl;
+              cout << "Factor matrix " << i << ": " << tensor.dimensions[i] << " x " << rank << endl;
           }
         }
         // Output tensor: 
-        uint64_t arr_O_size = 1;
-        for (int i = 0; i < order; ++i){
-          if(i != ncm) arr_O_size *= ranks[i];
-          else arr_O_size *= tensor.dimensions[i];
-        }
+        uint64_t arr_O_size = tensor.dimensions[ncm] * rank;
          
         float* arr_O = allocate_aligned_array(arr_O_size);
         float* ref_O = nullptr;
@@ -282,7 +274,7 @@ int main(int argc, char* argv[]) {
         cpu_all_at_once(
             mode_ptrs.data(), mode_idxs.data(),
             values, factor_matrices.data(), arr_O,
-            ncm, ranks.data(), order
+            ncm, rank, order
         );
         
         auto end = std::chrono::high_resolution_clock::now();
@@ -301,7 +293,7 @@ int main(int argc, char* argv[]) {
             cpu_factorize_n_fuse(
                 mode_ptrs.data(), mode_idxs.data(),
                 values, factor_matrices.data(), ref_O,
-                ncm, ranks.data(), order, tensor.dimensions.data() 
+                ncm, rank, order, tensor.dimensions.data() 
             );
             
             auto ref_end = std::chrono::high_resolution_clock::now();
