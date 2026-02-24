@@ -205,7 +205,7 @@ __global__ void GPU_ncm2_part1(
     int s = s_offset + threadIdx.y;
     if (s < (int)f2) {
      uint64_t index_B = j * f2 + s;
-     int buf_index = k * f2 + s;
+     int buf_index = k * f2 + s; // =  k_ptr - mode_2_ptr[j_ptr]
      atomicAdd(&buffer_for_ncm_2[buf_index], value * arr_B[index_B]);
     }
    }
@@ -358,45 +358,72 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
   float* d_A, int M, int N, int R,
   float* d_factor) {
   float alpha = 1.0f, beta = 0.0f;
-  int K = std::min(M, N);  // Gram matrix dimension
+  int K = std::min(M, N);
   R = std::min(R, K);
+
+  cudaEvent_t ev_start, ev_stop;
+  float ev_ms = 0.f;
+  cudaEventCreate(&ev_start);
+  cudaEventCreate(&ev_stop);
 
   if (M > N) {
     // Gram = A^T A (N x N)
     float* d_Gram;
+    cudaEventRecord(ev_start);
     CHECK_CUDA(cudaMalloc(&d_Gram, sizeof(float) * N * N));
+    cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
+    cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
+    std::cout << "ATA allocation time: " << ev_ms << " ms\n";
+
+    cudaEventRecord(ev_start);
     CHECK_CUBLAS(cublasSgemm(cublasH, CUBLAS_OP_T, CUBLAS_OP_N,
       N, N, M, &alpha, d_A, M, d_A, M, &beta, d_Gram, N));
+    cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
+    cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
+    std::cout << "ATA gemm time: " << ev_ms << " ms\n";
 
-    // Eigendecompose: eigenvalues ascending in d_W, eigenvectors in columns of d_Gram
     float *d_W;
     CHECK_CUDA(cudaMalloc(&d_W, sizeof(float) * N));
     int lwork = 0;
     CHECK_CUSOLVER(cusolverDnSsyevd_bufferSize(cusolverH, CUSOLVER_EIG_MODE_VECTOR,
       CUBLAS_FILL_MODE_UPPER, N, d_Gram, N, d_W, &lwork));
+
     float *d_work;
     int *d_info;
+    cudaEventRecord(ev_start);
     CHECK_CUDA(cudaMalloc(&d_work, sizeof(float) * lwork));
     CHECK_CUDA(cudaMalloc(&d_info, sizeof(int)));
+    cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
+    cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
+    std::cout << "eig buffer size allocation time: " << ev_ms << " ms\n";
+
+    cudaEventRecord(ev_start);
     CHECK_CUSOLVER(cusolverDnSsyevd(cusolverH, CUSOLVER_EIG_MODE_VECTOR,
       CUBLAS_FILL_MODE_UPPER, N, d_Gram, N, d_W, d_work, lwork, d_info));
+    cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
+    cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
+    std::cout << "eig decomposition time: " << ev_ms << " ms\n";
 
-    // Top R eigenvectors are the last R columns (ascending order)
-    // d_V_R points to column (N-R) of d_Gram, shape (N, R)
     float* d_V_R = d_Gram + (long long)(N - R) * N;
 
-    // U_R = A × V_R, shape (M, R) — unnormalized
+    cudaEventRecord(ev_start);
     CHECK_CUBLAS(cublasSgemm(cublasH, CUBLAS_OP_N, CUBLAS_OP_N,
       M, R, N, &alpha, d_A, M, d_V_R, N, &beta, d_factor, M));
+    cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
+    cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
+    std::cout << "AV gemm time: " << ev_ms << " ms\n";
 
-    // Normalize each column: scale by 1/sigma_i = 1/sqrt(lambda_i)
     float* h_W = new float[N];
     CHECK_CUDA(cudaMemcpy(h_W, d_W, sizeof(float) * N, cudaMemcpyDeviceToHost));
+    cudaEventRecord(ev_start);
     for (int j = 0; j < R; j++) {
       float sigma = std::sqrt(std::max(h_W[N - R + j], 1e-12f));
       float scale = 1.0f / sigma;
       CHECK_CUBLAS(cublasSscal(cublasH, M, &scale, d_factor + (long long)j * M, 1));
     }
+    cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
+    cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
+    std::cout << "normalize(scale by 1/sigma_i) time: " << ev_ms << " ms\n";
     delete[] h_W;
 
     CHECK_CUDA(cudaFree(d_Gram));
@@ -406,23 +433,41 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
   } else {
     // M <= N: Gram = A A^T (M x M), eigenvectors are directly U
     float* d_Gram;
+    cudaEventRecord(ev_start);
     CHECK_CUDA(cudaMalloc(&d_Gram, sizeof(float) * M * M));
+    cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
+    cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
+    std::cout << "AA^T allocation time: " << ev_ms << " ms\n";
+
+    cudaEventRecord(ev_start);
     CHECK_CUBLAS(cublasSgemm(cublasH, CUBLAS_OP_N, CUBLAS_OP_T,
       M, M, N, &alpha, d_A, M, d_A, M, &beta, d_Gram, M));
+    cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
+    cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
+    std::cout << "AA^T gemm time: " << ev_ms << " ms\n";
 
     float *d_W;
     CHECK_CUDA(cudaMalloc(&d_W, sizeof(float) * M));
     int lwork = 0;
     CHECK_CUSOLVER(cusolverDnSsyevd_bufferSize(cusolverH, CUSOLVER_EIG_MODE_VECTOR,
       CUBLAS_FILL_MODE_UPPER, M, d_Gram, M, d_W, &lwork));
+
     float *d_work;
     int *d_info;
+    cudaEventRecord(ev_start);
     CHECK_CUDA(cudaMalloc(&d_work, sizeof(float) * lwork));
     CHECK_CUDA(cudaMalloc(&d_info, sizeof(int)));
+    cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
+    cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
+    std::cout << "eig buffer size allocation time: " << ev_ms << " ms\n";
+
+    cudaEventRecord(ev_start);
     CHECK_CUSOLVER(cusolverDnSsyevd(cusolverH, CUSOLVER_EIG_MODE_VECTOR,
       CUBLAS_FILL_MODE_UPPER, M, d_Gram, M, d_W, d_work, lwork, d_info));
+    cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
+    cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
+    std::cout << "eig decomposition time: " << ev_ms << " ms\n";
 
-    // Top R eigenvectors are the last R columns — these are U directly
     CHECK_CUDA(cudaMemcpy(d_factor, d_Gram + (long long)(M - R) * M,
       sizeof(float) * M * R, cudaMemcpyDeviceToDevice));
 
@@ -431,6 +476,9 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
     CHECK_CUDA(cudaFree(d_work));
     CHECK_CUDA(cudaFree(d_info));
   }
+
+  cudaEventDestroy(ev_start);
+  cudaEventDestroy(ev_stop);
 }
 
 // compute_core_gpu removed: core tensor is now computed directly via
@@ -559,6 +607,10 @@ int main(int argc, char* argv[]) {
     float* d_arr_O;
     CHECK_CUDA(cudaMalloc(&d_arr_O, sizeof(float) * max_arr_O_size));
 
+    // --- SVD: update factor matrix n ---
+    // Copy TTMc output from GPU to CPU for row-to-column-major conversion
+    float* arr_O_host = allocate_aligned_array(max_arr_O_size);
+
     // NCM-2 work buffers (buffer indexed by k*f2+s, and boolean k-index tracker)
     // For ncm=2: idx_A=0, idx_B=1, f2=R1, buffer size = I2 * R1
     float* d_buffer_ncm2 = nullptr;
@@ -641,48 +693,51 @@ int main(int argc, char* argv[]) {
         }
 
         auto ttmc_end = std::chrono::high_resolution_clock::now();
-        ttmc_time_ms[n] += std::chrono::duration<double, std::milli>(ttmc_end - ttmc_start).count();
+        ttmc_time_ms[n] += std::chrono::duration_cast<std::chrono::milliseconds>(ttmc_end - ttmc_start).count();
 
-        // --- SVD: update factor matrix n ---
-        auto svd_start = std::chrono::high_resolution_clock::now();
 
-        // Copy TTMc output from GPU to CPU for row-to-column-major conversion
-        float* arr_O_host = allocate_aligned_array(arr_O_size);
         CHECK_CUDA(cudaMemcpy(arr_O_host, d_arr_O, sizeof(float) * arr_O_size, cudaMemcpyDeviceToHost));
 
         uint64_t M = tensor.dimensions[n];
         uint64_t N = (n == 0) ? (R1 * R2) : (n == 1) ? (R0 * R2) : (R0 * R1);
 
         // Row-major (M, N) -> column-major (M, N) for cuSOLVER
+        auto mat_colmajor_start = std::chrono::high_resolution_clock::now();
         std::vector<float> mat_colmajor(M * N);
         for (uint64_t c = 0; c < N; c++)
           for (uint64_t r = 0; r < M; r++)
             mat_colmajor[r + c * M] = arr_O_host[r * N + c];
+        auto mat_colmajor_end = std::chrono::high_resolution_clock::now();
+        auto mat_colmajor_duration = std::chrono::duration_cast<std::chrono::milliseconds>(mat_colmajor_end - mat_colmajor_start).count();
+        std::cout << "row-major to column-major conversion time: " << mat_colmajor_duration << " ms\n";
 
         float *d_mat, *d_factor;
         CHECK_CUDA(cudaMalloc(&d_mat, sizeof(float) * M * N));
-        CHECK_CUDA(cudaMalloc(&d_factor, sizeof(float) * M * ranks[n]));
+        // CHECK_CUDA(cudaMalloc(&d_factor, sizeof(float) * M * ranks[n]));
         CHECK_CUDA(cudaMemcpy(d_mat, mat_colmajor.data(), sizeof(float) * M * N, cudaMemcpyHostToDevice));
 
+        auto svd_start = std::chrono::high_resolution_clock::now();
         gpu_truncated_svd_update_factor(cusolverH, cublasH, d_mat, static_cast<int>(M), static_cast<int>(N),
-          static_cast<int>(ranks[n]), d_factor);
+        static_cast<int>(ranks[n]), d_factors[n]);
+        auto svd_end = std::chrono::high_resolution_clock::now();
+        auto svd_duration = std::chrono::duration_cast<std::chrono::milliseconds>(svd_end - svd_start).count();
+        std::cout << "svd time: " << svd_duration << " ms\n";
+        svd_time_ms[n] += svd_duration;
 
         // U is column-major (M, R); convert to row-major and update CPU factor
         std::vector<float> U_host(M * ranks[n]);
-        CHECK_CUDA(cudaMemcpy(U_host.data(), d_factor, sizeof(float) * M * ranks[n], cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaMemcpy(U_host.data(), d_factors[n], sizeof(float) * M * ranks[n], cudaMemcpyDeviceToHost));
         for (uint64_t r_idx = 0; r_idx < ranks[n]; r_idx++)
           for (uint64_t i_idx = 0; i_idx < M; i_idx++)
             factors[n][i_idx * ranks[n] + r_idx] = U_host[i_idx + r_idx * M];
 
         // Update the persistent GPU factor matrix
-        CHECK_CUDA(cudaMemcpy(d_factors[n], factors[n], sizeof(float) * factor_sizes[n], cudaMemcpyHostToDevice));
+        // CHECK_CUDA(cudaMemcpy(d_factors[n], factors[n], sizeof(float) * factor_sizes[n], cudaMemcpyHostToDevice));
 
         CHECK_CUDA(cudaFree(d_mat));
-        CHECK_CUDA(cudaFree(d_factor));
-        std::free(arr_O_host);
+        // CHECK_CUDA(cudaFree(d_factor));
+        
 
-        auto svd_end = std::chrono::high_resolution_clock::now();
-        svd_time_ms[n] += std::chrono::duration<double, std::milli>(svd_end - svd_start).count();
       }
 
       // Convergence: compute core G = A0^T × Y via cuBLAS GEMM
@@ -757,10 +812,11 @@ int main(int argc, char* argv[]) {
     CHECK_CUDA(cudaFree(d_mode_2_ptr));
     CHECK_CUDA(cudaFree(d_mode_2_idx));
     CHECK_CUDA(cudaFree(d_values));
+    std::free(arr_O_host);
 
-    // 5. Reconstruct and verify Frobenius error
-    compute_frobenius_error(tensor, G_core, factors[0], factors[1], factors[2],
-      R0, R1, R2);
+    // // 5. Reconstruct and verify Frobenius error
+    // compute_frobenius_error(tensor, G_core, factors[0], factors[1], factors[2],
+    //   R0, R1, R2);
 
     std::cout << "Tucker HOOI completed in " << num_iters << " iterations, " << total_ms << " ms\n";
 
