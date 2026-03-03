@@ -298,6 +298,246 @@ static void freeTaskBuffers(TaskRange* d_tasks, unsigned long long* d_task_count
   if (d_task_counter) cudaFree(d_task_counter);
 }
 
+// ===================================================================
+// TTMcCache: stores HOOI-loop-invariant preprocessing results.
+// Call prepare_ttmc_cuda() once per CSF copy before the HOOI loop,
+// then pass the filled cache to every run_ttmc_cuda() call.
+// ===================================================================
+struct TTMcCache {
+  bool initialized      = false;
+  int  order            = 0;
+  // Path selection
+  bool prefer_static        = false;  // 3D: kernel_ttmc3_static_block_per_i
+  bool prefer_tiny_streams  = false;  // 4D: launch_ttmc4_tiny_streams_flat
+  // 3D static-block-per-i params
+  int    s_block_size = 0;
+  int    s_num_warps  = 0;
+  size_t s_shared_mem = 0;
+  int    s_grid_size  = 0;
+  // 3D / 4D dynamic-tasks params
+  std::vector<TaskRange>  host_tasks;
+  TaskRange*              d_tasks        = nullptr;  // persistent GPU task list
+  unsigned long long*     d_task_counter = nullptr;  // persistent; reset before each launch
+  int    d_block_size = 0;
+  int    d_grid_size  = 0;
+  size_t d_shared_mem = 0;
+  // 4D tiny-streams params
+  int tiny_stream_count = 0;
+  // HOST arrays (non-owning ptrs into CSFCopy.ptrs/idxs) for tiny-streams launch loop
+  // and d_meta_data packing inside launch_ttmc4_tiny_streams_flat.
+  std::vector<uint64_t*> h_mode_ptrs;  // HOST: ptrs[l].data() for each level
+  std::vector<uint64_t*> h_mode_idxs;  // HOST: idxs[l].data() for each level
+  // Cached array sizes (invariant across HOOI iterations)
+  std::vector<uint64_t>  size_mode_ptr;   // ptrs[l].size() per level
+  std::vector<uint64_t>  size_mode_idx;   // idxs[l].size() per level
+  std::vector<uint64_t>  factor_sizes;    // CSF-level indexed factor matrix sizes
+};
+
+void free_ttmc_cache(TTMcCache& c) {
+  if (c.d_tasks)        { cudaFree(c.d_tasks);        c.d_tasks        = nullptr; }
+  if (c.d_task_counter) { cudaFree(c.d_task_counter); c.d_task_counter = nullptr; }
+  c.host_tasks.clear();
+  c.h_mode_ptrs.clear();
+  c.h_mode_idxs.clear();
+  c.size_mode_ptr.clear();
+  c.size_mode_idx.clear();
+  c.factor_sizes.clear();
+  c.initialized = false;
+}
+
+// Forward declarations needed by prepare_ttmc_cuda
+__global__ void kernel_ttmc3_static_block_per_i(
+  const uint64_t*, const uint64_t*, const uint64_t*,
+  const uint64_t*, const uint64_t*,
+  const scalar_t*, scalar_t*, scalar_t*, scalar_t*,
+  uint32_t, uint32_t, int);
+__global__ void kernel_ttmc3_dynamic_tasks(
+  const uint64_t*, const uint64_t*, const uint64_t*,
+  const uint64_t*, const uint64_t*,
+  const scalar_t*, const scalar_t*, const scalar_t*,
+  scalar_t*, uint32_t, uint32_t,
+  const TaskRange*, uint64_t, unsigned long long*);
+__global__ void kernel_ttmc4_dynamic_tasks(
+  const uint64_t*, const uint64_t*, const uint64_t*,
+  const uint64_t*, const uint64_t*, const uint64_t*, const uint64_t*,
+  const scalar_t*, const scalar_t*, const scalar_t*, const scalar_t*,
+  scalar_t*, uint32_t, uint32_t, uint32_t,
+  const TaskRange*, uint64_t, unsigned long long*);
+
+// Perform all HOOI-loop-invariant preprocessing for one CSF copy.
+// mode_ptrs[i]  = HOST ptr to ptrs[i]; mode_idxs[i] = HOST ptr to idxs[i]
+// ranks          = CSF-level indexed ranks; factor_sizes = CSF-level indexed factor sizes
+// dimensions     = dimension of each CSF level
+// ncm            = non-contracting mode index (always 0 in HOOI)
+void prepare_ttmc_cuda(
+  uint64_t** mode_ptrs, uint64_t** mode_idxs,
+  uint64_t* size_mode_ptr, uint64_t* size_mode_idx,
+  uint64_t* ranks, uint64_t* factor_sizes_in,
+  uint64_t* dimensions,
+  int ncm, int order,
+  TTMcCache& cache)
+{
+  free_ttmc_cache(cache);
+  cache.order = order;
+  // Cache HOST pointers and sizes (for launch_ttmc4_tiny_streams_flat)
+  cache.h_mode_ptrs.assign(mode_ptrs,      mode_ptrs      + order);
+  cache.h_mode_idxs.assign(mode_idxs,      mode_idxs      + order);
+  cache.size_mode_ptr.assign(size_mode_ptr, size_mode_ptr  + order);
+  cache.size_mode_idx.assign(size_mode_idx, size_mode_idx  + order);
+  cache.factor_sizes.assign(factor_sizes_in, factor_sizes_in + order);
+
+  std::vector<int> other_modes;
+  for (int m = 0; m < order; ++m)
+    if (m != ncm) other_modes.push_back(m);
+  int idx_A = other_modes[0];
+  int idx_B = other_modes[1];
+  int idx_C = ((int)other_modes.size() > 2) ? other_modes[2] : -1;
+  int f1 = (int)ranks[idx_A];
+  int f2 = (int)ranks[idx_B];
+  int f3 = (idx_C >= 0) ? (int)ranks[idx_C] : 0;
+  uint64_t num_i = size_mode_ptr[1] - 1;
+
+  cudaCheckError(cudaMalloc(&cache.d_task_counter, sizeof(unsigned long long)));
+  cudaCheckError(cudaMemset(cache.d_task_counter, 0, sizeof(unsigned long long)));
+
+  int device_id = 0;
+  cudaCheckError(cudaGetDevice(&device_id));
+  cudaDeviceProp prop{};
+  cudaCheckError(cudaGetDeviceProperties(&prop, device_id));
+
+  if (order == 3 && ncm == 0) {
+    bool force_static  = getEnvFlag("TTMC_FORCE_STATIC");
+    bool force_dynamic = getEnvFlag("TTMC_FORCE_DYNAMIC");
+    FiberStats   stats = analyzeFiberStats(mode_ptrs[1], mode_ptrs[2], num_i);
+    DynamicHints hints = chooseDynamicHints(stats.avg_k_per_j, force_dynamic);
+    uint64_t base_tile     = hints.base_tile;
+    uint64_t k_tile        = hints.k_tile;
+    int dyn_block          = hints.dynamic_block_hint;
+    int grid_factor        = hints.grid_factor_hint;
+
+    bool ultra_tiny_k = (stats.max_k_per_j <= 5 && stats.avg_k_per_j <= 1.10);
+    bool long_tail    = (stats.avg_k_per_j <= 12.0 && stats.max_k_per_j >= 15000 &&
+                         dimensions[0] <= 700000);
+    bool med_dyn      = (stats.avg_k_per_j >= 300.0 && stats.avg_k_per_j <= 1500.0 &&
+                         stats.max_k_per_j <= 2000 && num_i <= 512);
+    if (!force_dynamic && !force_static && med_dyn) {
+      if (k_tile < 512) k_tile = 512;
+      dyn_block = 128;
+      if (grid_factor < 12) grid_factor = 12;
+      base_tile = 64;
+    }
+    bool prefer_static = force_static || (!force_dynamic && (ultra_tiny_k || long_tail));
+    if (f1 > 64) prefer_static = false;
+    cache.prefer_static = prefer_static;
+
+    if (prefer_static) {
+      int def_blk   = (ultra_tiny_k || long_tail) ? 768 : 1024;
+      int block_sz  = getEnvInt("TTMC_BLOCK_PER_I_BLOCK", def_blk);
+      if (block_sz < 32) block_sz = 32;
+      block_sz = (block_sz / 32) * 32;
+      if (block_sz == 0) block_sz = 32;
+      int nw = std::max(1, block_sz / 32);
+      cache.s_block_size = block_sz;
+      cache.s_num_warps  = nw;
+      cache.s_shared_mem = (size_t)nw * f2 * sizeof(scalar_t) +
+                           (size_t)f1 * f2 * sizeof(scalar_t);
+      cache.s_grid_size  = (int)size_mode_idx[0];
+    } else {
+      buildDynamicTaskRanges(mode_ptrs[1], mode_ptrs[2], num_i, base_tile, k_tile,
+                             cache.host_tasks, computeTaskReserveHint(size_mode_idx[1]));
+      int blk = dyn_block, wpb = blk / 32;
+      bool use_reg = (f1 <= 64 && f2 <= 32);
+      size_t sh = use_reg ? 0 :
+        (size_t)wpb * f2 * sizeof(scalar_t) +
+        (size_t)wpb * (size_t)f1 * f2 * sizeof(scalar_t);
+      size_t def_sh = prop.sharedMemPerBlock;
+      size_t max_sh = (prop.sharedMemPerBlockOptin > def_sh) ? prop.sharedMemPerBlockOptin : def_sh;
+      while (!use_reg && sh > max_sh && blk > 32) {
+        blk -= 32; wpb = blk / 32;
+        sh = (size_t)wpb * f2 * sizeof(scalar_t) +
+             (size_t)wpb * (size_t)f1 * f2 * sizeof(scalar_t);
+      }
+      if (wpb == 0) { blk = 32; wpb = 1;
+        sh = use_reg ? 0 : (size_t)f2 * sizeof(scalar_t) + (size_t)f1 * f2 * sizeof(scalar_t); }
+      if (sh > max_sh) sh = max_sh;
+      if (sh > def_sh && prop.sharedMemPerBlockOptin > def_sh)
+        cudaCheckError(cudaFuncSetAttribute(kernel_ttmc3_dynamic_tasks,
+          cudaFuncAttributeMaxDynamicSharedMemorySize, (int)std::min(sh, max_sh)));
+      else
+        cudaCheckError(cudaFuncSetAttribute(kernel_ttmc3_dynamic_tasks,
+          cudaFuncAttributeMaxDynamicSharedMemorySize, (int)def_sh));
+      if (!cache.host_tasks.empty()) {
+        cudaCheckError(cudaMalloc(&cache.d_tasks, cache.host_tasks.size() * sizeof(TaskRange)));
+        cudaCheckError(cudaMemcpy(cache.d_tasks, cache.host_tasks.data(),
+          cache.host_tasks.size() * sizeof(TaskRange), cudaMemcpyHostToDevice));
+      }
+      cache.d_block_size = blk;
+      cache.d_grid_size  = std::max(prop.multiProcessorCount * grid_factor, 1);
+      cache.d_shared_mem = sh;
+    }
+  }
+  else if (order == 4 && ncm == 0) {
+    bool force_dyn   = getEnvFlag("TTMC_FORCE_DYNAMIC");
+    bool force_tiny  = getEnvFlag("TTMC_FORCE_TINY_STREAMS");
+    bool dis_tiny    = getEnvFlag("TTMC_DISABLE_TINY_STREAMS");
+    FiberStats stats = analyzeFiberStats(mode_ptrs[1], mode_ptrs[2], num_i);
+    double avg_k = stats.avg_k_per_j;
+    uint64_t max_dim = 0;
+    for (int d = 0; d < order; ++d) max_dim = std::max(max_dim, dimensions[d]);
+    uint64_t total_nnz = size_mode_idx[order - 1];
+    int td = std::max(1, getEnvInt("TTMC_TINY4D_MAX_DIM",      500000));
+    int tn = std::max(1, getEnvInt("TTMC_TINY4D_MAX_NNZ",    60000000));
+    int ta = std::max(1, getEnvInt("TTMC_TINY4D_MAX_AVG_K",       64));
+    int sd = std::max(1, getEnvInt("TTMC_TINY4D_SMALL_DIM",    20000));
+    int sn = std::max(1, getEnvInt("TTMC_TINY4D_SMALL_NNZ", 10000000));
+    bool prefer_tiny = false;
+    if (idx_C >= 0) {
+      if (force_tiny) prefer_tiny = true;
+      else if (!force_dyn && !dis_tiny) {
+        bool under_dim = max_dim   <= (uint64_t)td;
+        bool under_nnz = total_nnz <= (uint64_t)tn;
+        bool under_avg = avg_k     <= (double)ta;
+        bool very_small= max_dim   <= (uint64_t)sd && total_nnz <= (uint64_t)sn;
+        prefer_tiny = under_dim && under_nnz && (under_avg || very_small);
+      }
+    }
+    cache.prefer_tiny_streams = prefer_tiny;
+    if (prefer_tiny) {
+      int def_s = (int)std::min(num_i, (uint64_t)32);
+      if (def_s <= 0) def_s = 1;
+      cache.tiny_stream_count = getEnvInt("TTMC_TINY4D_NUM_STREAMS", def_s);
+      if (cache.tiny_stream_count <= 0) cache.tiny_stream_count = def_s;
+    } else {
+      DynamicHints hints = chooseDynamicHints(avg_k, force_dyn);
+      buildDynamicTaskRanges(mode_ptrs[1], mode_ptrs[2], num_i,
+                             hints.base_tile, hints.k_tile,
+                             cache.host_tasks, computeTaskReserveHint(size_mode_idx[1]));
+      int blk = hints.dynamic_block_hint, wpb = blk / 32;
+      size_t sh = (size_t)wpb * ((size_t)f2 * f3 + f2) * sizeof(scalar_t);
+      size_t def_sh = prop.sharedMemPerBlock;
+      size_t max_sh = (prop.sharedMemPerBlockOptin > def_sh) ? prop.sharedMemPerBlockOptin : def_sh;
+      while (sh > max_sh && blk > 32) {
+        blk -= 32; wpb = blk / 32;
+        sh = (size_t)wpb * ((size_t)f2 * f3 + f2) * sizeof(scalar_t);
+      }
+      if (wpb == 0) { blk = 32; wpb = 1;
+        sh = (size_t)wpb * ((size_t)f2 * f3 + f2) * sizeof(scalar_t); }
+      if (sh > max_sh) sh = max_sh;
+      cudaCheckError(cudaFuncSetAttribute(kernel_ttmc4_dynamic_tasks,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, (int)std::min(sh, max_sh)));
+      if (!cache.host_tasks.empty()) {
+        cudaCheckError(cudaMalloc(&cache.d_tasks, cache.host_tasks.size() * sizeof(TaskRange)));
+        cudaCheckError(cudaMemcpy(cache.d_tasks, cache.host_tasks.data(),
+          cache.host_tasks.size() * sizeof(TaskRange), cudaMemcpyHostToDevice));
+      }
+      cache.d_block_size = blk;
+      cache.d_grid_size  = std::max(prop.multiProcessorCount * hints.grid_factor_hint, 1);
+      cache.d_shared_mem = sh;
+    }
+  }
+  cache.initialized = true;
+}
+
 __global__ void kernel_ttmc3_static_block_per_i(
   const uint64_t* __restrict__ mode_0_idx,
   const uint64_t* __restrict__ mode_1_ptr, const uint64_t* __restrict__ mode_1_idx,
@@ -425,7 +665,7 @@ __global__ void kernel_ttmc3_dynamic_tasks(
       uint64_t i = mode_0_idx[i_ptr];
       scalar_t* out_base = arr_O + (i * (uint64_t)f1 * f2);
 
-      scalar_t accum_local[64];
+      scalar_t accum_local[64]; //allocated in global memory?
       if (lane < f2) {
 #pragma unroll
         for (uint32_t r = 0; r < f1; ++r) {
@@ -844,13 +1084,13 @@ __global__ void kernel_ttmc4_tiny_stream(
 }
 
 static double launch_ttmc4_tiny_streams_flat(
-  uint64_t** mode_ptrs, uint64_t** mode_idxs,
-  const scalar_t* values,
-  scalar_t** factor_matrices, const uint64_t* factor_sizes,
+  uint64_t** mode_ptrs, uint64_t** mode_idxs,   // HOST: for launch loop + d_meta_data
+  const scalar_t* d_values,                      // GPU: pre-uploaded values
+  scalar_t** d_factor_mats,                      // GPU: pre-uploaded factor matrices
+  const uint64_t* factor_sizes,
   scalar_t* d_arr_O,
   int ncm, uint64_t* ranks, int order,
   const uint64_t size_mode_ptr[], const uint64_t size_mode_idx[],
-  const uint64_t* dimensions,
   int stream_hint)
 {
   uint64_t num_i = size_mode_ptr[1] - 1;
@@ -893,9 +1133,9 @@ static double launch_ttmc4_tiny_streams_flat(
   for (int i = 0; i < order; ++i) {
     if (i == ncm) continue;
     cudaCheckError(cudaMemcpy(d_factor_matrices + fact_size,
-                              factor_matrices[i],
+                              d_factor_mats[i],
                               sizeof(scalar_t) * factor_sizes[i],
-                              cudaMemcpyHostToDevice));
+                              cudaMemcpyDeviceToDevice));
     fact_size += factor_sizes[i];
   }
 
@@ -930,7 +1170,7 @@ static double launch_ttmc4_tiny_streams_flat(
     uint64_t i = mode_idxs[0][i_ptr];
     cudaStream_t stream = streams[i_ptr % desired_streams];
     kernel_ttmc4_tiny_stream<<<gridDim, blockDim, sharedMemBytes, stream>>>(
-      d_meta_data, values,
+      d_meta_data, d_values,
       d_factor_matrices, d_fact_ofst,
       d_arr_O, d_ranks, ncm, order,
       begin, i
@@ -953,416 +1193,114 @@ static double launch_ttmc4_tiny_streams_flat(
   return static_cast<double>(duration) / 1000.0;
 }
 
+// All tensor and factor data must already be on GPU before calling.
+// Result is written to d_arr_O (GPU) and stays there — caller copies to HOST as needed.
 void run_ttmc_cuda(
-  uint64_t** mode_ptrs, uint64_t** mode_idxs, scalar_t* values,
-  scalar_t** factor_matrices, uint64_t* factor_sizes,
-  scalar_t* arr_O, uint64_t arr_O_size, int ncm,
+  uint64_t** d_mode_ptrs,    // GPU: CSFCopy.d_ptrs.data() — pre-uploaded ptr arrays
+  uint64_t** d_mode_idxs,    // GPU: CSFCopy.d_idxs.data() — pre-uploaded idx arrays
+  scalar_t*  d_values,       // GPU: CSFCopy.d_values — pre-uploaded values
+  scalar_t** d_factor_mats,  // GPU: CSF-level indexed factor matrices (null at ncm level)
+  scalar_t*  d_arr_O,        // GPU: pre-allocated output buffer (zeroed here)
+  uint64_t   arr_O_size,
+  int ncm,
   uint64_t* ranks, int order,
-  uint64_t size_mode_ptr[], uint64_t size_mode_idx[], uint64_t* dimensions)
-  {
-    uint64_t total_values = size_mode_idx[order - 1];
-    std::vector<int> other_modes;
-    other_modes.reserve(order - 1);
-    for (int mode = 0; mode < order; ++mode) {
-      if (mode != ncm) {
-        other_modes.push_back(mode);
-      }
-    }
-    if (other_modes.size() < 2) {
-      throw std::runtime_error("Tensor order too small for contraction");
-    }
-    int idx_A = other_modes[0];
-    int idx_B = other_modes[1];
-    int idx_C = (other_modes.size() > 2) ? other_modes[2] : -1;
-    int f1 = ranks[idx_A];
-    int f2 = ranks[idx_B];
-    int f3 = (idx_C >= 0) ? ranks[idx_C] : 0;
+  TTMcCache& cache)
+{
+  std::vector<int> other_modes;
+  other_modes.reserve(order - 1);
+  for (int mode = 0; mode < order; ++mode)
+    if (mode != ncm) other_modes.push_back(mode);
+  if (other_modes.size() < 2)
+    throw std::runtime_error("Tensor order too small for contraction");
+  int idx_A = other_modes[0];
+  int idx_B = other_modes[1];
+  int idx_C = (other_modes.size() > 2) ? other_modes[2] : -1;
+  int f1 = (int)ranks[idx_A];
+  int f2 = (int)ranks[idx_B];
+  int f3 = (idx_C >= 0) ? (int)ranks[idx_C] : 0;
 
-    // Allocate device memory
-    uint64_t *d_mode_0_idx, *d_mode_1_ptr;
-    uint64_t *d_mode_1_idx, *d_mode_2_ptr, *d_mode_2_idx;
-    uint64_t *d_mode_3_ptr = nullptr, *d_mode_3_idx = nullptr;
-    scalar_t *d_values, *d_arr_A, *d_arr_B, *d_arr_C = nullptr, *d_arr_O;
+  cudaCheckError(cudaMemset(d_arr_O, 0, sizeof(scalar_t) * arr_O_size));
 
-    cudaMalloc(&d_mode_0_idx, sizeof(uint64_t) * size_mode_idx[0]);
-    cudaMalloc(&d_mode_1_ptr, sizeof(uint64_t) * size_mode_ptr[1]);
-    cudaMalloc(&d_mode_1_idx, sizeof(uint64_t) * size_mode_idx[1]);
-    cudaMalloc(&d_mode_2_ptr, sizeof(uint64_t) * size_mode_ptr[2]);
-    cudaMalloc(&d_mode_2_idx, sizeof(uint64_t) * size_mode_idx[2]);
-    if (order >= 4) {
-      cudaMalloc(&d_mode_3_ptr, sizeof(uint64_t) * size_mode_ptr[3]);
-      cudaMalloc(&d_mode_3_idx, sizeof(uint64_t) * size_mode_idx[3]);
-    }
-    cudaMalloc(&d_values, sizeof(scalar_t) * total_values);
-    cudaMalloc(&d_arr_A, sizeof(scalar_t) * factor_sizes[idx_A]);
-    cudaMalloc(&d_arr_B, sizeof(scalar_t) * factor_sizes[idx_B]);
-    if (idx_C >= 0) {
-      cudaMalloc(&d_arr_C, sizeof(scalar_t) * factor_sizes[idx_C]);
-    }
-    cudaMalloc(&d_arr_O, sizeof(scalar_t) * arr_O_size);
-
-    // Copy data to device
-    cudaMemcpy(d_mode_0_idx, mode_idxs[0], sizeof(uint64_t) * size_mode_idx[0], cudaMemcpyHostToDevice);
-    cudaMemcpy(d_mode_1_ptr, mode_ptrs[1], sizeof(uint64_t) * size_mode_ptr[1], cudaMemcpyHostToDevice);
-    cudaMemcpy(d_mode_1_idx, mode_idxs[1], sizeof(uint64_t) * size_mode_idx[1], cudaMemcpyHostToDevice);
-    cudaMemcpy(d_mode_2_ptr, mode_ptrs[2], sizeof(uint64_t) * size_mode_ptr[2], cudaMemcpyHostToDevice);
-    cudaMemcpy(d_mode_2_idx, mode_idxs[2], sizeof(uint64_t) * size_mode_idx[2], cudaMemcpyHostToDevice);
-    if (order >= 4) {
-      cudaMemcpy(d_mode_3_ptr, mode_ptrs[3], sizeof(uint64_t) * size_mode_ptr[3], cudaMemcpyHostToDevice);
-      cudaMemcpy(d_mode_3_idx, mode_idxs[3], sizeof(uint64_t) * size_mode_idx[3], cudaMemcpyHostToDevice);
-    }
-    cudaMemcpy(d_values, values, sizeof(scalar_t) * total_values, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_arr_A, factor_matrices[idx_A], sizeof(scalar_t) * factor_sizes[idx_A], cudaMemcpyHostToDevice);
-    cudaMemcpy(d_arr_B, factor_matrices[idx_B], sizeof(scalar_t) * factor_sizes[idx_B], cudaMemcpyHostToDevice);
-    if (idx_C >= 0) {
-      cudaMemcpy(d_arr_C, factor_matrices[idx_C], sizeof(scalar_t) * factor_sizes[idx_C], cudaMemcpyHostToDevice);
-    }
-    cudaMemset(d_arr_O, 0, sizeof(scalar_t) * arr_O_size);
-
-
-    switch (ncm) {
-      case 0: {
+  switch (ncm) {
+    case 0: {
       if (order == 3) {
-        bool force_static = getEnvFlag("TTMC_FORCE_STATIC");
-        bool force_dynamic = getEnvFlag("TTMC_FORCE_DYNAMIC");
-        bool analyze = getEnvFlag("TTMC_ANALYZE");
-
-        uint64_t num_i = size_mode_ptr[1] - 1;
-        FiberStats stats = analyzeFiberStats(mode_ptrs[1], mode_ptrs[2], num_i);
-        if (analyze) {
-          std::cout << "TTMC_ANALYZE: k_per_j min=" << stats.min_k_per_j
-                    << " max=" << stats.max_k_per_j
-                    << " avg=" << stats.avg_k_per_j
-                    << std::endl;
-        }
-        DynamicHints hints = chooseDynamicHints(stats.avg_k_per_j, force_dynamic);
-        uint64_t base_tile = hints.base_tile;
-        uint64_t k_tile = hints.k_tile;
-        int dynamic_block_hint = hints.dynamic_block_hint;
-        int grid_factor_hint = hints.grid_factor_hint;
-
-        bool ultra_tiny_k = (stats.max_k_per_j <= 5 && stats.avg_k_per_j <= 1.10);
-        bool long_tail_sparse =
-          (stats.avg_k_per_j <= 12.0 &&
-           stats.max_k_per_j >= 15000 &&
-           dimensions[0] <= 700000);
-        bool medium_fiber_dynamic_tuned =
-          (stats.avg_k_per_j >= 300.0 &&
-           stats.avg_k_per_j <= 1500.0 &&
-           stats.max_k_per_j <= 2000 &&
-           num_i <= 512);
-
-        if (!force_dynamic && !force_static && medium_fiber_dynamic_tuned) {
-          if (k_tile < 512) k_tile = 512;
-          dynamic_block_hint = 128;
-          if (grid_factor_hint < 12) grid_factor_hint = 12;
-          base_tile = 64;
-        }
-
-        bool prefer_static = force_static || (!force_dynamic && (ultra_tiny_k || long_tail_sparse));
-        if (f1 > 64) prefer_static = false;
-
-        int device_id = 0;
-        cudaCheckError(cudaGetDevice(&device_id));
-        cudaDeviceProp prop{};
-        cudaCheckError(cudaGetDeviceProperties(&prop, device_id));
-
-        if (prefer_static)
-        {
-          int default_block = (ultra_tiny_k || long_tail_sparse) ? 768 : 1024;
-          int block_size = getEnvInt("TTMC_BLOCK_PER_I_BLOCK", default_block);
-          if (block_size < 32) block_size = 32;
-          block_size = (block_size / 32) * 32;
-          if (block_size == 0) block_size = 32;
-          int num_warps = block_size / 32;
-          if (num_warps <= 0) num_warps = 1;
-          size_t sharedMemBytes =
-            static_cast<size_t>(num_warps) * f2 * sizeof(scalar_t) +
-            static_cast<size_t>(f1) * f2 * sizeof(scalar_t);
-          int grid_size = static_cast<int>(size_mode_idx[0]);
-
+        if (cache.prefer_static) {
           auto start = std::chrono::high_resolution_clock::now();
-          kernel_ttmc3_static_block_per_i<<<grid_size, block_size, sharedMemBytes>>>(
-            d_mode_0_idx,
-            d_mode_1_ptr, d_mode_1_idx,
-            d_mode_2_ptr, d_mode_2_idx,
-            d_values, d_arr_A, d_arr_B, d_arr_O,
-            f1, f2, num_warps
-          );
+          kernel_ttmc3_static_block_per_i<<<cache.s_grid_size, cache.s_block_size, cache.s_shared_mem>>>(
+            d_mode_idxs[0],
+            d_mode_ptrs[1], d_mode_idxs[1],
+            d_mode_ptrs[2], d_mode_idxs[2],
+            d_values, d_factor_mats[idx_A], d_factor_mats[idx_B], d_arr_O,
+            f1, f2, cache.s_num_warps);
           cudaCheckError(cudaGetLastError());
           cudaCheckError(cudaDeviceSynchronize());
           auto end = std::chrono::high_resolution_clock::now();
-          auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-          cout << "Method: kernel_ttmc3_static_block_per_i, Time: " << duration / 1000.0 << " ms" << endl;
-        }
-        else {
-          std::vector<TaskRange> host_tasks;
-          size_t reserve_hint = computeTaskReserveHint(size_mode_idx[1]);
-          buildDynamicTaskRanges(mode_ptrs[1], mode_ptrs[2], num_i, base_tile, k_tile, host_tasks, reserve_hint);
-
-          if (std::getenv("TTMC_DEBUG_TASKS")) {
-            std::cout << "Generated GPU tasks: " << host_tasks.size() << std::endl;
-          }
-
-          TaskRange* d_tasks = nullptr;
-          unsigned long long* d_task_counter = nullptr;
-          allocateTaskBuffers(host_tasks, &d_tasks, &d_task_counter);
-
-          int block_size = dynamic_block_hint;
-          const int warp_size = 32;
-          int warps_per_block = block_size / warp_size;
-          const bool use_register_accum = (f1 <= 64 && f2 <= warp_size);
-          size_t sharedMemBytes = 0;
-          if (!use_register_accum) {
-            sharedMemBytes = (size_t)warps_per_block * f2 * sizeof(scalar_t) + (size_t)warps_per_block * f1 * f2 * sizeof(scalar_t);
-          }
-          const size_t default_shared = prop.sharedMemPerBlock;
-          size_t max_shared = default_shared;
-          if (prop.sharedMemPerBlockOptin > default_shared) {
-            max_shared = prop.sharedMemPerBlockOptin;
-          }
-          while (!use_register_accum && sharedMemBytes > max_shared && block_size > warp_size) {
-            block_size -= warp_size;
-            warps_per_block = block_size / warp_size;
-            sharedMemBytes = (size_t)warps_per_block * f2 * sizeof(scalar_t) + (size_t)warps_per_block * f1 * f2 * sizeof(scalar_t);
-          }
-          if (warps_per_block == 0) {
-            block_size = warp_size;
-            warps_per_block = 1;
-            if (!use_register_accum) {
-              sharedMemBytes = (size_t)warps_per_block * f2 * sizeof(scalar_t) + (size_t)warps_per_block * f1 * f2 * sizeof(scalar_t);
-            }
-            else {
-              sharedMemBytes = 0;
-            }
-          }
-          if (sharedMemBytes > max_shared) {
-            sharedMemBytes = max_shared;
-          }
-          if (sharedMemBytes > default_shared && prop.sharedMemPerBlockOptin > default_shared) {
-            int requested = static_cast<int>(std::min(sharedMemBytes, max_shared));
-            cudaCheckError(cudaFuncSetAttribute(
-              kernel_ttmc3_dynamic_tasks,
-              cudaFuncAttributeMaxDynamicSharedMemorySize,
-              requested));
-          }
-          else {
-            cudaCheckError(cudaFuncSetAttribute(
-              kernel_ttmc3_dynamic_tasks,
-              cudaFuncAttributeMaxDynamicSharedMemorySize,
-              static_cast<int>(default_shared)));
-          }
-          int grid_size = std::max(prop.multiProcessorCount * grid_factor_hint, 1);
-
-          if (std::getenv("TTMC_DEBUG_LAUNCH")) {
-            std::cout << "TTMC_DEBUG_LAUNCH: grid=" << grid_size
-                      << " block=" << block_size
-                      << " shared=" << sharedMemBytes
-                      << " tasks=" << host_tasks.size()
-                      << std::endl;
-          }
-
+          cout << "Method: kernel_ttmc3_static_block_per_i, Time: "
+               << std::chrono::duration_cast<std::chrono::microseconds>(end-start).count() / 1000.0
+               << " ms" << endl;
+        } else {
+          cudaCheckError(cudaMemset(cache.d_task_counter, 0, sizeof(unsigned long long)));
           auto start = std::chrono::high_resolution_clock::now();
-          if (!host_tasks.empty()) {
-            kernel_ttmc3_dynamic_tasks<<<grid_size, block_size, sharedMemBytes>>>(
-              d_mode_0_idx,
-              d_mode_1_ptr, d_mode_1_idx,
-              d_mode_2_ptr, d_mode_2_idx,
-              d_values, d_arr_A, d_arr_B, d_arr_O, f1, f2,
-              d_tasks, static_cast<uint64_t>(host_tasks.size()), d_task_counter
-            );
+          if (!cache.host_tasks.empty()) {
+            kernel_ttmc3_dynamic_tasks<<<cache.d_grid_size, cache.d_block_size, cache.d_shared_mem>>>(
+              d_mode_idxs[0],
+              d_mode_ptrs[1], d_mode_idxs[1],
+              d_mode_ptrs[2], d_mode_idxs[2],
+              d_values, d_factor_mats[idx_A], d_factor_mats[idx_B], d_arr_O, f1, f2,
+              cache.d_tasks, (uint64_t)cache.host_tasks.size(), cache.d_task_counter);
           }
           cudaCheckError(cudaGetLastError());
           cudaCheckError(cudaDeviceSynchronize());
           auto end = std::chrono::high_resolution_clock::now();
-          auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-          cout << "Method: kernel_ttmc3_dynamic_tasks, Time: " << duration / 1000.0 << " ms" << endl;
-
-          freeTaskBuffers(d_tasks, d_task_counter);
+          cout << "Method: kernel_ttmc3_dynamic_tasks, Time: "
+               << std::chrono::duration_cast<std::chrono::microseconds>(end-start).count() / 1000.0
+               << " ms" << endl;
         }
       }
       else if (order == 4) {
-        bool force_dynamic = getEnvFlag("TTMC_FORCE_DYNAMIC");
-        bool analyze = getEnvFlag("TTMC_ANALYZE");
-
-        uint64_t num_i = size_mode_ptr[1] - 1;
-        FiberStats stats = analyzeFiberStats(mode_ptrs[1], mode_ptrs[2], num_i);
-        double avg_k_per_j = stats.avg_k_per_j;
-        uint64_t max_dim = 0;
-        for (int dim = 0; dim < order; ++dim) {
-          max_dim = std::max<uint64_t>(max_dim, dimensions[dim]);
-        }
-
-        bool force_tiny_streams = getEnvFlag("TTMC_FORCE_TINY_STREAMS");
-        bool disable_tiny_streams = getEnvFlag("TTMC_DISABLE_TINY_STREAMS");
-        bool debug_tiny = getEnvFlag("TTMC_DEBUG_TINY4D");
-        int tiny_dim_env = getEnvInt("TTMC_TINY4D_MAX_DIM", 500000);
-        if (tiny_dim_env <= 0) tiny_dim_env = 500000;
-        int tiny_nnz_env = getEnvInt("TTMC_TINY4D_MAX_NNZ", 60000000);
-        if (tiny_nnz_env <= 0) tiny_nnz_env = 60000000;
-        int tiny_avg_env = getEnvInt("TTMC_TINY4D_MAX_AVG_K", 64);
-        if (tiny_avg_env <= 0) tiny_avg_env = 64;
-        int tiny_small_dim_env = getEnvInt("TTMC_TINY4D_SMALL_DIM", 20000);
-        if (tiny_small_dim_env <= 0) tiny_small_dim_env = 20000;
-        int tiny_small_nnz_env = getEnvInt("TTMC_TINY4D_SMALL_NNZ", 10000000);
-        if (tiny_small_nnz_env <= 0) tiny_small_nnz_env = 10000000;
-
-        bool prefer_tiny_streams = false;
-        if (idx_C >= 0 && d_mode_3_ptr != nullptr && d_arr_C != nullptr) {
-          if (force_tiny_streams) {
-            prefer_tiny_streams = true;
-          }
-          else if (!force_dynamic && !disable_tiny_streams) {
-            bool under_dim = max_dim <= static_cast<uint64_t>(tiny_dim_env);
-            bool under_nnz = total_values <= static_cast<uint64_t>(tiny_nnz_env);
-            bool under_avg = avg_k_per_j <= static_cast<double>(tiny_avg_env);
-            bool very_small = max_dim <= static_cast<uint64_t>(tiny_small_dim_env) &&
-                              total_values <= static_cast<uint64_t>(tiny_small_nnz_env);
-            prefer_tiny_streams = under_dim && under_nnz && (under_avg || very_small);
-          }
-        }
-
-        if (analyze) {
-          std::cout << "TTMC_ANALYZE: k_per_j min=" << stats.min_k_per_j
-                    << " max=" << stats.max_k_per_j
-                    << " avg=" << avg_k_per_j
-                    << std::endl;
-        }
-
-        if (debug_tiny) {
-          std::cout << "TTMC_DEBUG_TINY4D: avg_k=" << avg_k_per_j
-                    << " nnz=" << total_values
-                    << " max_dim=" << max_dim
-                    << " small_dim_th=" << tiny_small_dim_env
-                    << " small_nnz_th=" << tiny_small_nnz_env
-                    << " prefer=" << (prefer_tiny_streams ? "yes" : "no")
-                    << std::endl;
-        }
-
-        if (prefer_tiny_streams) {
-          int default_streams = static_cast<int>(std::min<uint64_t>(num_i, static_cast<uint64_t>(32)));
-          if (default_streams <= 0) default_streams = 1;
-          int stream_hint = getEnvInt("TTMC_TINY4D_NUM_STREAMS", default_streams);
-          if (stream_hint <= 0) stream_hint = default_streams;
+        if (cache.prefer_tiny_streams) {
+          // tiny_streams needs HOST mode data for its launch loop; use ptrs cached at prepare time.
           double duration_ms = launch_ttmc4_tiny_streams_flat(
-            mode_ptrs, mode_idxs,
+            cache.h_mode_ptrs.data(), cache.h_mode_idxs.data(),
             d_values,
-            factor_matrices, factor_sizes,
+            d_factor_mats, cache.factor_sizes.data(),
             d_arr_O,
             ncm, ranks, order,
-            size_mode_ptr, size_mode_idx,
-            dimensions,
-            stream_hint
-          );
-          cout << "Method: launch_ttmc4_tiny_streams_flat/kernel_ttmc4_tiny_stream, Time: " << duration_ms << " ms" << endl;
-        }
-        else {
-          DynamicHints hints = chooseDynamicHints(avg_k_per_j, force_dynamic);
-          uint64_t base_tile = hints.base_tile;
-          uint64_t k_tile = hints.k_tile;
-          int dynamic_block_hint = hints.dynamic_block_hint;
-          int grid_factor_hint = hints.grid_factor_hint;
-
-          int device_id = 0;
-          cudaCheckError(cudaGetDevice(&device_id));
-          cudaDeviceProp prop{};
-          cudaCheckError(cudaGetDeviceProperties(&prop, device_id));
-
-          std::vector<TaskRange> host_tasks;
-          size_t reserve_hint = computeTaskReserveHint(size_mode_idx[1]);
-          buildDynamicTaskRanges(mode_ptrs[1], mode_ptrs[2], num_i, base_tile, k_tile, host_tasks, reserve_hint);
-
-          if (std::getenv("TTMC_DEBUG_TASKS")) {
-            std::cout << "Generated GPU tasks (4D): " << host_tasks.size() << std::endl;
-          }
-
-          TaskRange* d_tasks = nullptr;
-          unsigned long long* d_task_counter = nullptr;
-          allocateTaskBuffers(host_tasks, &d_tasks, &d_task_counter);
-
-          int block_size = dynamic_block_hint;
-          const int warp_size = 32;
-          int warps_per_block = block_size / warp_size;
-          size_t sharedMemBytes = (size_t)warps_per_block * ((size_t)f2 * f3 + f2) * sizeof(scalar_t);
-          const size_t default_shared = prop.sharedMemPerBlock;
-          size_t max_shared = (prop.sharedMemPerBlockOptin > default_shared) ? prop.sharedMemPerBlockOptin : default_shared;
-
-          while (sharedMemBytes > max_shared && block_size > warp_size) {
-            block_size -= warp_size;
-            warps_per_block = block_size / warp_size;
-            sharedMemBytes = (size_t)warps_per_block * ((size_t)f2 * f3 + f2) * sizeof(scalar_t);
-          }
-          if (warps_per_block == 0) {
-            block_size = warp_size;
-            warps_per_block = 1;
-            sharedMemBytes = (size_t)warps_per_block * ((size_t)f2 * f3 + f2) * sizeof(scalar_t);
-          }
-          if (sharedMemBytes > max_shared) {
-            sharedMemBytes = max_shared;
-          }
-          cudaCheckError(cudaFuncSetAttribute(
-            kernel_ttmc4_dynamic_tasks,
-            cudaFuncAttributeMaxDynamicSharedMemorySize,
-            static_cast<int>(std::min(sharedMemBytes, max_shared))));
-
-          int grid_size = std::max(prop.multiProcessorCount * grid_factor_hint, 1);
-          if (std::getenv("TTMC_DEBUG_LAUNCH")) {
-            std::cout << "TTMC_DEBUG_LAUNCH_4D: grid=" << grid_size
-                      << " block=" << block_size
-                      << " shared=" << sharedMemBytes
-                      << " tasks=" << host_tasks.size()
-                      << std::endl;
-          }
-
+            cache.size_mode_ptr.data(), cache.size_mode_idx.data(),
+            cache.tiny_stream_count);
+          cout << "Method: launch_ttmc4_tiny_streams_flat/kernel_ttmc4_tiny_stream, Time: "
+               << duration_ms << " ms" << endl;
+        } else {
+          cudaCheckError(cudaMemset(cache.d_task_counter, 0, sizeof(unsigned long long)));
           auto start = std::chrono::high_resolution_clock::now();
-          if (!host_tasks.empty()) {
-            kernel_ttmc4_dynamic_tasks<<<grid_size, block_size, sharedMemBytes>>>(
-              d_mode_0_idx,
-              d_mode_1_ptr, d_mode_1_idx,
-              d_mode_2_ptr, d_mode_2_idx,
-              d_mode_3_ptr, d_mode_3_idx,
+          if (!cache.host_tasks.empty()) {
+            kernel_ttmc4_dynamic_tasks<<<cache.d_grid_size, cache.d_block_size, cache.d_shared_mem>>>(
+              d_mode_idxs[0],
+              d_mode_ptrs[1], d_mode_idxs[1],
+              d_mode_ptrs[2], d_mode_idxs[2],
+              d_mode_ptrs[3], d_mode_idxs[3],
               d_values,
-              d_arr_A, d_arr_B, d_arr_C,
+              d_factor_mats[idx_A], d_factor_mats[idx_B], d_factor_mats[idx_C],
               d_arr_O,
               f1, f2, f3,
-              d_tasks, static_cast<uint64_t>(host_tasks.size()), d_task_counter
-            );
+              cache.d_tasks, (uint64_t)cache.host_tasks.size(), cache.d_task_counter);
           }
           cudaCheckError(cudaGetLastError());
           cudaCheckError(cudaDeviceSynchronize());
           auto end = std::chrono::high_resolution_clock::now();
-          auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-          cout << "Method: kernel_ttmc4_dynamic_tasks, Time: " << duration / 1000.0 << " ms" << endl;
-
-          freeTaskBuffers(d_tasks, d_task_counter);
+          cout << "Method: kernel_ttmc4_dynamic_tasks, Time: "
+               << std::chrono::duration_cast<std::chrono::microseconds>(end-start).count() / 1000.0
+               << " ms" << endl;
         }
-        }
-        break;
       }
-      default:
-        throw std::runtime_error("Unsupported ncm in run_ttmc_cuda. Only ncm=0 is implemented.");
+      break;
     }
-
-
-    cudaDeviceSynchronize();
-    // Copy results back to host
-    cudaMemcpy(arr_O, d_arr_O, sizeof(scalar_t) * arr_O_size, cudaMemcpyDeviceToHost);
-
-    // Free device memory
-    cudaFree(d_mode_0_idx);
-    cudaFree(d_mode_1_ptr);
-    cudaFree(d_mode_1_idx);
-    cudaFree(d_mode_2_ptr);
-    cudaFree(d_mode_2_idx);
-    if (d_mode_3_ptr) cudaFree(d_mode_3_ptr);
-    if (d_mode_3_idx) cudaFree(d_mode_3_idx);
-    cudaFree(d_values);
-    cudaFree(d_arr_A);
-    cudaFree(d_arr_B);
-    if (d_arr_C) cudaFree(d_arr_C);
-    cudaFree(d_arr_O);
-
+    default:
+      throw std::runtime_error("Unsupported ncm in run_ttmc_cuda. Only ncm=0 is implemented.");
   }
+  cudaCheckError(cudaDeviceSynchronize());
+  // Result is in d_arr_O on GPU. No copies or frees here — all owned by caller.
+}
 // ===================================================================
 // (End of v4-Optimized TTMc Engine)
 // ===================================================================
@@ -1869,10 +1807,9 @@ struct CSFCopy {
   std::vector<std::vector<uint64_t>> idxs;
   std::vector<scalar_t> values;
 
-  uint64_t  *d_mode0_idx = nullptr;
-  uint64_t  *d_mode1_ptr = nullptr, *d_mode1_idx = nullptr;
-  uint64_t  *d_mode2_ptr = nullptr, *d_mode2_idx = nullptr;
-  scalar_t  *d_values    = nullptr;
+  std::vector<uint64_t*> d_ptrs;   // d_ptrs[l] = GPU ptr array for level l
+  std::vector<uint64_t*> d_idxs;   // d_idxs[l] = GPU idx array for level l
+  scalar_t  *d_values = nullptr;
 };
 
 CSFCopy buildCSFCopy(const COOTensor& coo, int rootMode,
@@ -1887,7 +1824,9 @@ CSFCopy buildCSFCopy(const COOTensor& coo, int rootMode,
 
   CSFCopy csf;
   csf.order = order;
-  csf.modeOrder = { rootMode, rest[0], rest[1] };
+  csf.modeOrder.clear();
+  csf.modeOrder.push_back(rootMode);
+  for (int r : rest) csf.modeOrder.push_back(r);
   csf.dims.resize(order);
   for (int l = 0; l < order; l++) csf.dims[l] = coo.dims[csf.modeOrder[l]];
 
@@ -1905,15 +1844,13 @@ CSFCopy buildCSFCopy(const COOTensor& coo, int rootMode,
   csf.ptrs.resize(order);
   csf.idxs.resize(order);
   csf.ptrs[0].push_back(0);
-  std::array<uint64_t, 3> prev = { UINT64_MAX, UINT64_MAX, UINT64_MAX };
+  std::vector<uint64_t> prev(order, UINT64_MAX);
 
   for (size_t pi = 0; pi < nnz; pi++) {
     size_t ei = perm[pi];
-    std::array<uint64_t, 3> cur = {
-      coo.indices[ei][csf.modeOrder[0]],
-      coo.indices[ei][csf.modeOrder[1]],
-      coo.indices[ei][csf.modeOrder[2]]
-    };
+    std::vector<uint64_t> cur(order);
+    for (int l = 0; l < order; l++)
+      cur[l] = coo.indices[ei][csf.modeOrder[l]];
     bool changed = false;
     for (int l = 0; l < order; l++) {
       if (cur[l] != prev[l] || changed) {
@@ -1930,33 +1867,33 @@ CSFCopy buildCSFCopy(const COOTensor& coo, int rootMode,
 }
 
 void uploadCSFToGPU(CSFCopy& csf) {
-  CHECK_CUDA(cudaMalloc(&csf.d_mode0_idx, sizeof(uint64_t) * csf.idxs[0].size()));
-  CHECK_CUDA(cudaMalloc(&csf.d_mode1_ptr, sizeof(uint64_t) * csf.ptrs[1].size()));
-  CHECK_CUDA(cudaMalloc(&csf.d_mode1_idx, sizeof(uint64_t) * csf.idxs[1].size()));
-  CHECK_CUDA(cudaMalloc(&csf.d_mode2_ptr, sizeof(uint64_t) * csf.ptrs[2].size()));
-  CHECK_CUDA(cudaMalloc(&csf.d_mode2_idx, sizeof(uint64_t) * csf.idxs[2].size()));
-  CHECK_CUDA(cudaMalloc(&csf.d_values,    sizeof(scalar_t) * csf.values.size()));
-  CHECK_CUDA(cudaMemcpy(csf.d_mode0_idx, csf.idxs[0].data(),
+  int order = csf.order;
+  csf.d_ptrs.assign(order, nullptr);
+  csf.d_idxs.assign(order, nullptr);
+  // Level 0: idx only (root has no meaningful ptr)
+  CHECK_CUDA(cudaMalloc(&csf.d_idxs[0], sizeof(uint64_t) * csf.idxs[0].size()));
+  CHECK_CUDA(cudaMemcpy(csf.d_idxs[0], csf.idxs[0].data(),
     sizeof(uint64_t) * csf.idxs[0].size(), cudaMemcpyHostToDevice));
-  CHECK_CUDA(cudaMemcpy(csf.d_mode1_ptr, csf.ptrs[1].data(),
-    sizeof(uint64_t) * csf.ptrs[1].size(), cudaMemcpyHostToDevice));
-  CHECK_CUDA(cudaMemcpy(csf.d_mode1_idx, csf.idxs[1].data(),
-    sizeof(uint64_t) * csf.idxs[1].size(), cudaMemcpyHostToDevice));
-  CHECK_CUDA(cudaMemcpy(csf.d_mode2_ptr, csf.ptrs[2].data(),
-    sizeof(uint64_t) * csf.ptrs[2].size(), cudaMemcpyHostToDevice));
-  CHECK_CUDA(cudaMemcpy(csf.d_mode2_idx, csf.idxs[2].data(),
-    sizeof(uint64_t) * csf.idxs[2].size(), cudaMemcpyHostToDevice));
+  // Levels 1..order-1: ptr and idx
+  for (int l = 1; l < order; l++) {
+    CHECK_CUDA(cudaMalloc(&csf.d_ptrs[l], sizeof(uint64_t) * csf.ptrs[l].size()));
+    CHECK_CUDA(cudaMemcpy(csf.d_ptrs[l], csf.ptrs[l].data(),
+      sizeof(uint64_t) * csf.ptrs[l].size(), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMalloc(&csf.d_idxs[l], sizeof(uint64_t) * csf.idxs[l].size()));
+    CHECK_CUDA(cudaMemcpy(csf.d_idxs[l], csf.idxs[l].data(),
+      sizeof(uint64_t) * csf.idxs[l].size(), cudaMemcpyHostToDevice));
+  }
+  CHECK_CUDA(cudaMalloc(&csf.d_values, sizeof(scalar_t) * csf.values.size()));
   CHECK_CUDA(cudaMemcpy(csf.d_values, csf.values.data(),
     sizeof(scalar_t) * csf.values.size(), cudaMemcpyHostToDevice));
 }
 
 void freeCSFGPU(CSFCopy& csf) {
-  if (csf.d_mode0_idx) { CHECK_CUDA(cudaFree(csf.d_mode0_idx)); csf.d_mode0_idx = nullptr; }
-  if (csf.d_mode1_ptr) { CHECK_CUDA(cudaFree(csf.d_mode1_ptr)); csf.d_mode1_ptr = nullptr; }
-  if (csf.d_mode1_idx) { CHECK_CUDA(cudaFree(csf.d_mode1_idx)); csf.d_mode1_idx = nullptr; }
-  if (csf.d_mode2_ptr) { CHECK_CUDA(cudaFree(csf.d_mode2_ptr)); csf.d_mode2_ptr = nullptr; }
-  if (csf.d_mode2_idx) { CHECK_CUDA(cudaFree(csf.d_mode2_idx)); csf.d_mode2_idx = nullptr; }
-  if (csf.d_values)    { CHECK_CUDA(cudaFree(csf.d_values));    csf.d_values    = nullptr; }
+  for (auto& p : csf.d_ptrs) { if (p) { CHECK_CUDA(cudaFree(p)); p = nullptr; } }
+  for (auto& p : csf.d_idxs) { if (p) { CHECK_CUDA(cudaFree(p)); p = nullptr; } }
+  csf.d_ptrs.clear();
+  csf.d_idxs.clear();
+  if (csf.d_values) { CHECK_CUDA(cudaFree(csf.d_values)); csf.d_values = nullptr; }
 }
 
 
@@ -2024,7 +1961,7 @@ int main(int argc, char* argv[]) {
   bool check   = false;
   g_gpu_stats  = false;
   std::string tns_file;
-  std::vector<uint64_t> ranks = {10, 10, 10};
+  std::vector<uint64_t> ranks;
   int max_iters = 25;
   scalar_t tol = (scalar_t)1e-5;
 
@@ -2052,7 +1989,7 @@ int main(int argc, char* argv[]) {
          << "  -v, --verbose         Detailed per-step timing and SVD internals\n"
          << "  -c, --check           CPU reference TTMc in iter-0 (correctness check)\n"
          << "  -g, --gpu-stats       Print size of every GPU cudaMalloc allocation\n"
-         << "  -r, --ranks R0 R1 R2  Target ranks (default 10 10 10)\n"
+         << "  -r, --ranks R0 R1 ...  Target ranks, one per mode (default 10 per mode)\n"
          << "  -m, --max-iters N     Max HOOI iterations (default 25)\n"
          << "  -t, --tol T           Convergence tolerance on fit (default 1e-5)\n";
     return 1;
@@ -2063,61 +2000,65 @@ int main(int argc, char* argv[]) {
     // 1. Read COO tensor from .tns file
     // ===================================================================
     COOTensor coo = readCOOTensor(tns_file);
-    if (coo.order != 3) {
-      std::cerr << "Error: Tucker HOOI currently supports 3D tensors only (got order "
-                << coo.order << ")\n";
+    int order = coo.order;
+    if (order < 3 || order > 4) {
+      std::cerr << "Error: Tucker HOOI supports 3D and 4D tensors only (got order "
+                << order << ")\n";
       return 1;
     }
-    while (ranks.size() < 3) ranks.push_back(10);
+    while ((int)ranks.size() < order) ranks.push_back(10);
+    for (int i = 0; i < order; i++) ranks[i] = std::min(ranks[i], coo.dims[i]);
 
-    uint64_t I0 = coo.dims[0], I1 = coo.dims[1], I2 = coo.dims[2];
-    uint64_t R0 = std::min(ranks[0], I0);
-    uint64_t R1 = std::min(ranks[1], I1);
-    uint64_t R2 = std::min(ranks[2], I2);
-    ranks[0] = R0; ranks[1] = R1; ranks[2] = R2;
-
-    std::cout << "Tensor: " << I0 << " x " << I1 << " x " << I2
-              << "  nnz=" << coo.values.size()
-              << "  ranks=(" << R0 << "," << R1 << "," << R2 << ")\n";
+    std::cout << "Tensor:";
+    for (int i = 0; i < order; i++) std::cout << " " << coo.dims[i];
+    std::cout << "  nnz=" << coo.values.size() << "  ranks=(";
+    for (int i = 0; i < order; i++) { if (i) std::cout << ","; std::cout << ranks[i]; }
+    std::cout << ")\n";
 
     // ===================================================================
     // 2. Unique-index counts per mode (for CSF compression ordering)
     // ===================================================================
-    std::vector<size_t> uniqueCounts(3);
-    for (int m = 0; m < 3; m++) {
+    std::vector<size_t> uniqueCounts(order);
+    for (int m = 0; m < order; m++) {
       std::unordered_set<uint64_t> uniq;
       for (const auto& idx : coo.indices) uniq.insert(idx[m]);
       uniqueCounts[m] = uniq.size();
     }
-    if (verbose)
-      std::cout << "Unique indices per mode: "
-                << uniqueCounts[0] << ", " << uniqueCounts[1] << ", " << uniqueCounts[2] << "\n";
+    if (verbose) {
+      std::cout << "Unique indices per mode:";
+      for (int m = 0; m < order; m++) std::cout << " " << uniqueCounts[m];
+      std::cout << "\n";
+    }
 
     // ===================================================================
-    // 3. Build 3 CSF copies (mode n as root → used for TTMc-n)
+    // 3. Build `order` CSF copies (mode n as root → used for TTMc-n)
     // ===================================================================
-    std::vector<CSFCopy> csf_copies(3);
-    for (int n = 0; n < 3; n++) {
+    std::vector<CSFCopy> csf_copies(order);
+    for (int n = 0; n < order; n++) {
       csf_copies[n] = buildCSFCopy(coo, n, uniqueCounts);
-      if (verbose)
-        std::cout << "CSF copy " << n << " (root=mode" << n << "): "
-                  << "levels=[" << csf_copies[n].modeOrder[0] << ","
-                  << csf_copies[n].modeOrder[1] << "," << csf_copies[n].modeOrder[2] << "]  "
-                  << "roots=" << csf_copies[n].idxs[0].size()
+      if (verbose) {
+        std::cout << "CSF copy " << n << " (root=mode" << n << "): levels=[";
+        for (int l = 0; l < order; l++) {
+          if (l) std::cout << ",";
+          std::cout << csf_copies[n].modeOrder[l];
+        }
+        std::cout << "]  roots=" << csf_copies[n].idxs[0].size()
                   << "  nnz=" << csf_copies[n].values.size() << "\n";
+      }
     }
 
     // ===================================================================
     // 4. Upload all CSF copies to GPU (persistent across iterations)
     // ===================================================================
-    for (int n = 0; n < 3; n++) uploadCSFToGPU(csf_copies[n]);
+    for (int n = 0; n < order; n++) uploadCSFToGPU(csf_copies[n]);
 
     // ===================================================================
     // 5. Allocate and initialize factor matrices on CPU (row-major)
     // ===================================================================
-    std::vector<scalar_t*> factors(3);
-    std::vector<uint64_t> factor_sizes = { I0*R0, I1*R1, I2*R2 };
-    for (int i = 0; i < 3; i++) {
+    std::vector<scalar_t*> factors(order);
+    std::vector<uint64_t> factor_sizes(order);
+    for (int i = 0; i < order; i++) {
+      factor_sizes[i] = coo.dims[i] * ranks[i];
       factors[i] = new scalar_t[factor_sizes[i]];
       init_factor_orthonormal(coo.dims[i], ranks[i], 42 + i, factors[i]);
     }
@@ -2128,22 +2069,22 @@ int main(int argc, char* argv[]) {
     CHECK_CUBLAS(cublasCreate(&cublasH));
 
     // Factor matrices on GPU — always kept row-major (same layout as CPU)
-    scalar_t* d_factors[3];
-    for (int i = 0; i < 3; i++) {
+    std::vector<scalar_t*> d_factors(order, nullptr);
+    for (int i = 0; i < order; i++) {
       CHECK_CUDA(cudaMalloc(&d_factors[i], sizeof(scalar_t) * factor_sizes[i]));
       CHECK_CUDA(cudaMemcpy(d_factors[i], factors[i],
         sizeof(scalar_t) * factor_sizes[i], cudaMemcpyHostToDevice));
     }
 
     // ===================================================================
-    // 6. Output buffer sizes: arr_O_size[n] = I_n * (R product excl. R_n)
+    // 6. Output buffer sizes: arr_O_size[n] = dims[n] * product(ranks for levels 1..order-1)
     // ===================================================================
-    uint64_t arr_O_sizes[3];
+    std::vector<uint64_t> arr_O_sizes(order);
     uint64_t max_arr_O_size = 0;
-    for (int n = 0; n < 3; n++) {
-      uint32_t f1 = static_cast<uint32_t>(ranks[csf_copies[n].modeOrder[1]]);
-      uint32_t f2 = static_cast<uint32_t>(ranks[csf_copies[n].modeOrder[2]]);
-      arr_O_sizes[n] = coo.dims[n] * f1 * f2;
+    for (int n = 0; n < order; n++) {
+      arr_O_sizes[n] = coo.dims[n];
+      for (int l = 1; l < order; l++)
+        arr_O_sizes[n] *= ranks[csf_copies[n].modeOrder[l]];
       if (arr_O_sizes[n] > max_arr_O_size) max_arr_O_size = arr_O_sizes[n];
     }
 
@@ -2152,12 +2093,38 @@ int main(int argc, char* argv[]) {
     scalar_t* arr_O_host = allocate_aligned_array(max_arr_O_size);
 
     // ===================================================================
-    // 7. HOOI loop
+    // 7. Prepare TTMc caches — once per CSF copy, before the HOOI loop.
+    //    Each cache stores HOOI-invariant preprocessing (task ranges, kernel
+    //    selection) so run_ttmc_cuda() can skip those on every iteration.
+    // ===================================================================
+    std::vector<TTMcCache> ttmc_caches(order);
+    for (int n = 0; n < order; n++) {
+      CSFCopy& csf = csf_copies[n];
+      std::vector<uint64_t*> ptrs_raw(order), idxs_raw(order);
+      std::vector<uint64_t>  size_ptr(order), size_idx(order);
+      std::vector<uint64_t>  ranks_v(order), dims_v(order), fsizes_v(order, 0);
+      for (int l = 0; l < order; l++) {
+        ptrs_raw[l] = csf.ptrs[l].data();
+        idxs_raw[l] = csf.idxs[l].data();
+        size_ptr[l] = (uint64_t)csf.ptrs[l].size();
+        size_idx[l] = (uint64_t)csf.idxs[l].size();
+        dims_v[l]   = coo.dims[csf.modeOrder[l]];
+        ranks_v[l]  = (l == 0) ? ranks[n] : ranks[csf.modeOrder[l]];
+        if (l > 0) fsizes_v[l] = factor_sizes[csf.modeOrder[l]];
+      }
+      prepare_ttmc_cuda(ptrs_raw.data(), idxs_raw.data(),
+                        size_ptr.data(), size_idx.data(),
+                        ranks_v.data(), fsizes_v.data(), dims_v.data(),
+                        /*ncm=*/0, order, ttmc_caches[n]);
+    }
+
+    // ===================================================================
+    // 8. HOOI loop
     // ===================================================================
     scalar_t prev_fit = (scalar_t)0;
     int iter;
-    double ttmc_time_us[3] = {0, 0, 0};
-    double svd_time_us[3]  = {0, 0, 0};
+    std::vector<double> ttmc_time_us(order, 0.0);
+    std::vector<double> svd_time_us(order, 0.0);
     scalar_t input_tsr_norm = std::sqrt(
       frobenius_norm_sq_sparse(coo.values.data(), coo.values.size()));
 
@@ -2167,53 +2134,31 @@ int main(int argc, char* argv[]) {
     auto total_start = std::chrono::high_resolution_clock::now();
 
     for (iter = 0; iter < max_iters; iter++) {
-      for (int n = 2; n >= 0; n--) {
+      for (int n = order - 1; n >= 0; n--) {
         uint64_t arr_O_size = arr_O_sizes[n];
-        // run_ttmc_cuda() zeroes its internal d_arr_O before the kernel.
-        // CHECK_CUDA(cudaMemset(d_arr_O, 0, sizeof(scalar_t) * arr_O_size));
-
-        // CSF copy n: mode n is root → ncm_0 outputs mode-n fibers in arr_O
         CSFCopy& csf = csf_copies[n];
-        int idx_A = csf.modeOrder[1];  // level-1 (middle) mode
-        int idx_B = csf.modeOrder[2];  // level-2 (leaf) mode
-        uint32_t f1 = static_cast<uint32_t>(ranks[idx_A]);
-        uint32_t f2 = static_cast<uint32_t>(ranks[idx_B]);
 
-        // --- GPU TTMc via run_ttmc_cuda (v4 engine) ---
-        // Map the hooi CSF copy to the format expected by run_ttmc_cuda:
-        //   ncm = 0  (CSF root = mode n, levels 1/2 are the two contracting modes)
-        //   mode_ptrs_v4[1] / mode_ptrs_v4[2] = CSF ptrs for level-1 / level-2
-        //   factor_matrices_v4[1] = factors[idx_A],  [2] = factors[idx_B]
-        //   ranks_v4[1] = f1,  ranks_v4[2] = f2
-        uint64_t* mode_ptrs_v4[3]  = { csf.ptrs[0].data(), csf.ptrs[1].data(), csf.ptrs[2].data() };
-        uint64_t* mode_idxs_v4[3]  = { csf.idxs[0].data(), csf.idxs[1].data(), csf.idxs[2].data() };
-        scalar_t* factor_mats_v4[3] = { nullptr,
-                                        factors[idx_A],
-                                        factors[idx_B] };
-        uint64_t  factor_sizes_v4[3]  = { 0, factor_sizes[idx_A], factor_sizes[idx_B] };
-        uint64_t  size_mode_ptr_v4[3] = { (uint64_t)csf.ptrs[0].size(),
-                                          (uint64_t)csf.ptrs[1].size(),
-                                          (uint64_t)csf.ptrs[2].size() };
-        uint64_t  size_mode_idx_v4[3] = { (uint64_t)csf.idxs[0].size(),
-                                          (uint64_t)csf.idxs[1].size(),
-                                          (uint64_t)csf.idxs[2].size() };
-        uint64_t  dims_v4[3]          = { coo.dims[n], coo.dims[idx_A], coo.dims[idx_B] };
-        // ranks_v4: run_ttmc_cuda reads ranks[1] as f1 and ranks[2] as f2.
-        uint64_t  ranks_v4[3]         = { ranks[n], (uint64_t)f1, (uint64_t)f2 };
+        // CSF-level indexed ranks: level 0 = ncm rank, levels 1+ = contracting ranks.
+        std::vector<uint64_t>  ranks_v(order);
+        for (int l = 0; l < order; l++)
+          ranks_v[l] = (l == 0) ? ranks[n] : ranks[csf.modeOrder[l]];
+
+        // GPU factor matrices in CSF-level order (null at level 0 = ncm).
+        std::vector<scalar_t*> d_factor_mats_v(order, nullptr);
+        for (int l = 1; l < order; l++)
+          d_factor_mats_v[l] = d_factors[csf.modeOrder[l]];
 
         auto ttmc_start = std::chrono::high_resolution_clock::now();
+        // All tensor/factor data already on GPU; result goes into d_arr_O on GPU.
         run_ttmc_cuda(
-          mode_ptrs_v4, mode_idxs_v4,
-          csf.values.data(),
-          factor_mats_v4, factor_sizes_v4,
-          arr_O_host, arr_O_size, /*ncm=*/0,
-          ranks_v4, /*order=*/3,
-          size_mode_ptr_v4, size_mode_idx_v4, dims_v4
-        );
-        // run_ttmc_cuda() synchronizes internally and has already written
-        // the result to arr_O_host.  Upload to d_arr_O for the convergence GEMM.
-        CHECK_CUDA(cudaMemcpy(d_arr_O, arr_O_host,
-          sizeof(scalar_t) * arr_O_size, cudaMemcpyHostToDevice));
+          csf.d_ptrs.data(), csf.d_idxs.data(), csf.d_values,
+          d_factor_mats_v.data(),
+          d_arr_O, arr_O_size, /*ncm=*/0,
+          ranks_v.data(), order,
+          ttmc_caches[n]);
+        // Copy GPU result to HOST — needed for SVD (row→col-major conversion).
+        CHECK_CUDA(cudaMemcpy(arr_O_host, d_arr_O,
+          sizeof(scalar_t) * arr_O_size, cudaMemcpyDeviceToHost));
         auto ttmc_end = std::chrono::high_resolution_clock::now();
         double ttmc_us = std::chrono::duration_cast<std::chrono::microseconds>(
           ttmc_end - ttmc_start).count();
@@ -2221,19 +2166,20 @@ int main(int argc, char* argv[]) {
         if (verbose)
           std::cout << "[iter " << iter << " mode " << n << "] TTMc: " << ttmc_us << " us\n";
 
-        // arr_O_host already contains the TTMc result (written by run_ttmc_cuda).
-        // CHECK_CUDA(cudaMemcpy(arr_O_host, d_arr_O,
-        //   sizeof(scalar_t) * arr_O_size, cudaMemcpyDeviceToHost));
-
-        // --- Optional CPU verification (iter 0 only) ---
-        if (check && iter == 0) {
+        // --- Optional CPU verification (3D, iter 0 only) ---
+        if (check && iter == 0 && order == 3) {
+          int idx_A = csf.modeOrder[1];
+          int idx_B = csf.modeOrder[2];
+          uint32_t f1 = static_cast<uint32_t>(ranks[idx_A]);
+          uint32_t f2 = static_cast<uint32_t>(ranks[idx_B]);
           verify_ttmc(csf, factors[idx_A], factors[idx_B],
                       arr_O_host, coo.dims[n], f1, f2, n);
         }
 
-        // --- SVD: compute top-ranks[n] left singular vectors of TTMc output ---
+        // --- SVD: top-ranks[n] left singular vectors of TTMc output ---
         uint64_t M = coo.dims[n];
-        uint64_t N = (uint64_t)f1 * f2;
+        uint64_t N = 1;
+        for (int l = 1; l < order; l++) N *= ranks[csf.modeOrder[l]];
 
         // Row-major (M, N) → column-major (M, N) for cuSOLVER
         auto cm_start = std::chrono::high_resolution_clock::now();
@@ -2246,16 +2192,16 @@ int main(int argc, char* argv[]) {
                     << std::chrono::duration_cast<std::chrono::microseconds>(
                          std::chrono::high_resolution_clock::now() - cm_start).count() << " us\n";
 
-        scalar_t *d_mat;
+        scalar_t* d_mat;
         CHECK_CUDA(cudaMalloc(&d_mat, sizeof(scalar_t) * M * N));
         CHECK_CUDA(cudaMemcpy(d_mat, mat_colmajor.data(),
           sizeof(scalar_t) * M * N, cudaMemcpyHostToDevice));
 
         auto svd_start = std::chrono::high_resolution_clock::now();
-
         // gpu_truncated_svd_update_factor(cusolverH, cublasH, d_mat,
         //   static_cast<int>(M), static_cast<int>(N),
         //   static_cast<int>(ranks[n]), d_factors[n], verbose);
+
         gpu_full_svd_update_factor(cusolverH, cublasH, d_mat,
           static_cast<int>(M), static_cast<int>(N),
           static_cast<int>(ranks[n]), d_factors[n], verbose);
@@ -2266,45 +2212,42 @@ int main(int argc, char* argv[]) {
         if (verbose)
           std::cout << "  SVD: " << svd_us << " us\n";
 
-        // d_factors[n] is now col-major (M, R) — convert to row-major on CPU
+        // d_factors[n] col-major (M, R) → row-major on CPU
         std::vector<scalar_t> U_host(M * ranks[n]);
         CHECK_CUDA(cudaMemcpy(U_host.data(), d_factors[n],
           sizeof(scalar_t) * M * ranks[n], cudaMemcpyDeviceToHost));
         for (uint64_t r_idx = 0; r_idx < ranks[n]; r_idx++)
           for (uint64_t i_idx = 0; i_idx < M; i_idx++)
             factors[n][i_idx * ranks[n] + r_idx] = U_host[i_idx + r_idx * M];
-
-        // Upload row-major factor back to GPU so the kernel and the convergence GEMM
-        // always see consistent row-major layout (A[i,r] = d_factors[n][i*R+r])
         CHECK_CUDA(cudaMemcpy(d_factors[n], factors[n],
           sizeof(scalar_t) * factor_sizes[n], cudaMemcpyHostToDevice));
-
         CHECK_CUDA(cudaFree(d_mat));
-
       }
-      if(verbose)
+
+      // Per-iteration timing printout
+      if (verbose) {
         std::cout << "\n--- iter " << iter << " ---\n";
-        for (int n = 0; n < 3; n++) {
+        for (int n = 0; n < order; n++)
           std::cout << "  Mode-" << n << ": TTMc " << ttmc_time_us[n]
-                    << " us  SVD " << svd_time_us[n]  << " us\n";
-          ttmc_time_us[n] = 0;
-          svd_time_us[n] = 0;
-        }
+                    << " us  SVD " << svd_time_us[n] << " us\n";
+      }
+      for (int n = 0; n < order; n++) { ttmc_time_us[n] = 0; svd_time_us[n] = 0; }
 
       // Convergence: G = A0^T × Y_ncm0 where Y = d_arr_O (last n==0 TTMc output).
-      // d_factors[0] is row-major (I0, R0) = col-major (R0, I0) in cuBLAS convention.
-      // GEMM: G^T (N_rest, R0) = Y^T (N_rest, I0) × A0 (I0, R0)
-      uint32_t f1_0 = static_cast<uint32_t>(ranks[csf_copies[0].modeOrder[1]]);
-      uint32_t f2_0 = static_cast<uint32_t>(ranks[csf_copies[0].modeOrder[2]]);
-      uint64_t N_rest = (uint64_t)f1_0 * f2_0;
+      // N_rest = product(ranks for levels 1..order-1 of CSF copy 0).
+      uint64_t I0    = coo.dims[0];
+      uint64_t R0    = ranks[0];
+      uint64_t N_rest = 1;
+      for (int l = 1; l < order; l++) N_rest *= ranks[csf_copies[0].modeOrder[l]];
 
       scalar_t* d_G_core;
       CHECK_CUDA(cudaMalloc(&d_G_core, sizeof(scalar_t) * R0 * N_rest));
       scalar_t gemm_alpha = (scalar_t)1, gemm_beta = (scalar_t)0;
+      // GEMM: G^T (N_rest, R0) = Y^T (N_rest, I0) × A0 (I0, R0)
       CHECK_CUBLAS(cublasGemmT(cublasH, CUBLAS_OP_N, CUBLAS_OP_T,
         N_rest, R0, I0, &gemm_alpha,
-        d_arr_O,      N_rest,  // Y as col-major (N_rest, I0)
-        d_factors[0], R0,      // A0 row-major (I0,R0) = cuBLAS col-major (R0,I0), OP_T → (I0,R0)
+        d_arr_O,       N_rest,
+        d_factors[0],  R0,
         &gemm_beta, d_G_core, N_rest));
 
       scalar_t* G_core_host = new scalar_t[R0 * N_rest];
@@ -2317,10 +2260,9 @@ int main(int argc, char* argv[]) {
 
       scalar_t norm_residual = std::sqrt(
         std::max((scalar_t)0, input_tsr_norm * input_tsr_norm - core_norm * core_norm));
-      scalar_t fit = (scalar_t)1 - norm_residual / input_tsr_norm;
+      scalar_t fit       = (scalar_t)1 - norm_residual / input_tsr_norm;
       scalar_t delta_fit = std::fabs(fit - prev_fit);
 
-      // Always print per-iteration convergence info
       std::cout << "[iter " << iter << "]"
                 << "  core_norm=" << core_norm
                 << "  fit=" << fit
@@ -2328,7 +2270,7 @@ int main(int argc, char* argv[]) {
 
       if (delta_fit < tol) {
         std::cout << "Converged (delta_fit " << delta_fit << " < tol " << tol << ")\n";
-        iter++;  // so num_iters is correct
+        iter++;
         break;
       }
       prev_fit = fit;
@@ -2337,41 +2279,36 @@ int main(int argc, char* argv[]) {
     auto total_end = std::chrono::high_resolution_clock::now();
     auto total_us  = std::chrono::duration_cast<std::chrono::microseconds>(
       total_end - total_start).count();
-
     int num_iters = std::min(iter, max_iters);
 
-    // std::cout << "\n--- Average per-iteration timing (over " << num_iters << " iterations) ---\n";
-    // for (int n = 0; n < 3; n++) {
-    //   std::cout << "  Mode-" << n << ": TTMc " << ttmc_time_us[n] / num_iters
-    //             << " us  SVD " << svd_time_us[n] / num_iters << " us\n";
-    // }
-
-    // Final core tensor (d_arr_O still holds last ncm_0 output)
-    uint32_t f1_0 = static_cast<uint32_t>(ranks[csf_copies[0].modeOrder[1]]);
-    uint32_t f2_0 = static_cast<uint32_t>(ranks[csf_copies[0].modeOrder[2]]);
-    uint64_t N_rest = (uint64_t)f1_0 * f2_0;
-
-    scalar_t* d_G_final;
-    CHECK_CUDA(cudaMalloc(&d_G_final, sizeof(scalar_t) * R0 * N_rest));
+    // Final core tensor (d_arr_O still holds last n==0 TTMc output)
     {
+      uint64_t I0     = coo.dims[0];
+      uint64_t R0     = ranks[0];
+      uint64_t N_rest = 1;
+      for (int l = 1; l < order; l++) N_rest *= ranks[csf_copies[0].modeOrder[l]];
+      scalar_t* d_G_final;
+      CHECK_CUDA(cudaMalloc(&d_G_final, sizeof(scalar_t) * R0 * N_rest));
       scalar_t a = (scalar_t)1, b = (scalar_t)0;
       CHECK_CUBLAS(cublasGemmT(cublasH, CUBLAS_OP_N, CUBLAS_OP_T,
         N_rest, R0, I0, &a,
-        d_arr_O,      N_rest,
-        d_factors[0], R0,
+        d_arr_O,       N_rest,
+        d_factors[0],  R0,
         &b, d_G_final, N_rest));
+      scalar_t* G_core = allocate_aligned_array(R0 * N_rest);
+      CHECK_CUDA(cudaMemcpy(G_core, d_G_final,
+        sizeof(scalar_t) * R0 * N_rest, cudaMemcpyDeviceToHost));
+      CHECK_CUDA(cudaFree(d_G_final));
+      std::free(G_core);
     }
-    scalar_t* G_core = allocate_aligned_array(R0 * N_rest);
-    CHECK_CUDA(cudaMemcpy(G_core, d_G_final, sizeof(scalar_t) * R0 * N_rest, cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaFree(d_G_final));
 
     // Cleanup
+    for (int n = 0; n < order; n++) free_ttmc_cache(ttmc_caches[n]);
     CHECK_CUDA(cudaFree(d_arr_O));
-    for (int i = 0; i < 3; i++) CHECK_CUDA(cudaFree(d_factors[i]));
-    for (int n = 0; n < 3; n++) freeCSFGPU(csf_copies[n]);
+    for (int i = 0; i < order; i++) CHECK_CUDA(cudaFree(d_factors[i]));
+    for (int n = 0; n < order; n++) freeCSFGPU(csf_copies[n]);
     std::free(arr_O_host);
-    for (int i = 0; i < 3; i++) delete[] factors[i];
-    std::free(G_core);
+    for (int i = 0; i < order; i++) delete[] factors[i];
     cusolverDnDestroy(cusolverH);
     cublasDestroy(cublasH);
 
