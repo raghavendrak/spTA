@@ -209,12 +209,16 @@ static void buildDynamicTaskRanges(
   uint64_t base_tile,
   uint64_t k_tile,
   std::vector<TaskRange>& host_tasks,
-  size_t reserve_hint)
+  size_t reserve_hint,
+  std::vector<uint32_t>& h_row_pending,
+  uint64_t& num_active_i)
 {
   host_tasks.clear();
   if (reserve_hint > 0) {
     host_tasks.reserve(reserve_hint);
   }
+  h_row_pending.assign(num_i, 0u);
+  num_active_i = 0;
   for (uint64_t i_ptr = 0; i_ptr < num_i; ++i_ptr) {
     uint64_t begin = mode_1_ptr[i_ptr];
     uint64_t end = mode_1_ptr[i_ptr + 1];
@@ -234,6 +238,7 @@ static void buildDynamicTaskRanges(
             task.k_begin = 0;
             task.k_end = 0;
             host_tasks.push_back(task);
+            h_row_pending[i_ptr]++;
           }
         }
         for (uint64_t k_chunk = k_begin; k_chunk < k_end; k_chunk += k_tile) {
@@ -244,6 +249,7 @@ static void buildDynamicTaskRanges(
           task.k_begin = k_chunk;
           task.k_end = std::min<uint64_t>(k_chunk + k_tile, k_end);
           host_tasks.push_back(task);
+          h_row_pending[i_ptr]++;
         }
         pending_start = j_ptr + 1;
       }
@@ -257,9 +263,12 @@ static void buildDynamicTaskRanges(
         task.k_begin = 0;
         task.k_end = 0;
         host_tasks.push_back(task);
+        h_row_pending[i_ptr]++;
       }
     }
   }
+  for (uint64_t ip = 0; ip < num_i; ++ip)
+    if (h_row_pending[ip] > 0) ++num_active_i;
 }
 
 static size_t computeTaskReserveHint(uint64_t mode_1_size)
@@ -331,6 +340,42 @@ struct TTMcCache {
   std::vector<uint64_t>  size_mode_ptr;   // ptrs[l].size() per level
   std::vector<uint64_t>  size_mode_idx;   // idxs[l].size() per level
   std::vector<uint64_t>  factor_sizes;    // CSF-level indexed factor matrix sizes
+
+  // -----------------------------------------------------------------------
+  // Streaming overlap: TTMC (producer) and Gram consumer run concurrently.
+  // -----------------------------------------------------------------------
+
+  // Two CUDA streams: ttmc_stream for the TTMC kernel, gram_stream for the
+  // consumer Gram kernel. reset_event signals when pre-launch resets finish
+  // so gram_stream can safely start.
+  cudaStream_t ttmc_stream  = nullptr;
+  cudaStream_t gram_stream  = nullptr;
+  cudaEvent_t  reset_event  = nullptr;
+
+  // Per-row task counter (dynamic kernels only).
+  // h_row_pending_init[i_ptr] = number of tasks that contribute to row i_ptr.
+  // d_row_pending is the live GPU copy, decremented atomically by the TTMC
+  // kernel; reset to h_row_pending_init before each kernel launch.
+  uint64_t                num_i        = 0;   // size of the pending array
+  std::vector<uint32_t>   h_row_pending_init;  // HOST initial counts
+  uint32_t*               d_row_pending = nullptr;
+
+  // MPSC queue: the last task for each row publishes i_ptr here so the
+  // consumer kernel can process it. Sized to num_active_i (rows with tasks).
+  uint64_t   num_active_i  = 0;
+  uint64_t*  d_queue       = nullptr;  // completed i_ptr values
+  uint32_t*  d_queue_ready = nullptr;  // per-slot validity flags (0→1 by producer)
+  uint32_t*  d_queue_tail  = nullptr;  // atomic write index into d_queue
+
+  // Gram matrix O^T O.  gram_N = f1*f2 (output row width for ncm=0).
+  // Consumer kernel writes the upper triangle (row-major indexing [r1*gram_N+r2],
+  // r1<=r2), which equals the col-major lower triangle read by cuSOLVER SYEVD.
+  scalar_t*  d_gram  = nullptr;
+  int        gram_N  = 0;
+
+  // True when gram path is used (M>N, which is the typical Tucker case where
+  // mode dimension >> rank product). False for tiny_streams or degenerate M<=N.
+  bool use_gram_path = false;
 };
 
 void free_ttmc_cache(TTMcCache& c) {
@@ -342,6 +387,16 @@ void free_ttmc_cache(TTMcCache& c) {
   c.size_mode_ptr.clear();
   c.size_mode_idx.clear();
   c.factor_sizes.clear();
+  if (c.d_row_pending) { cudaFree(c.d_row_pending); c.d_row_pending = nullptr; }
+  if (c.d_queue)       { cudaFree(c.d_queue);        c.d_queue       = nullptr; }
+  if (c.d_queue_ready) { cudaFree(c.d_queue_ready);  c.d_queue_ready = nullptr; }
+  if (c.d_queue_tail)  { cudaFree(c.d_queue_tail);   c.d_queue_tail  = nullptr; }
+  if (c.d_gram)        { cudaFree(c.d_gram);          c.d_gram        = nullptr; }
+  if (c.ttmc_stream)   { cudaStreamDestroy(c.ttmc_stream); c.ttmc_stream = nullptr; }
+  if (c.gram_stream)   { cudaStreamDestroy(c.gram_stream); c.gram_stream = nullptr; }
+  if (c.reset_event)   { cudaEventDestroy(c.reset_event);  c.reset_event = nullptr; }
+  c.h_row_pending_init.clear();
+  c.num_i = 0; c.num_active_i = 0; c.gram_N = 0; c.use_gram_path = false;
   c.initialized = false;
 }
 
@@ -350,19 +405,24 @@ __global__ void kernel_ttmc3_static_block_per_i(
   const uint64_t*, const uint64_t*, const uint64_t*,
   const uint64_t*, const uint64_t*,
   const scalar_t*, scalar_t*, scalar_t*, scalar_t*,
-  uint32_t, uint32_t, int);
+  uint32_t, uint32_t, int,
+  scalar_t* /*d_gram*/);
 __global__ void kernel_ttmc3_dynamic_tasks(
   const uint64_t*, const uint64_t*, const uint64_t*,
   const uint64_t*, const uint64_t*,
   const scalar_t*, const scalar_t*, const scalar_t*,
   scalar_t*, uint32_t, uint32_t,
-  const TaskRange*, uint64_t, unsigned long long*);
+  const TaskRange*, uint64_t, unsigned long long*,
+  uint32_t* /*d_row_pending*/, uint64_t* /*d_queue*/,
+  uint32_t* /*d_queue_ready*/, uint32_t* /*d_queue_tail*/);
 __global__ void kernel_ttmc4_dynamic_tasks(
   const uint64_t*, const uint64_t*, const uint64_t*,
   const uint64_t*, const uint64_t*, const uint64_t*, const uint64_t*,
   const scalar_t*, const scalar_t*, const scalar_t*, const scalar_t*,
   scalar_t*, uint32_t, uint32_t, uint32_t,
-  const TaskRange*, uint64_t, unsigned long long*);
+  const TaskRange*, uint64_t, unsigned long long*,
+  uint32_t* /*d_row_pending*/, uint64_t* /*d_queue*/,
+  uint32_t* /*d_queue_ready*/, uint32_t* /*d_queue_tail*/);
 
 // Perform all HOOI-loop-invariant preprocessing for one CSF copy.
 // mode_ptrs[i]  = HOST ptr to ptrs[i]; mode_idxs[i] = HOST ptr to idxs[i]
@@ -444,7 +504,8 @@ void prepare_ttmc_cuda(
       cache.s_grid_size  = (int)size_mode_idx[0];
     } else {
       buildDynamicTaskRanges(mode_ptrs[1], mode_ptrs[2], num_i, base_tile, k_tile,
-                             cache.host_tasks, computeTaskReserveHint(size_mode_idx[1]));
+                             cache.host_tasks, computeTaskReserveHint(size_mode_idx[1]),
+                             cache.h_row_pending_init, cache.num_active_i);
       int blk = dyn_block, wpb = blk / 32;
       bool use_reg = (f1 <= 64 && f2 <= 32);
       size_t sh = use_reg ? 0 :
@@ -472,7 +533,9 @@ void prepare_ttmc_cuda(
           cache.host_tasks.size() * sizeof(TaskRange), cudaMemcpyHostToDevice));
       }
       cache.d_block_size = blk;
-      cache.d_grid_size  = std::max(prop.multiProcessorCount * grid_factor, 1);
+      // Reserve 1 SM slot for the Gram consumer kernel so it is always
+      // schedulable concurrently with the TTMC kernel.
+      cache.d_grid_size  = std::max(prop.multiProcessorCount - 1, 1);
       cache.d_shared_mem = sh;
     }
   }
@@ -511,7 +574,8 @@ void prepare_ttmc_cuda(
       DynamicHints hints = chooseDynamicHints(avg_k, force_dyn);
       buildDynamicTaskRanges(mode_ptrs[1], mode_ptrs[2], num_i,
                              hints.base_tile, hints.k_tile,
-                             cache.host_tasks, computeTaskReserveHint(size_mode_idx[1]));
+                             cache.host_tasks, computeTaskReserveHint(size_mode_idx[1]),
+                             cache.h_row_pending_init, cache.num_active_i);
       int blk = hints.dynamic_block_hint, wpb = blk / 32;
       size_t sh = (size_t)wpb * ((size_t)f2 * f3 + f2) * sizeof(scalar_t);
       size_t def_sh = prop.sharedMemPerBlock;
@@ -531,11 +595,149 @@ void prepare_ttmc_cuda(
           cache.host_tasks.size() * sizeof(TaskRange), cudaMemcpyHostToDevice));
       }
       cache.d_block_size = blk;
-      cache.d_grid_size  = std::max(prop.multiProcessorCount * hints.grid_factor_hint, 1);
+      // Reserve 1 SM slot for the Gram consumer kernel so it is always
+      // schedulable concurrently with the TTMC kernel.
+      cache.d_grid_size  = std::max(prop.multiProcessorCount - 1, 1);
       cache.d_shared_mem = sh;
     }
   }
+  // -----------------------------------------------------------------------
+  // Allocate Gram matrix (all paths except tiny_streams which uses its own
+  // SVD path and never writes d_gram).
+  // gram_N = product of contracting-mode ranks = f1*f2 for 3D, f1*f2*f3 for 4D.
+  // -----------------------------------------------------------------------
+  cache.gram_N = f1 * f2;
+  if (f3 > 0) cache.gram_N *= f3;
+
+  // Determine M (non-contracting mode dimension) to decide which SVD path to use.
+  // M > gram_N is the typical Tucker case (mode dim >> rank product).
+  uint64_t M_dim = dimensions[0];  // ncm=0 always, so mode-0 dimension
+  cache.use_gram_path = !cache.prefer_tiny_streams && ((uint64_t)cache.gram_N <= M_dim);
+
+  if (cache.use_gram_path) {
+    cudaCheckError(cudaMalloc(&cache.d_gram,
+      sizeof(scalar_t) * (uint64_t)cache.gram_N * cache.gram_N));
+
+    // Create streams and event for producer/consumer overlap.
+    cudaCheckError(cudaStreamCreate(&cache.ttmc_stream));
+    cudaCheckError(cudaStreamCreate(&cache.gram_stream));
+    cudaCheckError(cudaEventCreate(&cache.reset_event));
+
+    if (!cache.prefer_static) {
+      // Dynamic path: allocate counter array, queue, and validity flags.
+      cache.num_i = num_i;
+      cudaCheckError(cudaMalloc(&cache.d_row_pending,
+        sizeof(uint32_t) * num_i));
+      cudaCheckError(cudaMalloc(&cache.d_queue,
+        sizeof(uint64_t) * cache.num_active_i));
+      cudaCheckError(cudaMalloc(&cache.d_queue_ready,
+        sizeof(uint32_t) * cache.num_active_i));
+      cudaCheckError(cudaMalloc(&cache.d_queue_tail,
+        sizeof(uint32_t)));
+    }
+    // For the static path, per-block atomicAdds directly write d_gram;
+    // no queue or pending counter is needed.
+  }
+
   cache.initialized = true;
+}
+
+// ===================================================================
+// Device helper: called by producer warp after each task's atomicAdds to
+// arr_O complete. Decrements the per-row pending counter; the last task
+// for a row publishes i_ptr to the MPSC queue so the Gram consumer can
+// process it.
+//
+// Memory ordering:
+//   __threadfence() before atomicSub: flush arr_O writes globally so the
+//   consumer (running on a different SM/stream) sees a complete O[i,:].
+//   __threadfence() before atomicExch(flag): flush d_queue[slot] write
+//   before marking the slot valid.
+// ===================================================================
+__device__ __forceinline__ void publish_completed_row(
+  uint64_t    i_ptr,
+  uint32_t*   d_row_pending,
+  uint64_t*   d_queue,
+  uint32_t*   d_queue_ready,
+  uint32_t*   d_queue_tail,
+  uint32_t    lane,
+  unsigned    full_mask)
+{
+  // Ensure all prior writes to arr_O are visible to all SMs before we
+  // signal that the row is ready.
+  __threadfence();
+
+  uint32_t old;
+  if (lane == 0) old = atomicSub(d_row_pending + i_ptr, 1u);
+  old = __shfl_sync(full_mask, old, 0);
+
+  if (old == 1u) {
+    // This warp is the last to finish row i_ptr. Publish to consumer queue.
+    if (lane == 0) {
+      uint32_t slot = atomicAdd(d_queue_tail, 1u);
+      d_queue[slot] = i_ptr;
+      // Fence before the flag write: consumer must see d_queue[slot] before
+      // it sees d_queue_ready[slot] = 1.
+      __threadfence();
+      atomicExch(d_queue_ready + slot, 1u);
+    }
+  }
+}
+
+// ===================================================================
+// Gram consumer kernel.  Runs in gram_stream concurrently with the TTMC
+// kernel in ttmc_stream.  Processes completed rows serially (one at a time)
+// but uses all blockDim.x threads in parallel for the within-row outer
+// product O[i,:]^T ⊗ O[i,:], accumulating into d_gram (upper triangle,
+// row-major, no atomics needed since only a single block writes d_gram).
+//
+// Communication protocol with the TTMC producer:
+//   - Spin-poll d_queue_ready[next] (volatile) until the producer marks it 1.
+//   - __threadfence() after observing the flag (acquire barrier) ensures the
+//     arr_O writes that happened before the producer's flag write are visible.
+//   - Load the complete O[i,:] row into shared memory, then compute the upper
+//     triangle of O[i,:]^T ⊗ O[i,:] into d_gram.
+// ===================================================================
+__global__ void kernel_gram_consumer(
+  const uint64_t* __restrict__ d_queue,       // MPSC queue: completed i_ptr values
+  const uint32_t* __restrict__ d_queue_ready, // per-slot validity flags
+  const scalar_t* __restrict__ d_arr_O,       // full arr_O (indexed by tensor index i)
+  const uint64_t* __restrict__ mode_0_idx,    // i_ptr → actual tensor index i
+  scalar_t*       __restrict__ d_gram,        // N×N Gram (upper triangle, row-major)
+  uint32_t N,                                 // = f1*f2, width of one O row
+  uint64_t num_active_i)                      // total rows to consume
+{
+  // Shared memory holds one complete O[i,:] row (N floats) while we compute
+  // its outer product contribution to d_gram.
+  extern __shared__ scalar_t smem_row[];
+
+  for (uint64_t next = 0; next < num_active_i; ++next) {
+    // Spin until the producer marks this slot valid (volatile prevents caching).
+    while (!*((volatile uint32_t*)(d_queue_ready + next)));
+    // Acquire barrier: the producer did __threadfence() before setting the flag,
+    // so our subsequent arr_O reads are guaranteed to see a complete O[i,:].
+    __threadfence();
+
+    uint64_t i_ptr = d_queue[next];
+    uint64_t i     = mode_0_idx[i_ptr];
+    const scalar_t* o_row = d_arr_O + i * (uint64_t)N;
+
+    // Collaboratively load O[i,:] into shared memory.
+    for (uint32_t t = threadIdx.x; t < N; t += blockDim.x)
+      smem_row[t] = o_row[t];
+    __syncthreads();
+
+    // Each thread owns a contiguous range of r1 values.  For each r1 it
+    // iterates r2 from r1..N-1 (upper triangle).  Writes d_gram[r1*N+r2]
+    // are stride-1 in r2 within the same thread → good sequential access.
+    // No atomics: single block, rows are processed one at a time.
+    for (uint32_t r1 = threadIdx.x; r1 < N; r1 += blockDim.x) {
+      scalar_t v1 = smem_row[r1];
+      for (uint32_t r2 = r1; r2 < N; r2++)
+        d_gram[(uint64_t)r1 * N + r2] += v1 * smem_row[r2];
+    }
+    __syncthreads();  // all threads done before smem_row is overwritten for next row
+  }
 }
 
 __global__ void kernel_ttmc3_static_block_per_i(
@@ -543,7 +745,8 @@ __global__ void kernel_ttmc3_static_block_per_i(
   const uint64_t* __restrict__ mode_1_ptr, const uint64_t* __restrict__ mode_1_idx,
   const uint64_t* __restrict__ mode_2_ptr, const uint64_t* __restrict__ mode_2_idx,
   const scalar_t* __restrict__ values, scalar_t* arr_A,  scalar_t* arr_B,  scalar_t* arr_O,
-  uint32_t f1, uint32_t f2,  int num_warps)
+  uint32_t f1, uint32_t f2,  int num_warps,
+  scalar_t* d_gram)
 {
   extern __shared__ scalar_t buf[];
   __shared__ int s_counter;
@@ -616,6 +819,27 @@ __global__ void kernel_ttmc3_static_block_per_i(
       }
     }
   }
+
+  // All warps have finished writing O[i_ptr, :] to arr_O.  Since this is the
+  // only block touching row i_ptr, no further synchronisation with other blocks
+  // is needed before reading it back.  __syncthreads() ensures all intra-block
+  // writes are visible to all threads in this block.
+  __syncthreads();
+
+  // Compute upper triangle O[i,:]^T ⊗ O[i,:] → d_gram.
+  // Multiple blocks run concurrently (one per root fiber) and all write to
+  // the same d_gram, so atomicAdd is required here.
+  // Thread assignment: r1 = threadIdx.x, threadIdx.x+blockDim.x, ...
+  // For each r1, iterate r2 = r1..N-1 → stride-1 writes within each thread.
+  if (d_gram != nullptr) {
+    uint32_t N = f1 * f2;
+    const scalar_t* o_row = arr_O + i * (uint64_t)N;
+    for (uint32_t r1 = threadIdx.x; r1 < N; r1 += blockDim.x) {
+      scalar_t v1 = o_row[r1];
+      for (uint32_t r2 = r1; r2 < N; r2++)
+        atomicAdd(d_gram + (uint64_t)r1 * N + r2, v1 * o_row[r2]);
+    }
+  }
 }
 
 __global__ void kernel_ttmc3_dynamic_tasks(
@@ -625,7 +849,11 @@ __global__ void kernel_ttmc3_dynamic_tasks(
   const scalar_t* __restrict__ values, const scalar_t* __restrict__ arr_A, const scalar_t* __restrict__ arr_B,
   scalar_t* __restrict__ arr_O, uint32_t f1, uint32_t f2,
   const TaskRange* __restrict__ tasks, uint64_t num_tasks,
-  unsigned long long* __restrict__ global_task_counter)
+  unsigned long long* __restrict__ global_task_counter,
+  uint32_t* __restrict__ d_row_pending,
+  uint64_t* __restrict__ d_queue,
+  uint32_t* __restrict__ d_queue_ready,
+  uint32_t* __restrict__ d_queue_tail)
 {
   extern __shared__ scalar_t shared_buf[];
   const uint32_t warp_size = 32;
@@ -742,6 +970,8 @@ __global__ void kernel_ttmc3_dynamic_tasks(
           atomicAdd(out_base + r * f2 + lane, accum_local[r]);
         }
       }
+      publish_completed_row(i_ptr, d_row_pending, d_queue, d_queue_ready,
+                            d_queue_tail, lane, full_mask);
     }
   }
   else {
@@ -846,6 +1076,8 @@ __global__ void kernel_ttmc3_dynamic_tasks(
         atomicAdd(out_base + idx, warp_accum[idx]);
       }
       __syncwarp(full_mask);
+      publish_completed_row(i_ptr, d_row_pending, d_queue, d_queue_ready,
+                            d_queue_tail, lane, full_mask);
     }
   }
 }
@@ -946,7 +1178,11 @@ __global__ void kernel_ttmc4_dynamic_tasks(
   scalar_t* __restrict__ arr_O,
   uint32_t f1, uint32_t f2, uint32_t f3,
   const TaskRange* __restrict__ tasks, uint64_t num_tasks,
-  unsigned long long* __restrict__ global_task_counter)
+  unsigned long long* __restrict__ global_task_counter,
+  uint32_t* __restrict__ d_row_pending,
+  uint64_t* __restrict__ d_queue,
+  uint32_t* __restrict__ d_queue_ready,
+  uint32_t* __restrict__ d_queue_tail)
 {
   extern __shared__ scalar_t shared_buf[];
   const uint32_t warp_size = 32;
@@ -999,6 +1235,8 @@ __global__ void kernel_ttmc4_dynamic_tasks(
         );
       }
     }
+    publish_completed_row(i_ptr, d_row_pending, d_queue, d_queue_ready,
+                          d_queue_tail, lane, mask);
   }
 }
 
@@ -1196,16 +1434,17 @@ static double launch_ttmc4_tiny_streams_flat(
 // All tensor and factor data must already be on GPU before calling.
 // Result is written to d_arr_O (GPU) and stays there — caller copies to HOST as needed.
 void run_ttmc_cuda(
-  uint64_t** d_mode_ptrs,    // GPU: CSFCopy.d_ptrs.data() — pre-uploaded ptr arrays
-  uint64_t** d_mode_idxs,    // GPU: CSFCopy.d_idxs.data() — pre-uploaded idx arrays
-  scalar_t*  d_values,       // GPU: CSFCopy.d_values — pre-uploaded values
-  scalar_t** d_factor_mats,  // GPU: CSF-level indexed factor matrices (null at ncm level)
-  scalar_t*  d_arr_O,        // GPU: pre-allocated output buffer (zeroed here)
+  uint64_t** d_mode_ptrs,
+  uint64_t** d_mode_idxs,
+  scalar_t*  d_values,
+  scalar_t** d_factor_mats,
+  scalar_t*  d_arr_O,
   uint64_t   arr_O_size,
   int ncm,
   uint64_t* ranks, int order,
   TTMcCache& cache)
 {
+  // Determine contracting-mode rank dimensions (same logic as prepare_ttmc_cuda).
   std::vector<int> other_modes;
   other_modes.reserve(order - 1);
   for (int mode = 0; mode < order; ++mode)
@@ -1219,47 +1458,110 @@ void run_ttmc_cuda(
   int f2 = (int)ranks[idx_B];
   int f3 = (idx_C >= 0) ? (int)ranks[idx_C] : 0;
 
+  // Zero arr_O; done on the default stream so it is sequenced before any
+  // kernel launches on ttmc_stream / gram_stream.
   cudaCheckError(cudaMemset(d_arr_O, 0, sizeof(scalar_t) * arr_O_size));
 
   switch (ncm) {
     case 0: {
       if (order == 3) {
         if (cache.prefer_static) {
+          // ---------------------------------------------------------------
+          // Static path: one block per root fiber; each block computes its
+          // own row then does an inline atomicAdd outer product into d_gram.
+          // No consumer kernel needed (no task splitting across blocks).
+          // ---------------------------------------------------------------
+          if (cache.use_gram_path) {
+            cudaCheckError(cudaMemsetAsync(cache.d_gram, 0,
+              sizeof(scalar_t) * (uint64_t)cache.gram_N * cache.gram_N,
+              cache.ttmc_stream));
+          }
+
           auto start = std::chrono::high_resolution_clock::now();
-          kernel_ttmc3_static_block_per_i<<<cache.s_grid_size, cache.s_block_size, cache.s_shared_mem>>>(
-            d_mode_idxs[0],
-            d_mode_ptrs[1], d_mode_idxs[1],
-            d_mode_ptrs[2], d_mode_idxs[2],
-            d_values, d_factor_mats[idx_A], d_factor_mats[idx_B], d_arr_O,
-            f1, f2, cache.s_num_warps);
-          cudaCheckError(cudaGetLastError());
-          cudaCheckError(cudaDeviceSynchronize());
-          auto end = std::chrono::high_resolution_clock::now();
-          cout << "Method: kernel_ttmc3_static_block_per_i, Time: "
-               << std::chrono::duration_cast<std::chrono::microseconds>(end-start).count() / 1000.0
-               << " ms" << endl;
-        } else {
-          cudaCheckError(cudaMemset(cache.d_task_counter, 0, sizeof(unsigned long long)));
-          auto start = std::chrono::high_resolution_clock::now();
-          if (!cache.host_tasks.empty()) {
-            kernel_ttmc3_dynamic_tasks<<<cache.d_grid_size, cache.d_block_size, cache.d_shared_mem>>>(
+          kernel_ttmc3_static_block_per_i<<<
+            cache.s_grid_size, cache.s_block_size, cache.s_shared_mem,
+            cache.use_gram_path ? cache.ttmc_stream : (cudaStream_t)0>>>(
               d_mode_idxs[0],
               d_mode_ptrs[1], d_mode_idxs[1],
               d_mode_ptrs[2], d_mode_idxs[2],
-              d_values, d_factor_mats[idx_A], d_factor_mats[idx_B], d_arr_O, f1, f2,
-              cache.d_tasks, (uint64_t)cache.host_tasks.size(), cache.d_task_counter);
+              d_values, d_factor_mats[idx_A], d_factor_mats[idx_B], d_arr_O,
+              f1, f2, cache.s_num_warps,
+              cache.use_gram_path ? cache.d_gram : nullptr);
+          cudaCheckError(cudaGetLastError());
+          if (cache.use_gram_path) {
+            cudaCheckError(cudaStreamSynchronize(cache.ttmc_stream));
+          } else {
+            cudaCheckError(cudaDeviceSynchronize());
+          }
+          auto end = std::chrono::high_resolution_clock::now();
+          cout << "Method: kernel_ttmc3_static_block_per_i, Time: "
+               << std::chrono::duration_cast<std::chrono::microseconds>(
+                    end - start).count() / 1000.0 << " ms" << endl;
+        } else {
+          // ---------------------------------------------------------------
+          // Dynamic path: TTMC producer on ttmc_stream + Gram consumer on
+          // gram_stream run concurrently.  Resets go on ttmc_stream; an
+          // event gates the consumer so it starts only after resets finish.
+          // ---------------------------------------------------------------
+
+          // Reset per-iteration state on ttmc_stream (producer side).
+          cudaCheckError(cudaMemcpyAsync(
+            cache.d_row_pending, cache.h_row_pending_init.data(),
+            sizeof(uint32_t) * cache.num_i,
+            cudaMemcpyHostToDevice, cache.ttmc_stream));
+          cudaCheckError(cudaMemsetAsync(cache.d_queue_ready, 0,
+            sizeof(uint32_t) * cache.num_active_i, cache.ttmc_stream));
+          cudaCheckError(cudaMemsetAsync(cache.d_queue_tail, 0,
+            sizeof(uint32_t), cache.ttmc_stream));
+          cudaCheckError(cudaMemsetAsync(cache.d_gram, 0,
+            sizeof(scalar_t) * (uint64_t)cache.gram_N * cache.gram_N,
+            cache.ttmc_stream));
+          // Record an event so gram_stream waits until all resets are done.
+          cudaCheckError(cudaEventRecord(cache.reset_event, cache.ttmc_stream));
+          cudaCheckError(cudaStreamWaitEvent(cache.gram_stream,
+                                             cache.reset_event, 0));
+
+          // Reset global task counter (on ttmc_stream — before kernel launch).
+          cudaCheckError(cudaMemsetAsync(cache.d_task_counter, 0,
+            sizeof(unsigned long long), cache.ttmc_stream));
+
+          auto start = std::chrono::high_resolution_clock::now();
+          if (!cache.host_tasks.empty()) {
+            kernel_ttmc3_dynamic_tasks<<<
+              cache.d_grid_size, cache.d_block_size, cache.d_shared_mem,
+              cache.ttmc_stream>>>(
+                d_mode_idxs[0],
+                d_mode_ptrs[1], d_mode_idxs[1],
+                d_mode_ptrs[2], d_mode_idxs[2],
+                d_values, d_factor_mats[idx_A], d_factor_mats[idx_B],
+                d_arr_O, f1, f2,
+                cache.d_tasks, (uint64_t)cache.host_tasks.size(),
+                cache.d_task_counter,
+                cache.d_row_pending, cache.d_queue,
+                cache.d_queue_ready, cache.d_queue_tail);
+
+            // Consumer runs concurrently on gram_stream, one block with 256
+            // threads.  Shared memory holds one O row (gram_N floats).
+            size_t gram_smem = (size_t)cache.gram_N * sizeof(scalar_t);
+            kernel_gram_consumer<<<1, 256, gram_smem, cache.gram_stream>>>(
+              cache.d_queue, cache.d_queue_ready,
+              d_arr_O, d_mode_idxs[0],
+              cache.d_gram, (uint32_t)cache.gram_N,
+              cache.num_active_i);
           }
           cudaCheckError(cudaGetLastError());
-          cudaCheckError(cudaDeviceSynchronize());
+          cudaCheckError(cudaStreamSynchronize(cache.ttmc_stream));
+          cudaCheckError(cudaStreamSynchronize(cache.gram_stream));
           auto end = std::chrono::high_resolution_clock::now();
-          cout << "Method: kernel_ttmc3_dynamic_tasks, Time: "
-               << std::chrono::duration_cast<std::chrono::microseconds>(end-start).count() / 1000.0
-               << " ms" << endl;
+          cout << "Method: kernel_ttmc3_dynamic_tasks (+gram consumer), Time: "
+               << std::chrono::duration_cast<std::chrono::microseconds>(
+                    end - start).count() / 1000.0 << " ms" << endl;
         }
       }
       else if (order == 4) {
         if (cache.prefer_tiny_streams) {
-          // tiny_streams needs HOST mode data for its launch loop; use ptrs cached at prepare time.
+          // tiny_streams path is unchanged; Gram is not computed here.
+          // The caller uses the SYRK-based SVD path for this case.
           double duration_ms = launch_ttmc4_tiny_streams_flat(
             cache.h_mode_ptrs.data(), cache.h_mode_idxs.data(),
             d_values,
@@ -1271,26 +1573,57 @@ void run_ttmc_cuda(
           cout << "Method: launch_ttmc4_tiny_streams_flat/kernel_ttmc4_tiny_stream, Time: "
                << duration_ms << " ms" << endl;
         } else {
-          cudaCheckError(cudaMemset(cache.d_task_counter, 0, sizeof(unsigned long long)));
+          // Dynamic 4D: same producer/consumer pattern as 3D dynamic.
+          cudaCheckError(cudaMemcpyAsync(
+            cache.d_row_pending, cache.h_row_pending_init.data(),
+            sizeof(uint32_t) * cache.num_i,
+            cudaMemcpyHostToDevice, cache.ttmc_stream));
+          cudaCheckError(cudaMemsetAsync(cache.d_queue_ready, 0,
+            sizeof(uint32_t) * cache.num_active_i, cache.ttmc_stream));
+          cudaCheckError(cudaMemsetAsync(cache.d_queue_tail, 0,
+            sizeof(uint32_t), cache.ttmc_stream));
+          cudaCheckError(cudaMemsetAsync(cache.d_gram, 0,
+            sizeof(scalar_t) * (uint64_t)cache.gram_N * cache.gram_N,
+            cache.ttmc_stream));
+          cudaCheckError(cudaEventRecord(cache.reset_event, cache.ttmc_stream));
+          cudaCheckError(cudaStreamWaitEvent(cache.gram_stream,
+                                             cache.reset_event, 0));
+
+          cudaCheckError(cudaMemsetAsync(cache.d_task_counter, 0,
+            sizeof(unsigned long long), cache.ttmc_stream));
+
           auto start = std::chrono::high_resolution_clock::now();
           if (!cache.host_tasks.empty()) {
-            kernel_ttmc4_dynamic_tasks<<<cache.d_grid_size, cache.d_block_size, cache.d_shared_mem>>>(
-              d_mode_idxs[0],
-              d_mode_ptrs[1], d_mode_idxs[1],
-              d_mode_ptrs[2], d_mode_idxs[2],
-              d_mode_ptrs[3], d_mode_idxs[3],
-              d_values,
-              d_factor_mats[idx_A], d_factor_mats[idx_B], d_factor_mats[idx_C],
-              d_arr_O,
-              f1, f2, f3,
-              cache.d_tasks, (uint64_t)cache.host_tasks.size(), cache.d_task_counter);
+            kernel_ttmc4_dynamic_tasks<<<
+              cache.d_grid_size, cache.d_block_size, cache.d_shared_mem,
+              cache.ttmc_stream>>>(
+                d_mode_idxs[0],
+                d_mode_ptrs[1], d_mode_idxs[1],
+                d_mode_ptrs[2], d_mode_idxs[2],
+                d_mode_ptrs[3], d_mode_idxs[3],
+                d_values,
+                d_factor_mats[idx_A], d_factor_mats[idx_B], d_factor_mats[idx_C],
+                d_arr_O,
+                f1, f2, f3,
+                cache.d_tasks, (uint64_t)cache.host_tasks.size(),
+                cache.d_task_counter,
+                cache.d_row_pending, cache.d_queue,
+                cache.d_queue_ready, cache.d_queue_tail);
+
+            size_t gram_smem = (size_t)cache.gram_N * sizeof(scalar_t);
+            kernel_gram_consumer<<<1, 256, gram_smem, cache.gram_stream>>>(
+              cache.d_queue, cache.d_queue_ready,
+              d_arr_O, d_mode_idxs[0],
+              cache.d_gram, (uint32_t)cache.gram_N,
+              cache.num_active_i);
           }
           cudaCheckError(cudaGetLastError());
-          cudaCheckError(cudaDeviceSynchronize());
+          cudaCheckError(cudaStreamSynchronize(cache.ttmc_stream));
+          cudaCheckError(cudaStreamSynchronize(cache.gram_stream));
           auto end = std::chrono::high_resolution_clock::now();
-          cout << "Method: kernel_ttmc4_dynamic_tasks, Time: "
-               << std::chrono::duration_cast<std::chrono::microseconds>(end-start).count() / 1000.0
-               << " ms" << endl;
+          cout << "Method: kernel_ttmc4_dynamic_tasks (+gram consumer), Time: "
+               << std::chrono::duration_cast<std::chrono::microseconds>(
+                    end - start).count() / 1000.0 << " ms" << endl;
         }
       }
       break;
@@ -1298,8 +1631,8 @@ void run_ttmc_cuda(
     default:
       throw std::runtime_error("Unsupported ncm in run_ttmc_cuda. Only ncm=0 is implemented.");
   }
-  cudaCheckError(cudaDeviceSynchronize());
-  // Result is in d_arr_O on GPU. No copies or frees here — all owned by caller.
+  // Both streams are synced above. d_arr_O and d_gram (when use_gram_path) are
+  // fully computed and ready for the SVD step.
 }
 // ===================================================================
 // (End of v4-Optimized TTMc Engine)
@@ -1641,6 +1974,106 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
   CHECK_CUDA(cudaDeviceSynchronize());
   cudaEventDestroy(ev_start);
   cudaEventDestroy(ev_stop);
+}
+
+// ===================================================================
+// Truncated SVD using a pre-computed Gram matrix G = O^T O (N×N).
+//
+// The consumer kernel writes G in row-major with only the upper triangle
+// filled (G[r1*N+r2] for r1<=r2).  Interpreted as col-major, this is the
+// lower triangle, so we pass CUBLAS_FILL_MODE_LOWER to SYEVD.
+//
+// After eigendecomposition G = V Λ V^T (ascending eigenvalues):
+//   - Top-R eigenvectors: last R columns of V (col-major), at V + (N-R)*N.
+//   - Back-projection:    d_factor = d_arr_O × V_R × diag(Λ_R^{-1/2}).
+//
+// d_arr_O is M×N row-major on GPU.  cuBLAS interprets it as N×M col-major;
+// CUBLAS_OP_T transposes back to M×N for the back-projection GEMM.
+// This avoids any CPU round-trip (no D2H + transpose + H2D).
+// ===================================================================
+void gpu_truncated_svd_update_factor_with_gram(
+  cusolverDnHandle_t cusolverH, cublasHandle_t cublasH,
+  scalar_t* d_gram,    // N×N, upper triangle row-major (= lower triangle col-major)
+  scalar_t* d_arr_O,   // M×N row-major (back-projection input, unmodified)
+  int M, int N, int R,
+  scalar_t* d_factor,  // M×R col-major output (top-R left singular vectors)
+  bool verbose)
+{
+  R = std::min(R, std::min(M, N));
+
+  cudaEvent_t ev_start, ev_stop;
+  float ev_ms = 0.f;
+  cudaEventCreate(&ev_start);
+  cudaEventCreate(&ev_stop);
+
+  scalar_t alpha = (scalar_t)1, beta = (scalar_t)0;
+
+  // ------------------------------------------------------------------
+  // Step 1: Eigendecompose G = V Λ V^T via cuSOLVER SYEVD.
+  // G is treated as col-major lower triangle (= row-major upper triangle
+  // written by the consumer kernel) → CUBLAS_FILL_MODE_LOWER.
+  // SYEVD overwrites d_gram with eigenvectors; eigenvalues go to d_W
+  // in ascending order.
+  // ------------------------------------------------------------------
+  scalar_t* d_W;
+  CHECK_CUDA(cudaMalloc(&d_W, sizeof(scalar_t) * N));
+  int lwork = 0;
+  CHECK_CUSOLVER(cusolverSyevdBufSizeT(cusolverH, CUSOLVER_EIG_MODE_VECTOR,
+    CUBLAS_FILL_MODE_LOWER, N, d_gram, N, d_W, &lwork));
+
+  scalar_t* d_work; int* d_info;
+  CHECK_CUDA(cudaMalloc(&d_work, sizeof(scalar_t) * lwork));
+  CHECK_CUDA(cudaMalloc(&d_info, sizeof(int)));
+
+  cudaEventRecord(ev_start);
+  CHECK_CUSOLVER(cusolverSyevdT(cusolverH, CUSOLVER_EIG_MODE_VECTOR,
+    CUBLAS_FILL_MODE_LOWER, N, d_gram, N, d_W, d_work, lwork, d_info));
+  CHECK_CUDA(cudaDeviceSynchronize());
+  cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
+  cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
+  if (verbose) std::cout << "  eig decomp (gram): " << ev_ms << " ms\n";
+
+  // Top-R eigenvectors: last R columns of d_gram in col-major layout.
+  scalar_t* V_R = d_gram + (long long)(N - R) * N;
+
+  // ------------------------------------------------------------------
+  // Step 2: Back-projection  d_factor(M×R) = d_arr_O(M×N) × V_R(N×R).
+  //
+  // d_arr_O is M×N row-major, stored as N×M col-major with ld=N.
+  // CUBLAS_OP_T transposes it to effective M×N for the GEMM.
+  //   C(M,R) = op(A) × B = (N×M col-major)^T × (N×R col-major)
+  //          = (M×N) × (N×R)   → C is M×R col-major with ld=M  ✓
+  // ------------------------------------------------------------------
+  cudaEventRecord(ev_start);
+  CHECK_CUBLAS(cublasGemmT(cublasH, CUBLAS_OP_T, CUBLAS_OP_N,
+    M, R, N,
+    &alpha,
+    d_arr_O, N,   // N×M col-major (ld=N), transposed → M×N
+    V_R,     N,   // N×R col-major (ld=N)
+    &beta,
+    d_factor, M)); // M×R col-major output (ld=M)
+  cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
+  cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
+  if (verbose) std::cout << "  back-proj gemm: " << ev_ms << " ms\n";
+
+  // ------------------------------------------------------------------
+  // Step 3: Normalise each column j of d_factor by 1/sqrt(λ_{N-R+j}).
+  // This converts A×V into the left singular vectors U = A×V×Λ^{-1/2}.
+  // ------------------------------------------------------------------
+  scalar_t* h_W = new scalar_t[N];
+  CHECK_CUDA(cudaMemcpy(h_W, d_W, sizeof(scalar_t) * N, cudaMemcpyDeviceToHost));
+  for (int j = 0; j < R; j++) {
+    scalar_t scale = (scalar_t)1.0 /
+      std::sqrt(std::max(h_W[N - R + j], (scalar_t)1e-12));
+    CHECK_CUBLAS(cublasScalT(cublasH, M, &scale, d_factor + (long long)j * M, 1));
+  }
+  delete[] h_W;
+
+  cudaEventDestroy(ev_start);
+  cudaEventDestroy(ev_stop);
+  CHECK_CUDA(cudaFree(d_W));
+  CHECK_CUDA(cudaFree(d_work));
+  CHECK_CUDA(cudaFree(d_info));
 }
 
 
@@ -2156,9 +2589,6 @@ int main(int argc, char* argv[]) {
           d_arr_O, arr_O_size, /*ncm=*/0,
           ranks_v.data(), order,
           ttmc_caches[n]);
-        // Copy GPU result to HOST — needed for SVD (row→col-major conversion).
-        CHECK_CUDA(cudaMemcpy(arr_O_host, d_arr_O,
-          sizeof(scalar_t) * arr_O_size, cudaMemcpyDeviceToHost));
         auto ttmc_end = std::chrono::high_resolution_clock::now();
         double ttmc_us = std::chrono::duration_cast<std::chrono::microseconds>(
           ttmc_end - ttmc_start).count();
@@ -2167,7 +2597,10 @@ int main(int argc, char* argv[]) {
           std::cout << "[iter " << iter << " mode " << n << "] TTMc: " << ttmc_us << " us\n";
 
         // --- Optional CPU verification (3D, iter 0 only) ---
+        // Only copy arr_O to host when needed for the CPU verify path.
         if (check && iter == 0 && order == 3) {
+          CHECK_CUDA(cudaMemcpy(arr_O_host, d_arr_O,
+            sizeof(scalar_t) * arr_O_size, cudaMemcpyDeviceToHost));
           int idx_A = csf.modeOrder[1];
           int idx_B = csf.modeOrder[2];
           uint32_t f1 = static_cast<uint32_t>(ranks[idx_A]);
@@ -2181,30 +2614,36 @@ int main(int argc, char* argv[]) {
         uint64_t N = 1;
         for (int l = 1; l < order; l++) N *= ranks[csf.modeOrder[l]];
 
-        // Row-major (M, N) → column-major (M, N) for cuSOLVER
-        auto cm_start = std::chrono::high_resolution_clock::now();
-        std::vector<scalar_t> mat_colmajor(M * N);
-        for (uint64_t c = 0; c < N; c++)
-          for (uint64_t r = 0; r < M; r++)
-            mat_colmajor[r + c * M] = arr_O_host[r * N + c];
-        if (verbose)
-          std::cout << "  row→col-major: "
-                    << std::chrono::duration_cast<std::chrono::microseconds>(
-                         std::chrono::high_resolution_clock::now() - cm_start).count() << " us\n";
-
-        scalar_t* d_mat;
-        CHECK_CUDA(cudaMalloc(&d_mat, sizeof(scalar_t) * M * N));
-        CHECK_CUDA(cudaMemcpy(d_mat, mat_colmajor.data(),
-          sizeof(scalar_t) * M * N, cudaMemcpyHostToDevice));
-
         auto svd_start = std::chrono::high_resolution_clock::now();
-        // gpu_truncated_svd_update_factor(cusolverH, cublasH, d_mat,
-        //   static_cast<int>(M), static_cast<int>(N),
-        //   static_cast<int>(ranks[n]), d_factors[n], verbose);
 
-        gpu_full_svd_update_factor(cusolverH, cublasH, d_mat,
-          static_cast<int>(M), static_cast<int>(N),
-          static_cast<int>(ranks[n]), d_factors[n], verbose);
+        if (!ttmc_caches[n].use_gram_path) {
+          // tiny_streams (or degenerate M<=N): use existing SYRK-based path.
+          // Needs arr_O on host in col-major form.
+          CHECK_CUDA(cudaMemcpy(arr_O_host, d_arr_O,
+            sizeof(scalar_t) * arr_O_size, cudaMemcpyDeviceToHost));
+          std::vector<scalar_t> mat_colmajor(M * N);
+          for (uint64_t c = 0; c < N; c++)
+            for (uint64_t r = 0; r < M; r++)
+              mat_colmajor[r + c * M] = arr_O_host[r * N + c];
+          scalar_t* d_mat;
+          CHECK_CUDA(cudaMalloc(&d_mat, sizeof(scalar_t) * M * N));
+          CHECK_CUDA(cudaMemcpy(d_mat, mat_colmajor.data(),
+            sizeof(scalar_t) * M * N, cudaMemcpyHostToDevice));
+          gpu_truncated_svd_update_factor(cusolverH, cublasH, d_mat,
+            static_cast<int>(M), static_cast<int>(N),
+            static_cast<int>(ranks[n]), d_factors[n], verbose);
+          CHECK_CUDA(cudaFree(d_mat));
+        } else {
+          // Gram path: d_gram = O^T O was computed by the consumer kernel
+          // (or static kernel inline).  Back-project using CUBLAS_OP_T on
+          // row-major d_arr_O — no D2H copy, no CPU transpose, no H2D upload.
+          gpu_truncated_svd_update_factor_with_gram(
+            cusolverH, cublasH,
+            ttmc_caches[n].d_gram, d_arr_O,
+            static_cast<int>(M), static_cast<int>(N),
+            static_cast<int>(ranks[n]), d_factors[n], verbose);
+        }
+
         auto svd_end = std::chrono::high_resolution_clock::now();
         double svd_us = std::chrono::duration_cast<std::chrono::microseconds>(
           svd_end - svd_start).count();
@@ -2221,7 +2660,6 @@ int main(int argc, char* argv[]) {
             factors[n][i_idx * ranks[n] + r_idx] = U_host[i_idx + r_idx * M];
         CHECK_CUDA(cudaMemcpy(d_factors[n], factors[n],
           sizeof(scalar_t) * factor_sizes[n], cudaMemcpyHostToDevice));
-        CHECK_CUDA(cudaFree(d_mat));
       }
 
       // Per-iteration timing printout
