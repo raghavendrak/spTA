@@ -49,6 +49,7 @@
    #define cublasGemmT           cublasDgemm
    #define cublasScalT           cublasDscal
    #define cublasGeamT           cublasDgeam
+   #define cublasNrm2T           cublasDnrm2
    #define cusolverSyevdBufSizeT cusolverDnDsyevd_bufferSize
    #define cusolverSyevdT        cusolverDnDsyevd
    #define cusolverGesvdBufSizeT cusolverDnDgesvd_bufferSize
@@ -58,6 +59,7 @@
    #define cublasGemmT           cublasSgemm
    #define cublasScalT           cublasSscal
    #define cublasGeamT           cublasSgeam
+   #define cublasNrm2T           cublasSnrm2
    #define cusolverSyevdBufSizeT cusolverDnSsyevd_bufferSize
    #define cusolverSyevdT        cusolverDnSsyevd
    #define cusolverGesvdBufSizeT cusolverDnSgesvd_bufferSize
@@ -2149,6 +2151,14 @@ void gpu_full_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_t cub
  
      auto total_start = std::chrono::high_resolution_clock::now();
  
+     // Core tensor buffer -- fixed size for all iterations (ranks don't change).
+     uint64_t I0     = coo.dims[0];
+     uint64_t R0     = ranks[0];
+     uint64_t N_rest = 1;
+     for (int l = 1; l < order; l++) N_rest *= ranks[csf_copies[0].modeOrder[l]];
+     scalar_t* d_G_core;
+     CHECK_CUDA(cudaMalloc(&d_G_core, sizeof(scalar_t) * R0 * N_rest));
+ 
      for (iter = 0; iter < max_iters; iter++) {
        for (int n = order - 1; n >= 0; n--) {
          uint64_t arr_O_size = arr_O_sizes[n];
@@ -2224,30 +2234,15 @@ void gpu_full_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_t cub
        }
        for (int n = 0; n < order; n++) { ttmc_time_us[n] = 0; svd_time_us[n] = 0; }
  
-       // Convergence: G = A0^T × Y_ncm0 where Y = d_arr_O (last n==0 TTMc output).
-       // N_rest = product(ranks for levels 1..order-1 of CSF copy 0).
-       uint64_t I0    = coo.dims[0];
-       uint64_t R0    = ranks[0];
-       uint64_t N_rest = 1;
-       for (int l = 1; l < order; l++) N_rest *= ranks[csf_copies[0].modeOrder[l]];
- 
-       scalar_t* d_G_core;
-       CHECK_CUDA(cudaMalloc(&d_G_core, sizeof(scalar_t) * R0 * N_rest));
+       // Convergence: ||G||_F where G = A0 x Y_ncm0, Y = d_arr_O (last n==0 TTMc output).
        scalar_t gemm_alpha = (scalar_t)1, gemm_beta = (scalar_t)0;
-       // GEMM: G^T (N_rest, R0) = Y^T (N_rest, I0) × A0 (I0, R0)
        CHECK_CUBLAS(cublasGemmT(cublasH, CUBLAS_OP_N, CUBLAS_OP_T,
          N_rest, R0, I0, &gemm_alpha,
          d_arr_O,       N_rest,
          d_factors[0],  R0,
          &gemm_beta, d_G_core, N_rest));
- 
-       scalar_t* G_core_host = new scalar_t[R0 * N_rest];
-       CHECK_CUDA(cudaMemcpy(G_core_host, d_G_core,
-         sizeof(scalar_t) * R0 * N_rest, cudaMemcpyDeviceToHost));
-       CHECK_CUDA(cudaFree(d_G_core));
- 
-       scalar_t core_norm = std::sqrt(frobenius_norm_sq_sparse(G_core_host, R0 * N_rest));
-       delete[] G_core_host;
+       scalar_t core_norm;
+       CHECK_CUBLAS(cublasNrm2T(cublasH, (int)(R0 * N_rest), d_G_core, 1, &core_norm));
  
        scalar_t norm_residual = std::sqrt(
          std::max((scalar_t)0, input_tsr_norm * input_tsr_norm - core_norm * core_norm));
@@ -2272,29 +2267,20 @@ void gpu_full_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_t cub
        total_end - total_start).count();
      int num_iters = std::min(iter, max_iters);
  
-     // Final core tensor (d_arr_O still holds last n==0 TTMc output)
+     // Final core tensor (d_arr_O still holds last n==0 TTMc output).
+     // Reuse d_G_core buffer (same dimensions as convergence GEMM).
      {
-       uint64_t I0     = coo.dims[0];
-       uint64_t R0     = ranks[0];
-       uint64_t N_rest = 1;
-       for (int l = 1; l < order; l++) N_rest *= ranks[csf_copies[0].modeOrder[l]];
-       scalar_t* d_G_final;
-       CHECK_CUDA(cudaMalloc(&d_G_final, sizeof(scalar_t) * R0 * N_rest));
        scalar_t a = (scalar_t)1, b = (scalar_t)0;
        CHECK_CUBLAS(cublasGemmT(cublasH, CUBLAS_OP_N, CUBLAS_OP_T,
          N_rest, R0, I0, &a,
          d_arr_O,       N_rest,
          d_factors[0],  R0,
-         &b, d_G_final, N_rest));
-       scalar_t* G_core = allocate_aligned_array(R0 * N_rest);
-       CHECK_CUDA(cudaMemcpy(G_core, d_G_final,
-         sizeof(scalar_t) * R0 * N_rest, cudaMemcpyDeviceToHost));
-       CHECK_CUDA(cudaFree(d_G_final));
-       std::free(G_core);
+         &b, d_G_core, N_rest));
      }
  
      // Cleanup
      for (int n = 0; n < order; n++) free_ttmc_cache(ttmc_caches[n]);
+     CHECK_CUDA(cudaFree(d_G_core));
      CHECK_CUDA(cudaFree(d_arr_O));
      for (int i = 0; i < order; i++) CHECK_CUDA(cudaFree(d_factors[i]));
      for (int n = 0; n < order; n++) freeCSFGPU(csf_copies[n]);
