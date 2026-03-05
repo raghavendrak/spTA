@@ -1515,10 +1515,11 @@
  }
  
  // Truncated SVD via eigendecomposition of the Gram matrix.
- // d_A: M×N col-major. Output: top-R left singular vectors in d_factor (M×R col-major).
- // verbose: if false, suppress all internal timing prints.
- void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_t cublasH,
-   scalar_t* d_A, int M, int N, int R, scalar_t* d_factor, bool verbose) {
+// d_A: row-major (M, N) — equivalently, col-major A^T of shape (N, M) with lda=N.
+// Output: top-R left singular vectors in d_factor (M×R col-major).
+// verbose: if false, suppress all internal timing prints.
+void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_t cublasH,
+  scalar_t* d_A, int M, int N, int R, scalar_t* d_factor, bool verbose) {
    scalar_t alpha = (scalar_t)1, beta = (scalar_t)0;
    int K = std::min(M, N);
    R = std::min(R, K);
@@ -1543,9 +1544,11 @@
      // 0 = CUBLAS_DEFAULT_MATH (TF32 on Ampere+)
      // 1 = CUBLAS_PEDANTIC_MATH (strict FP32)
  
+     // d_A is row-major (M,N) = col-major B=A^T (N,M) lda=N.
+     // Gram = A^T*A = B*B^T: OP_N on B (N×M), OP_T on B (M×N) -> N×N.
      cudaEventRecord(ev_start);
-     CHECK_CUBLAS(cublasGemmT(cublasH, CUBLAS_OP_T, CUBLAS_OP_N,
-       N, N, M, &alpha, d_A, M, d_A, M, &beta, d_Gram, N));
+     CHECK_CUBLAS(cublasGemmT(cublasH, CUBLAS_OP_N, CUBLAS_OP_T,
+       N, N, M, &alpha, d_A, N, d_A, N, &beta, d_Gram, N));
      cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
      cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
      if (verbose) std::cout << "  ATA gemm: " << ev_ms << " ms\n";
@@ -1575,8 +1578,9 @@
  
      scalar_t* d_V_R = d_Gram + (long long)(N - R) * N;
      cudaEventRecord(ev_start);
-     CHECK_CUBLAS(cublasGemmT(cublasH, CUBLAS_OP_N, CUBLAS_OP_N,
-       M, R, N, &alpha, d_A, M, d_V_R, N, &beta, d_factor, M));
+     // A*V_R = B^T*V_R: OP_T on B (M×N), OP_N on V_R (N×R) -> M×R.
+     CHECK_CUBLAS(cublasGemmT(cublasH, CUBLAS_OP_T, CUBLAS_OP_N,
+       M, R, N, &alpha, d_A, N, d_V_R, N, &beta, d_factor, M));
      cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
      cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
      if (verbose) std::cout << "  AV gemm: " << ev_ms << " ms\n";
@@ -1605,8 +1609,9 @@
      if (verbose) std::cout << "  AA^T alloc: " << ev_ms << " ms\n";
  
      cudaEventRecord(ev_start);
-     CHECK_CUBLAS(cublasGemmT(cublasH, CUBLAS_OP_N, CUBLAS_OP_T,
-       M, M, N, &alpha, d_A, M, d_A, M, &beta, d_Gram, M));
+     // Gram = A*A^T = B^T*B: OP_T on B (M×N), OP_N on B (N×M) -> M×M.
+     CHECK_CUBLAS(cublasGemmT(cublasH, CUBLAS_OP_T, CUBLAS_OP_N,
+       M, M, N, &alpha, d_A, N, d_A, N, &beta, d_Gram, M));
      cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
      cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
      if (verbose) std::cout << "  AA^T gemm: " << ev_ms << " ms\n";
@@ -1665,6 +1670,14 @@
      CHECK_CUDA(cudaMalloc(&d_U,        sizeof(scalar_t) * M * min_mn));
      CHECK_CUDA(cudaMalloc(&d_VT_dummy, sizeof(scalar_t)));
      CHECK_CUDA(cudaMalloc(&d_info,     sizeof(int)));
+     // d_A is row-major (M,N) = col-major B=A^T (N,M) lda=N.
+     // gesvd needs col-major A (M×N). Transpose B->A on GPU.
+     scalar_t *d_colmaj_A;
+     CHECK_CUDA(cudaMalloc(&d_colmaj_A, sizeof(scalar_t) * M * N));
+     { scalar_t one=(scalar_t)1, zero=(scalar_t)0;
+       CHECK_CUBLAS(cublasGeamT(cublasH, CUBLAS_OP_T, CUBLAS_OP_N, M, N,
+         &one, d_A, N, &zero, d_colmaj_A, M, d_colmaj_A, M)); }
+ 
      int lwork = 0;
      CHECK_CUSOLVER(cusolverGesvdBufSizeT(cusolverH, M, N, &lwork));
      scalar_t *d_work;
@@ -1680,7 +1693,7 @@
      // 1 = CUBLAS_PEDANTIC_MATH (strict FP32)
  
      cudaEventRecord(ev0);
-     CHECK_CUSOLVER(cusolverGesvdT(cusolverH, 'S', 'N', M, N, d_A, M,
+     CHECK_CUSOLVER(cusolverGesvdT(cusolverH, 'S', 'N', M, N, d_colmaj_A, M,
        d_S, d_U, M, d_VT_dummy, 1, d_work, lwork, nullptr, d_info));
      cudaEventRecord(ev1); cudaEventSynchronize(ev1);
      cudaEventElapsedTime(&ev_ms, ev0, ev1);
@@ -1693,6 +1706,7 @@
  
      // First R columns of d_U are contiguous (col-major, descending order) → d_factor
      CHECK_CUDA(cudaMemcpy(d_factor, d_U, sizeof(scalar_t) * M * R, cudaMemcpyDeviceToDevice));
+     CHECK_CUDA(cudaFree(d_colmaj_A));
      CHECK_CUDA(cudaFree(d_S)); CHECK_CUDA(cudaFree(d_U));
      CHECK_CUDA(cudaFree(d_VT_dummy)); CHECK_CUDA(cudaFree(d_info));
      CHECK_CUDA(cudaFree(d_work));
@@ -1704,13 +1718,8 @@
      // M is tiny (< N = rank product) so all allocations here are negligible.
      scalar_t one = (scalar_t)1, zero = (scalar_t)0;
  
-     // Step 1: transpose d_A (M×N col-major) → d_At (N×M col-major)
-     scalar_t *d_At;
-     CHECK_CUDA(cudaMalloc(&d_At, sizeof(scalar_t) * N * M));
-     CHECK_CUBLAS(cublasGeamT(cublasH, CUBLAS_OP_T, CUBLAS_OP_N, N, M,
-       &one, d_A, M, &zero, d_At, N, d_At, N));
- 
-     // Step 2: cusolverDnGesvd on A^T (m=N > n=M) — jobu='S', jobvt='S'
+     // d_A is already A^T: col-major (N, M) with lda=N (N >= M since M <= N).
+     // No transpose needed -- pass d_A directly as the tall-skinny matrix.
      scalar_t *d_S, *d_P, *d_VT; int *d_info;
      CHECK_CUDA(cudaMalloc(&d_S,    sizeof(scalar_t) * M));        // min(N,M)=M singular values
      CHECK_CUDA(cudaMalloc(&d_P,    sizeof(scalar_t) * N * M));    // jobu='S': left vecs of A^T (N×M)
@@ -1722,7 +1731,7 @@
      CHECK_CUDA(cudaMalloc(&d_work, sizeof(scalar_t) * std::max(lwork, 1)));
      std::cout << "  d_work (MB): " << sizeof(scalar_t) * std::max(lwork, 1) / (1024.0 * 1024.0) << "\n";
      cudaEventRecord(ev0);
-     CHECK_CUSOLVER(cusolverGesvdT(cusolverH, 'S', 'S', N, M, d_At, N,
+     CHECK_CUSOLVER(cusolverGesvdT(cusolverH, 'S', 'S', N, M, d_A, N,
        d_S, d_P, N, d_VT, M, d_work, lwork, nullptr, d_info));
      cudaEventRecord(ev1); cudaEventSynchronize(ev1);
      cudaEventElapsedTime(&ev_ms, ev0, ev1);
@@ -1733,14 +1742,12 @@
      if (h_info != 0)
        std::cerr << "  WARNING: cusolverDnGesvd(A^T) info=" << h_info << "\n";
  
-     // Step 3: d_factor (M×R col-major) = first R cols of VT^T
-     //   VT (M×M col-major): VT[r,i] at vt[r + i*M].
-     //   Column r of VT^T = row r of VT = left sing vec r of A.
-     //   cublasGeam: C[M×R] = (first R rows of VT)^T, treating VT as R×M with lda=M.
+     // d_factor (M×R col-major) = first R cols of VT^T.
+     // VT (M×M col-major): col r of VT^T = row r of VT = left sing vec r of A.
      CHECK_CUBLAS(cublasGeamT(cublasH, CUBLAS_OP_T, CUBLAS_OP_N, M, R,
        &one, d_VT, M, &zero, d_factor, M, d_factor, M));
  
-     CHECK_CUDA(cudaFree(d_At)); CHECK_CUDA(cudaFree(d_S));
+     CHECK_CUDA(cudaFree(d_S));
      CHECK_CUDA(cudaFree(d_P));  CHECK_CUDA(cudaFree(d_VT));
      CHECK_CUDA(cudaFree(d_info)); CHECK_CUDA(cudaFree(d_work));
    }
@@ -2157,9 +2164,6 @@
            ranks_v.data(), order,
            ttmc_caches[n]);
          auto ttmc_end = std::chrono::high_resolution_clock::now();
-         // Copy GPU result to HOST — needed for SVD (row→col-major conversion).
-         CHECK_CUDA(cudaMemcpy(arr_O_host, d_arr_O,
-           sizeof(scalar_t) * arr_O_size, cudaMemcpyDeviceToHost));
          double ttmc_us = std::chrono::duration_cast<std::chrono::microseconds>(
            ttmc_end - ttmc_start).count();
          ttmc_time_us[n] += ttmc_us;
@@ -2168,6 +2172,8 @@
  
          // --- Optional CPU verification (3D, iter 0 only) ---
          if (check && iter == 0 && order == 3) {
+           CHECK_CUDA(cudaMemcpy(arr_O_host, d_arr_O,
+             sizeof(scalar_t) * arr_O_size, cudaMemcpyDeviceToHost));
            int idx_A = csf.modeOrder[1];
            int idx_B = csf.modeOrder[2];
            uint32_t f1 = static_cast<uint32_t>(ranks[idx_A]);
@@ -2177,32 +2183,17 @@
          }
  
          // --- SVD: top-ranks[n] left singular vectors of TTMc output ---
+         // d_arr_O is row-major (M, N) = col-major A^T (N, M) lda=N -- pass directly.
          uint64_t M = coo.dims[n];
          uint64_t N = 1;
          for (int l = 1; l < order; l++) N *= ranks[csf.modeOrder[l]];
  
-         // Row-major (M, N) → column-major (M, N) for cuSOLVER
-         auto cm_start = std::chrono::high_resolution_clock::now();
-         std::vector<scalar_t> mat_colmajor(M * N);
-         for (uint64_t c = 0; c < N; c++)
-           for (uint64_t r = 0; r < M; r++)
-             mat_colmajor[r + c * M] = arr_O_host[r * N + c];
-         if (verbose)
-           std::cout << "  row→col-major: "
-                     << std::chrono::duration_cast<std::chrono::microseconds>(
-                          std::chrono::high_resolution_clock::now() - cm_start).count() << " us\n";
- 
-         scalar_t* d_mat;
-         CHECK_CUDA(cudaMalloc(&d_mat, sizeof(scalar_t) * M * N));
-         CHECK_CUDA(cudaMemcpy(d_mat, mat_colmajor.data(),
-           sizeof(scalar_t) * M * N, cudaMemcpyHostToDevice));
- 
          auto svd_start = std::chrono::high_resolution_clock::now();
-         gpu_truncated_svd_update_factor(cusolverH, cublasH, d_mat,
+         gpu_truncated_svd_update_factor(cusolverH, cublasH, d_arr_O,
            static_cast<int>(M), static_cast<int>(N),
            static_cast<int>(ranks[n]), d_factors[n], verbose);
  
-         // gpu_full_svd_update_factor(cusolverH, cublasH, d_mat,
+         // gpu_full_svd_update_factor(cusolverH, cublasH, d_arr_O,
          //   static_cast<int>(M), static_cast<int>(N),
          //   static_cast<int>(ranks[n]), d_factors[n], verbose);
          auto svd_end = std::chrono::high_resolution_clock::now();
@@ -2221,7 +2212,6 @@
              factors[n][i_idx * ranks[n] + r_idx] = U_host[i_idx + r_idx * M];
          CHECK_CUDA(cudaMemcpy(d_factors[n], factors[n],
            sizeof(scalar_t) * factor_sizes[n], cudaMemcpyHostToDevice));
-         CHECK_CUDA(cudaFree(d_mat));
        }
  
        // Per-iteration timing printout
