@@ -70,6 +70,12 @@
    #define cublasSyrkT           cublasSsyrk
  #endif
  
+ #if SCALAR_DOUBLE
+ const scalar_t eps_mach = 1.1102230246251565e-16; // DBL_EPSILON
+#else
+ const scalar_t eps_mach = 1.1920929e-7f;          // FLT_EPSILON
+#endif
+
  // Bring std::cout/endl into scope for the v4 engine functions below.
  using std::cout;
  using std::endl;
@@ -1224,6 +1230,44 @@ __global__ void check_resolution(const scalar_t* W, int c, int dim, int R,
   }
 }
 
+// ---- Double-precision kernels for Gram EVD path ----
+
+// Double-precision resolution check (uses DBL_EPSILON always)
+__global__ void check_resolution_dp(const double* W, int c, int dim, int R,
+  double eps_mach_dp, int* flag) {
+  int j = blockIdx.x * blockDim.x + threadIdx.x;
+  if (j < R - 1) {
+    double lam_j  = W[dim - R + j];
+    double lam_j1 = W[dim - R + j + 1];
+    double lam_max = W[dim - 1];
+    double gnr = (lam_j1 - lam_j) / (2.0 * c * eps_mach_dp * lam_max);
+    if (gnr <= 1.0)
+      atomicExch(flag, 1);
+  }
+}
+
+// Compute 1/sigma from double eigenvalues, output to scalar_t
+__global__ void compute_inv_sigma_dp(const double* W, scalar_t* diag,
+  int N, int R, double eps) {
+  int j = blockIdx.x * blockDim.x + threadIdx.x;
+  if (j < R)
+    diag[j] = (scalar_t)(1.0 / sqrt(fmax(W[N - R + j], eps)));
+}
+
+// Convert double array to scalar_t (no-op when scalar_t is double)
+__global__ void convert_dp_to_scalar(const double* src, scalar_t* dst, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n)
+    dst[i] = (scalar_t)src[i];
+}
+
+// Convert scalar_t array to double
+__global__ void convert_scalar_to_dp(const scalar_t* src, double* dst, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n)
+    dst[i] = (double)src[i];
+}
+
  // All tensor and factor data must already be on GPU before calling.
  // Result is written to d_arr_O (GPU) and stays there — caller copies to HOST as needed.
  void run_ttmc_cuda(
@@ -1558,8 +1602,12 @@ void gpu_full_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_t cub
   cudaEvent_t ev0, ev1; float ev_ms = 0.f;
   cudaEventCreate(&ev0); cudaEventCreate(&ev1);
   if (verbose) std::cout << "  M = " << M << ", N = " << N << ", R = " << R << "\n";
-  std::cout << "MxN matrix size= " << M * N  * sizeof(scalar_t) / (1024.0 * 1024.0) << " MB\n";
-
+  
+  cublasMath_t mode;
+  cublasSetMathMode(cublasH, CUBLAS_PEDANTIC_MATH);
+  cublasGetMathMode(cublasH, &mode);
+  std::cout << "Math mode: " << mode << "\n";
+  
   if (M > N) {
     // --- cusolverDnSgesvd / cusolverDnDgesvd: jobu='S', jobvt='N' (works when M > N) ---
     scalar_t *d_S, *d_U, *d_VT_dummy; int *d_info;
@@ -1578,14 +1626,13 @@ void gpu_full_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_t cub
     int lwork = 0;
     CHECK_CUSOLVER(cusolverGesvdBufSizeT(cusolverH, M, N, &lwork));
     scalar_t *d_work;
-    if (verbose) std::cout << "  d_work (MB): " << sizeof(scalar_t) * std::max(lwork, 1) / (1024.0 * 1024.0) << "\n";
     // std::cout << "ratio of d_work to MxN matrix size= " << (double) sizeof(scalar_t) * std::max(lwork, 1) / (M * N * sizeof(scalar_t)) << "\n";
     CHECK_CUDA(cudaMalloc(&d_work, sizeof(scalar_t) * std::max(lwork, 1)));
 
 
-    cublasMath_t mode;
-    cublasGetMathMode(cublasH, &mode);
-    if (verbose) std::cout << "Math mode: " << mode << "\n";
+    // cublasMath_t mode;
+    // cublasGetMathMode(cublasH, &mode);
+    // if (verbose) std::cout << "Math mode: " << mode << "\n";
     // 0 = CUBLAS_DEFAULT_MATH (TF32 on Ampere+)
     // 1 = CUBLAS_PEDANTIC_MATH (strict FP32)
 
@@ -1612,15 +1659,19 @@ void gpu_full_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_t cub
     CHECK_CUDA(cudaFree(d_work));
   } else {
     // --- M <= N: SVD of A^T (N×M, now tall-skinny N > M) ---
-    // d_A is col-major M×N (lda=M). Transpose to col-major N×M (lda=N) via cublasGeam.
+    // d_A is row-major (M,N), i.e. col-major A^T (N,M) with lda=N.
     // A^T = P·S·VT  =>  A = VT^T·S·P^T  =>  left sing vecs of A = cols of VT^T = rows of VT.
     // Use jobvt='S' to get VT (M×M col-major), then extract: d_factor = VT^T[:, 0:R].
     // M is tiny (< N = rank product) so all allocations here are negligible.
     scalar_t one = (scalar_t)1, zero = (scalar_t)0;
 
     // d_A is already A^T: col-major (N, M) with lda=N (N >= M since M <= N).
-    // No transpose needed -- pass d_A directly as the tall-skinny matrix.
-    scalar_t *d_S, *d_P, *d_VT; int *d_info;
+    // gesvd overwrites its input, so factorize a copy to keep d_A unchanged
+    // (the caller still uses d_A for core-norm computation after SVD).
+    scalar_t *d_A_tall, *d_S, *d_P, *d_VT; int *d_info;
+    CHECK_CUDA(cudaMalloc(&d_A_tall, sizeof(scalar_t) * (size_t)N * (size_t)M));
+    CHECK_CUDA(cudaMemcpy(d_A_tall, d_A, sizeof(scalar_t) * (size_t)N * (size_t)M,
+      cudaMemcpyDeviceToDevice));
     CHECK_CUDA(cudaMalloc(&d_S,    sizeof(scalar_t) * M));        // min(N,M)=M singular values
     CHECK_CUDA(cudaMalloc(&d_P,    sizeof(scalar_t) * N * M));    // jobu='S': left vecs of A^T (N×M)
     CHECK_CUDA(cudaMalloc(&d_VT,   sizeof(scalar_t) * M * M));    // jobvt='S': right vecs of A^T (M×M) = U^T of A
@@ -1631,7 +1682,7 @@ void gpu_full_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_t cub
     CHECK_CUDA(cudaMalloc(&d_work, sizeof(scalar_t) * std::max(lwork, 1)));
     if (verbose) std::cout << "  d_work (MB): " << sizeof(scalar_t) * std::max(lwork, 1) / (1024.0 * 1024.0) << "\n";
     cudaEventRecord(ev0);
-    CHECK_CUSOLVER(cusolverGesvdT(cusolverH, 'S', 'S', N, M, d_A, N,
+    CHECK_CUSOLVER(cusolverGesvdT(cusolverH, 'S', 'S', N, M, d_A_tall, N,
       d_S, d_P, N, d_VT, M, d_work, lwork, nullptr, d_info));
     cudaEventRecord(ev1); cudaEventSynchronize(ev1);
     cudaEventElapsedTime(&ev_ms, ev0, ev1);
@@ -1647,6 +1698,7 @@ void gpu_full_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_t cub
     CHECK_CUBLAS(cublasGeamT(cublasH, CUBLAS_OP_N, CUBLAS_OP_N, R, M,
       &one, d_VT, M, &zero, d_factor, R, d_factor, R));
 
+    CHECK_CUDA(cudaFree(d_A_tall));
     CHECK_CUDA(cudaFree(d_S));
     CHECK_CUDA(cudaFree(d_P));  CHECK_CUDA(cudaFree(d_VT));
     CHECK_CUDA(cudaFree(d_info)); CHECK_CUDA(cudaFree(d_work));
@@ -1671,270 +1723,234 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
    cudaEventCreate(&ev_stop);
  
    if (M > N) {
-     scalar_t* d_Gram;
+     // ---- Gram & EVD in double precision (block-based accumulation) ----
+     const double eps_mach_dp = 1.1102230246251565e-16; // DBL_EPSILON
+     double* d_Gram_dp;
      cudaEventRecord(ev_start);
-     CHECK_CUDA(cudaMalloc(&d_Gram, sizeof(scalar_t) * N * N));
+     CHECK_CUDA(cudaMalloc(&d_Gram_dp, sizeof(double) * N * N));
+     CHECK_CUDA(cudaMemset(d_Gram_dp, 0, sizeof(double) * N * N));
      cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
      cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
-     if (verbose) std::cout << "  ATA alloc: " << ev_ms << " ms\n";
+     if (verbose) std::cout << "  ATA alloc (dp): " << ev_ms << " ms\n";
  
  
      cublasMath_t mode;
      cublasGetMathMode(cublasH, &mode);
-     // Strict IEEE FP32/FP64 — no TF32 tensor cores
      CHECK_CUBLAS(cublasSetMathMode(cublasH, CUBLAS_PEDANTIC_MATH));
-    //  if (verbose) std::cout << "Math mode: " << mode << "\n";
-     // 0 = CUBLAS_DEFAULT_MATH (TF32 on Ampere+)
-     // 1 = CUBLAS_PEDANTIC_MATH (strict FP32)
- 
+
+     // A^T*A in double. Try full M×N double alloc; fall back to blocked if OOM.
      // d_A is row-major (M,N) = col-major B=A^T (N,M) lda=N.
-     // Gram = A^T*A = B*B^T: OP_N on B (N×M), OP_T on B (M×N) -> N×N.
+     double alpha_dp = 1.0, beta_zero = 0.0;
+     long long MN = (long long)M * N;
+     double* d_A_dp = nullptr;
+     cudaError_t alloc_err = cudaMalloc(&d_A_dp, sizeof(double) * MN);
+
      cudaEventRecord(ev_start);
-     CHECK_CUBLAS(cublasGemmT(cublasH, CUBLAS_OP_N, CUBLAS_OP_T,
-       N, N, M, &alpha, d_A, N, d_A, N, &beta, d_Gram, N));
-
-
-    // syrk: C = alpha * B * B^T = A^T * A,  output N×N
-    // CHECK_CUBLAS(cublasSyrkT(cublasH,
-    //   CUBLAS_FILL_MODE_UPPER,  // fill upper triangle (matches your syevd call)
-    //   CUBLAS_OP_N,             // C = A * A^T  (A here is B = col-major (N,M))
-    //   N,                       // n: order of output (N×N)
-    //   M,                       // k: contraction dim (columns of B in OP_N mode)
-    //   &alpha,                  // 1.0
-    //   d_A, N,                  // B, lda = N
-    //   &beta,                   // 0.0
-    //   d_Gram, N                // output, ldc = N
-    // ));
+     if (alloc_err == cudaSuccess) {
+       // Full conversion path: convert once, single cublasDgemm
+       convert_scalar_to_dp<<<(MN + 255)/256, 256>>>(d_A, d_A_dp, MN);
+       CHECK_CUBLAS(cublasDgemm(cublasH, CUBLAS_OP_N, CUBLAS_OP_T,
+         N, N, M, &alpha_dp, d_A_dp, N, d_A_dp, N, &beta_zero, d_Gram_dp, N));
+       CHECK_CUDA(cudaFree(d_A_dp));
+     } else {
+       // OOM: fall back to block-based accumulation
+       cudaGetLastError(); // clear the failed alloc error
+       if (verbose) std::cout << "  full dp alloc failed, using blocked path\n";
+       const int BSIZ = 32768;
+       double* d_blk_dp;
+       CHECK_CUDA(cudaMalloc(&d_blk_dp, sizeof(double) * std::min(BSIZ, M) * N));
+       double beta_one = 1.0;
+       for (int s = 0; s < M; s += BSIZ) {
+         int b = std::min(BSIZ, M - s);
+         long long chunk_elems = (long long)b * N;
+         convert_scalar_to_dp<<<(chunk_elems + 255)/256, 256>>>(
+           d_A + (long long)s * N, d_blk_dp, chunk_elems);
+         CHECK_CUBLAS(cublasDgemm(cublasH, CUBLAS_OP_N, CUBLAS_OP_T,
+           N, N, b, &alpha_dp, d_blk_dp, N, d_blk_dp, N,
+           (s == 0) ? &beta_zero : &beta_one, d_Gram_dp, N));
+       }
+       CHECK_CUDA(cudaFree(d_blk_dp));
+     }
      cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
      cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
-     if (verbose) std::cout << "  ATA gemm: " << ev_ms << " ms\n";
+     if (verbose) std::cout << "  ATA gemm (dp): " << ev_ms << " ms\n";
  
-     scalar_t *d_W;
-     CHECK_CUDA(cudaMalloc(&d_W, sizeof(scalar_t) * N));
+     // EVD in double precision
+     double *d_W_dp;
+     CHECK_CUDA(cudaMalloc(&d_W_dp, sizeof(double) * N));
      int lwork = 0;
-     CHECK_CUSOLVER(cusolverSyevdBufSizeT(cusolverH, CUSOLVER_EIG_MODE_VECTOR,
-       CUBLAS_FILL_MODE_UPPER, N, d_Gram, N, d_W, &lwork));
-     // std::cout << "  lwork (MB): " << lwork / (1024.0 * 1024.0) << "\n";
- 
-     scalar_t *d_work; int *d_info;
+     CHECK_CUSOLVER(cusolverDnDsyevd_bufferSize(cusolverH, CUSOLVER_EIG_MODE_VECTOR,
+       CUBLAS_FILL_MODE_UPPER, N, d_Gram_dp, N, d_W_dp, &lwork));
+
+     double *d_work_dp; int *d_info;
      cudaEventRecord(ev_start);
-     CHECK_CUDA(cudaMalloc(&d_work, sizeof(scalar_t) * lwork));
+     CHECK_CUDA(cudaMalloc(&d_work_dp, sizeof(double) * lwork));
      CHECK_CUDA(cudaMalloc(&d_info, sizeof(int)));
      cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
      cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
      if (verbose) std::cout << "  eig buf alloc: " << ev_ms << " ms\n";
-     if (verbose) std::cout << "  d_work (MB): " << sizeof(scalar_t) * lwork / (1024.0 * 1024.0) << "\n";
- 
+     if (verbose) std::cout << "  d_work (MB): " << sizeof(double) * lwork / (1024.0 * 1024.0) << "\n";
+
      cudaEventRecord(ev_start);
-     CHECK_CUSOLVER(cusolverSyevdT(cusolverH, CUSOLVER_EIG_MODE_VECTOR,
-       CUBLAS_FILL_MODE_UPPER, N, d_Gram, N, d_W, d_work, lwork, d_info));
+     CHECK_CUSOLVER(cusolverDnDsyevd(cusolverH, CUSOLVER_EIG_MODE_VECTOR,
+       CUBLAS_FILL_MODE_UPPER, N, d_Gram_dp, N, d_W_dp, d_work_dp, lwork, d_info));
      cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
      cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
-     if (verbose) std::cout << "  eig decomp: " << ev_ms << " ms\n";
+     if (verbose) std::cout << "  eig decomp (dp): " << ev_ms << " ms\n";
      int h_info = 0;
      CHECK_CUDA(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
      if (h_info != 0) {
-       std::cerr << "  WARNING: cusolverSyevdT info=" << h_info << "\n";
-       CHECK_CUDA(cudaFree(d_Gram)); CHECK_CUDA(cudaFree(d_W));
-       CHECK_CUDA(cudaFree(d_work)); CHECK_CUDA(cudaFree(d_info));
+       std::cerr << "  WARNING: cusolverDnDsyevd info=" << h_info << "\n";
+       CHECK_CUDA(cudaFree(d_Gram_dp)); CHECK_CUDA(cudaFree(d_W_dp));
+       CHECK_CUDA(cudaFree(d_work_dp)); CHECK_CUDA(cudaFree(d_info));
        return;
      }
 
-     // --- Resolution check: min GNR > 1 among top-R eigenvalues ---
-     // Reuse d_info as flag: 0 = pass, 1 = at least one pair unresolved.
+     // --- Resolution check (double eigenvalues, DBL_EPSILON) ---
      CHECK_CUDA(cudaMemset(d_info, 0, sizeof(int)));
-#if SCALAR_DOUBLE
-     const scalar_t eps_mach = 1.1102230246251565e-16; // DBL_EPSILON
-#else
-     const scalar_t eps_mach = 1.1920929e-7f;          // FLT_EPSILON
-#endif
      if (R > 1)
-      check_resolution<<<1, R - 1>>>(d_W, M + N * N * N, N, R, eps_mach, d_info);
+      check_resolution_dp<<<1, R - 1>>>(d_W_dp, M + N, N, R, eps_mach_dp, d_info);
      CHECK_CUDA(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
      if (h_info != 0) {
        if (verbose)
          std::cout << "  resolution condition failed among top-" << R
                    << " eigenvalues, falling back to full SVD\n";
-       CHECK_CUDA(cudaFree(d_Gram)); CHECK_CUDA(cudaFree(d_W));
-       CHECK_CUDA(cudaFree(d_work)); CHECK_CUDA(cudaFree(d_info));
+       CHECK_CUDA(cudaFree(d_Gram_dp)); CHECK_CUDA(cudaFree(d_W_dp));
+       CHECK_CUDA(cudaFree(d_work_dp)); CHECK_CUDA(cudaFree(d_info));
        gpu_full_svd_update_factor(cusolverH, cublasH, d_A, M, N, R, d_factor, verbose);
        return;
      }
 
-     // --- Usability check: sigma_k >= sqrt(sigma_1 * sigma_n) ---
-     // Eigenvalues in d_W ascending: d_W[0]=sigma_n^2, d_W[N-1]=sigma_1^2, d_W[N-R]=sigma_k^2
-     /*
-     {
-      scalar_t h_W[3];
-      CHECK_CUDA(cudaMemcpy(&h_W[0], d_W,             sizeof(scalar_t), cudaMemcpyDeviceToHost));
-      CHECK_CUDA(cudaMemcpy(&h_W[1], d_W + N - 1,     sizeof(scalar_t), cudaMemcpyDeviceToHost));
-      CHECK_CUDA(cudaMemcpy(&h_W[2], d_W + N - R,     sizeof(scalar_t), cudaMemcpyDeviceToHost));
-      scalar_t sig_n2 = h_W[0], sig_12 = h_W[1], sig_k2 = h_W[2];
-      if (sig_k2 < sqrt(sig_12 * fmax(sig_n2, (scalar_t)0))) {
-        if (verbose)
-          std::cout << "  truncated SVD ill-conditioned (sig_k^2=" << sig_k2
-                    << " < sqrt(sig_1^2*sig_n^2)=" << sqrt(sig_12 * fmax(sig_n2, (scalar_t)0))
-                    << "), falling back to full SVD\n";
-        CHECK_CUDA(cudaFree(d_Gram)); CHECK_CUDA(cudaFree(d_W));
-        CHECK_CUDA(cudaFree(d_work)); CHECK_CUDA(cudaFree(d_info));
-        gpu_full_svd_update_factor(cusolverH, cublasH, d_A, M, N, R, d_factor, verbose);
-        return;
-      }
-    }
-    */
+     // Convert top-R eigenvectors from double to scalar_t (N×R, small)
+     double* d_V_R_dp = d_Gram_dp + (long long)(N - R) * N;
+     scalar_t* d_V_R;
+     CHECK_CUDA(cudaMalloc(&d_V_R, sizeof(scalar_t) * N * R));
+     convert_dp_to_scalar<<<((long long)N*R + 255)/256, 256>>>(d_V_R_dp, d_V_R, N * R);
 
-     scalar_t* d_V_R = d_Gram + (long long)(N - R) * N;
      // V_R^T*B = col-major (R,M) lda=R = row-major (M,R) directly.
-     // result[r,m] = v_r^T*B[:,m] = (A*v_r)[m] = sigma_r*u_r[m]  (left sing vec r, scaled).
      cudaEventRecord(ev_start);
      CHECK_CUBLAS(cublasGemmT(cublasH, CUBLAS_OP_T, CUBLAS_OP_N,
        R, M, N, &alpha, d_V_R, N, d_A, N, &beta, d_factor, R));
      cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
      cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
      if (verbose) std::cout << "  AV gemm: " << ev_ms << " ms\n";
- 
-     // diag[j] = 1/sigma_j = 1/sqrt(eigenvalue[N-R+j]) for j in [0,R).
+
+     // diag[j] = 1/sigma_j = 1/sqrt(eigenvalue[N-R+j]) from double eigenvalues.
      scalar_t* d_diag;
      CHECK_CUDA(cudaMalloc(&d_diag, sizeof(scalar_t) * R));
      cudaEventRecord(ev_start);
-     compute_inv_sigma<<<(R+255)/256, 256>>>(d_W, d_diag, N, R, (scalar_t)1e-12);
-     // Scale row r of col-major (R,M) by diag[r]: d_factor = diag(d_diag) * d_factor.
+     compute_inv_sigma_dp<<<(R+255)/256, 256>>>(d_W_dp, d_diag, N, R, 1e-12);
      CHECK_CUBLAS(cublasDgmmT(cublasH, CUBLAS_SIDE_LEFT, R, M,
        d_factor, R, d_diag, 1, d_factor, R));
      cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
      cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
      if (verbose) std::cout << "  normalize (1/sigma): " << ev_ms << " ms\n";
- 
+
      CHECK_CUDA(cudaFree(d_diag));
-     CHECK_CUDA(cudaFree(d_Gram)); CHECK_CUDA(cudaFree(d_W));
-     CHECK_CUDA(cudaFree(d_work)); CHECK_CUDA(cudaFree(d_info));
+     CHECK_CUDA(cudaFree(d_V_R));
+     CHECK_CUDA(cudaFree(d_Gram_dp)); CHECK_CUDA(cudaFree(d_W_dp));
+     CHECK_CUDA(cudaFree(d_work_dp)); CHECK_CUDA(cudaFree(d_info));
    } else {
     // ============================================================
     // M <= N path: eigendecompose AA^T (M×M) to get left singular
     // vectors directly (eigvecs of AA^T = u_r, already unit-norm)
     // ============================================================
 
-    // --- 1. Allocate Gram matrix (M × M) ---
-    scalar_t* d_Gram;
+    // ---- Gram & EVD in double (M ≤ N, both small — no blocking needed) ----
+    const double eps_mach_dp = 1.1102230246251565e-16; // DBL_EPSILON
+    double alpha_dp = 1.0, beta_zero_dp = 0.0;
+
+    // --- 1. Convert entire d_A to double (M*N is small) ---
+    double* d_A_dp;
+    CHECK_CUDA(cudaMalloc(&d_A_dp, sizeof(double) * (long long)M * N));
+    convert_scalar_to_dp<<<((long long)M*N + 255)/256, 256>>>(d_A, d_A_dp, (long long)M * N);
+
+    // --- 2. Allocate & compute Gram = A A^T (M×M) in double via syrk ---
+    double* d_Gram_dp;
     cudaEventRecord(ev_start);
-    CHECK_CUDA(cudaMalloc(&d_Gram, sizeof(scalar_t) * M * M));
+    CHECK_CUDA(cudaMalloc(&d_Gram_dp, sizeof(double) * M * M));
     cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
     cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
-    if (verbose) std::cout << "  AA^T alloc: " << ev_ms << " ms\n";
+    if (verbose) std::cout << "  AA^T alloc (dp): " << ev_ms << " ms\n";
 
-    // --- 2. Gram = A A^T via syrk (upper triangle only, ~half FLOPs) ---
-    //   d_A is row-major (M,N) → cuBLAS sees col-major B = A^T (N,M), lda=N
+    //   d_A_dp is row-major (M,N) → col-major B = A^T (N,M), lda=N
     //   Want A A^T = B^T B → CUBLAS_OP_T, output M×M
     cudaEventRecord(ev_start);
-    CHECK_CUBLAS(cublasSyrkT(cublasH, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_T,
-        M, N, &alpha, d_A, N, &beta, d_Gram, M));
+    CHECK_CUBLAS(cublasDsyrk(cublasH, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_T,
+        M, N, &alpha_dp, d_A_dp, N, &beta_zero_dp, d_Gram_dp, M));
     cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
     cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
-    if (verbose) std::cout << "  AA^T syrk: " << ev_ms << " ms\n";
+    if (verbose) std::cout << "  AA^T syrk (dp): " << ev_ms << " ms\n";
+    CHECK_CUDA(cudaFree(d_A_dp));
 
-    // --- 3. Query workspace for eigendecomposition ---
-    scalar_t *d_W;
-    CHECK_CUDA(cudaMalloc(&d_W, sizeof(scalar_t) * M));
+    // --- 3. Query workspace for double eigendecomposition ---
+    double *d_W_dp;
+    CHECK_CUDA(cudaMalloc(&d_W_dp, sizeof(double) * M));
     int lwork = 0;
-    CHECK_CUSOLVER(cusolverSyevdBufSizeT(cusolverH, CUSOLVER_EIG_MODE_VECTOR,
-        CUBLAS_FILL_MODE_UPPER, M, d_Gram, M, d_W, &lwork));
+    CHECK_CUSOLVER(cusolverDnDsyevd_bufferSize(cusolverH, CUSOLVER_EIG_MODE_VECTOR,
+        CUBLAS_FILL_MODE_UPPER, M, d_Gram_dp, M, d_W_dp, &lwork));
 
-    scalar_t *d_work; int *d_info;
+    double *d_work_dp; int *d_info;
     cudaEventRecord(ev_start);
-    CHECK_CUDA(cudaMalloc(&d_work, sizeof(scalar_t) * lwork));
+    CHECK_CUDA(cudaMalloc(&d_work_dp, sizeof(double) * lwork));
     CHECK_CUDA(cudaMalloc(&d_info, sizeof(int)));
     cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
     cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
     if (verbose) std::cout << "  eig buf alloc: " << ev_ms << " ms\n";
 
-    // --- 4. Eigendecompose: d_Gram overwritten with eigenvectors (col-major) ---
-    //   Eigenvalues in d_W in ascending order: λ_0 ≤ λ_1 ≤ ... ≤ λ_{M-1}
-    //   Last R columns of d_Gram = top-R eigenvectors = left singular vectors
+    // --- 4. Eigendecompose in double ---
     cudaEventRecord(ev_start);
-    CHECK_CUSOLVER(cusolverSyevdT(cusolverH, CUSOLVER_EIG_MODE_VECTOR,
-        CUBLAS_FILL_MODE_UPPER, M, d_Gram, M, d_W, d_work, lwork, d_info));
+    CHECK_CUSOLVER(cusolverDnDsyevd(cusolverH, CUSOLVER_EIG_MODE_VECTOR,
+        CUBLAS_FILL_MODE_UPPER, M, d_Gram_dp, M, d_W_dp, d_work_dp, lwork, d_info));
     cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
     cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
-    if (verbose) std::cout << "  eig decomp: " << ev_ms << " ms\n";
+    if (verbose) std::cout << "  eig decomp (dp): " << ev_ms << " ms\n";
 
     // --- 5. Check convergence ---
     int h_info = 0;
     CHECK_CUDA(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
     if (h_info != 0) {
         std::cerr << "  syevd failed: devInfo = " << h_info << "\n";
-        // h_info < 0: parameter -h_info is invalid
-        // h_info > 0: algorithm did not converge
     }
-    /*
-    // --- 5b. Usability check: sigma_k >= sqrt(sigma_1 * sigma_n) ---
-    // Eigenvalues in d_W ascending: d_W[0]=sigma_n^2, d_W[M-1]=sigma_1^2, d_W[M-R]=sigma_k^2
-    {
-      scalar_t h_W[3];
-      CHECK_CUDA(cudaMemcpy(&h_W[0], d_W,             sizeof(scalar_t), cudaMemcpyDeviceToHost));
-      CHECK_CUDA(cudaMemcpy(&h_W[1], d_W + M - 1,     sizeof(scalar_t), cudaMemcpyDeviceToHost));
-      CHECK_CUDA(cudaMemcpy(&h_W[2], d_W + M - R,     sizeof(scalar_t), cudaMemcpyDeviceToHost));
-      scalar_t sig_n2 = h_W[0], sig_12 = h_W[1], sig_k2 = h_W[2];
-      if (sig_k2 < sqrt(sig_12 * fmax(sig_n2, (scalar_t)0))) {
-        if (verbose)
-          std::cout << "  truncated SVD ill-conditioned (sig_k^2=" << sig_k2
-                    << " < sqrt(sig_1^2*sig_n^2)=" << sqrt(sig_12 * fmax(sig_n2, (scalar_t)0))
-                    << "), falling back to full SVD\n";
-        CHECK_CUDA(cudaFree(d_Gram)); CHECK_CUDA(cudaFree(d_W));
-        CHECK_CUDA(cudaFree(d_work)); CHECK_CUDA(cudaFree(d_info));
-        gpu_full_svd_update_factor(cusolverH, cublasH, d_A, M, N, R, d_factor, verbose);
-        return;
-      }
-    }
-    */
-    // --- 5c. Resolution check: min GNR > 1 among top-R eigenvalues ---
+
+    // --- 5c. Resolution check (double eigenvalues, DBL_EPSILON) ---
     CHECK_CUDA(cudaMemset(d_info, 0, sizeof(int)));
-#if SCALAR_DOUBLE
-    const scalar_t eps_mach = 1.1102230246251565e-16; // DBL_EPSILON
-#else
-    const scalar_t eps_mach = 1.1920929e-7f;          // FLT_EPSILON
-#endif
     if (R > 1)
-    check_resolution<<<1, R - 1>>>(d_W, N + M * M * M, M, R, eps_mach, d_info);
+    check_resolution_dp<<<1, R - 1>>>(d_W_dp, N + M, M, R, eps_mach_dp, d_info);
     CHECK_CUDA(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
     if (h_info != 0) {
       if (verbose)
         std::cout << "  resolution condition failed among top-" << R
                   << " eigenvalues, falling back to full SVD\n";
-      CHECK_CUDA(cudaFree(d_Gram)); CHECK_CUDA(cudaFree(d_W));
-      CHECK_CUDA(cudaFree(d_work)); CHECK_CUDA(cudaFree(d_info));
+      CHECK_CUDA(cudaFree(d_Gram_dp)); CHECK_CUDA(cudaFree(d_W_dp));
+      CHECK_CUDA(cudaFree(d_work_dp)); CHECK_CUDA(cudaFree(d_info));
       gpu_full_svd_update_factor(cusolverH, cublasH, d_A, M, N, R, d_factor, verbose);
       return;
     }
 
-    // --- 6. Transpose top-R eigenvectors into d_factor as row-major (M, R) ---
-    //
-    //   d_Gram layout after syevd:
-    //     col-major (M, M), lda = M
-    //     last R columns start at offset (M - R) * M
-    //     each column = M-length eigenvector u_r
-    //
-    //   d_factor target layout:
-    //     row-major (M, R) = col-major (R, M), lda = R
-    //     row m, col r → element at index [r + m * R]
-    //
-    //   geam with OP_T transposes col-major (M, R) → col-major (R, M):
-    //     C[r, m] = A[m, r] = eigvec_r[m] = u_r[m]  ✓
-    //
+    // --- 6. Convert top-R eigenvectors from double to scalar_t, then transpose ---
+    //   d_Gram_dp: col-major (M, M) double. Last R cols at offset (M-R)*M.
+    scalar_t* d_eigvecs;
+    CHECK_CUDA(cudaMalloc(&d_eigvecs, sizeof(scalar_t) * M * R));
+    convert_dp_to_scalar<<<((long long)M*R + 255)/256, 256>>>(
+      d_Gram_dp + (long long)(M - R) * M, d_eigvecs, (long long)M * R);
+
     cudaEventRecord(ev_start);
     { scalar_t one = (scalar_t)1, zero = (scalar_t)0;
       CHECK_CUBLAS(cublasGeamT(cublasH, CUBLAS_OP_T, CUBLAS_OP_N,
-          R, M,                                        // output dims (R × M) col-major
-          &one,  d_Gram + (long long)(M - R) * M, M,   // src: last R cols, lda = M
-          &zero, d_factor, R,                           // B unused (beta=0), ldb = R
-          d_factor, R));                                // dst: col-major (R,M) = row-major (M,R)
+          R, M,                    // output dims (R × M) col-major
+          &one,  d_eigvecs, M,     // src: (M, R) col-major, lda = M
+          &zero, d_factor, R,      // B unused (beta=0), ldb = R
+          d_factor, R));           // dst: col-major (R,M) = row-major (M,R)
     }
     cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
     cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
     if (verbose) std::cout << "  transpose eigvecs: " << ev_ms << " ms\n";
 
     // --- 7. Cleanup ---
-    CHECK_CUDA(cudaFree(d_Gram)); CHECK_CUDA(cudaFree(d_W));
-    CHECK_CUDA(cudaFree(d_work)); CHECK_CUDA(cudaFree(d_info));
+    CHECK_CUDA(cudaFree(d_eigvecs));
+    CHECK_CUDA(cudaFree(d_Gram_dp)); CHECK_CUDA(cudaFree(d_W_dp));
+    CHECK_CUDA(cudaFree(d_work_dp)); CHECK_CUDA(cudaFree(d_info));
 }
    CHECK_CUDA(cudaDeviceSynchronize());
    cudaEventDestroy(ev_start);
@@ -2388,9 +2404,9 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
            static_cast<int>(M), static_cast<int>(N),
            static_cast<int>(ranks[n]), d_factors[n], verbose);
  
-         // gpu_full_svd_update_factor(cusolverH, cublasH, d_arr_O,
-         //   static_cast<int>(M), static_cast<int>(N),
-         //   static_cast<int>(ranks[n]), d_factors[n], verbose);
+        //  gpu_full_svd_update_factor(cusolverH, cublasH, d_arr_O,
+        //    static_cast<int>(M), static_cast<int>(N),
+        //    static_cast<int>(ranks[n]), d_factors[n], verbose);
          auto svd_end = std::chrono::high_resolution_clock::now();
          double svd_us = std::chrono::duration_cast<std::chrono::microseconds>(
            svd_end - svd_start).count();
