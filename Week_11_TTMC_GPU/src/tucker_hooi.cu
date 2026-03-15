@@ -335,8 +335,7 @@
    size_t d_shared_mem = 0;
    // 4D tiny-streams params
    int tiny_stream_count = 0;
-   // HOST arrays (non-owning ptrs into CSFCopy.ptrs/idxs) for tiny-streams launch loop
-   // and d_meta_data packing inside launch_ttmc4_tiny_streams_flat.
+   // HOST arrays (non-owning ptrs into CSFCopy.ptrs/idxs) for tiny-streams launch loop.
    std::vector<uint64_t*> h_mode_ptrs;  // HOST: ptrs[l].data() for each level
    std::vector<uint64_t*> h_mode_idxs;  // HOST: idxs[l].data() for each level
    // Cached array sizes (invariant across HOOI iterations)
@@ -1014,196 +1013,152 @@
    }
  }
  
- __constant__ uint64_t tiny4d_ofst[8];
  __global__ void kernel_ttmc4_tiny_stream(
-   uint64_t* meta_data, const scalar_t* __restrict__ values,
-   const scalar_t* __restrict__ factor_matrices, const uint64_t* __restrict__ fact_ofst,
-   scalar_t* arr_O, const uint64_t* __restrict__ ranks, int ncm, int order,
+   const uint64_t* __restrict__ mode_1_idx,
+   const uint64_t* __restrict__ mode_2_ptr, const uint64_t* __restrict__ mode_2_idx,
+   const uint64_t* __restrict__ mode_3_ptr, const uint64_t* __restrict__ mode_3_idx,
+   const scalar_t* __restrict__ values,
+   const scalar_t* __restrict__ factor_A,
+   const scalar_t* __restrict__ factor_B,
+   const scalar_t* __restrict__ factor_C,
+   scalar_t* arr_O,
+   uint32_t f1, uint32_t f2, uint32_t f3,
    uint64_t j_ptr_offset, uint64_t i)
- {
-   extern __shared__ scalar_t buf[];
-   uint64_t j_ptr = j_ptr_offset + blockIdx.x;
-   uint64_t j = meta_data[tiny4d_ofst[3] + j_ptr];
+{
+  extern __shared__ scalar_t buf[];
+  uint64_t j_ptr = j_ptr_offset + blockIdx.x;
+  uint64_t j = mode_1_idx[j_ptr];
+
+  int buf_ofst = f2 * f3;
+
+  for (int buf_index = threadIdx.y * blockDim.x + threadIdx.x;
+       buf_index < buf_ofst; buf_index += blockDim.x * blockDim.y) {
+    buf[buf_index] = 0.0f;
+  }
+  __syncthreads();
+
+  for (uint64_t k_ptr = mode_2_ptr[j_ptr];
+       k_ptr < mode_2_ptr[j_ptr + 1]; ++k_ptr) {
+    uint64_t k = mode_2_idx[k_ptr];
+
+    int buf_index = threadIdx.y * blockDim.x + threadIdx.x;
+    if (buf_index < (int)f3) {
+      buf[buf_ofst + buf_index] = 0.0f;
+    }
+    __syncthreads();
+
+    for (uint64_t l_ptr_ofst = mode_3_ptr[k_ptr];
+         l_ptr_ofst < mode_3_ptr[k_ptr + 1];
+         l_ptr_ofst += blockDim.y) {
+      uint64_t l_ptr = l_ptr_ofst + threadIdx.y;
+      if (l_ptr < mode_3_ptr[k_ptr + 1]) {
+        uint64_t l = mode_3_idx[l_ptr];
+        for (uint32_t t_ofst = 0; t_ofst < f3; t_ofst += blockDim.x) {
+          uint32_t t = t_ofst + threadIdx.x;
+          if (t < f3) {
+            atomicAdd(&buf[buf_ofst + t], values[l_ptr] *
+              factor_C[l * f3 + t]);
+          }
+        }
+      }
+    }
+    __syncthreads();
+
+    for (uint32_t s_ofst = 0; s_ofst < f2; s_ofst += blockDim.y) {
+      uint32_t s = s_ofst + threadIdx.y;
+      if (s < f2) {
+        for (uint32_t t_ofst = 0; t_ofst < f3; t_ofst += blockDim.x) {
+          uint32_t t = t_ofst + threadIdx.x;
+          if (t < f3) {
+            atomicAdd(&buf[s * f3 + t], buf[buf_ofst + t] *
+              factor_B[k * f2 + s]);
+          }
+        }
+      }
+    }
+    __syncthreads();
+  }
+  __syncthreads();
+
+  for (uint32_t r = 0; r < f1; ++r) {
+    for (uint32_t s_ofst = 0; s_ofst < f2; s_ofst += blockDim.y) {
+      uint32_t s = s_ofst + threadIdx.y;
+      if (s < f2) {
+        for (uint32_t t_ofst = 0; t_ofst < f3; t_ofst += blockDim.x) {
+          uint32_t t = t_ofst + threadIdx.x;
+          if (t < f3) {
+            atomicAdd(&arr_O[ i * f1 * f2 * f3
+              + r * f2 * f3
+              + s * f3
+              + t],
+              buf[s * f3 + t] * factor_A[j * f1 + r]);
+          }
+        }
+      }
+    }
+  }
+}
  
-   int buf_ofst = ranks[2] * ranks[3];
+static double launch_ttmc4_tiny_streams_flat(
+  uint64_t** h_mode_ptrs, uint64_t** h_mode_idxs,   // HOST: for launch loop
+  uint64_t** d_mode_ptrs, uint64_t** d_mode_idxs,   // GPU: for kernel args
+  const scalar_t* d_values,
+  const scalar_t* d_factor_A,
+  const scalar_t* d_factor_B,
+  const scalar_t* d_factor_C,
+  scalar_t* d_arr_O,
+  uint32_t f1, uint32_t f2, uint32_t f3,
+  uint64_t num_i,
+  int stream_hint)
+{
+  if (num_i == 0) {
+    return 0.0;
+  }
+
+  int default_streams = std::max(1, stream_hint);
+  uint64_t desired_streams = static_cast<uint64_t>(default_streams);
+  if (desired_streams > num_i) {
+    desired_streams = num_i;
+  }
+  std::vector<cudaStream_t> streams(desired_streams);
+  for (uint64_t s = 0; s < desired_streams; ++s) {
+    cudaCheckError(cudaStreamCreate(&streams[s]));
+  }
+
+  dim3 blockDim(32, 32);
+  size_t sharedMemBytes = (size_t)f2 * f3 * sizeof(scalar_t) + (size_t)f3 * sizeof(scalar_t);
+
+  auto start = std::chrono::high_resolution_clock::now();
+  for (uint64_t i_ptr = 0; i_ptr < num_i; ++i_ptr) {
+    uint64_t begin = h_mode_ptrs[1][i_ptr];
+    uint64_t end = h_mode_ptrs[1][i_ptr + 1];
+    if (begin >= end) continue;
+    dim3 gridDim(static_cast<unsigned int>(end - begin));
+    if (gridDim.x == 0) continue;
+    uint64_t i = h_mode_idxs[0][i_ptr];
+    cudaStream_t stream = streams[i_ptr % desired_streams];
+    kernel_ttmc4_tiny_stream<<<gridDim, blockDim, sharedMemBytes, stream>>>(
+      d_mode_idxs[1],
+      d_mode_ptrs[2], d_mode_idxs[2],
+      d_mode_ptrs[3], d_mode_idxs[3],
+      d_values,
+      d_factor_A, d_factor_B, d_factor_C,
+      d_arr_O, f1, f2, f3,
+      begin, i
+    );
+  }
+  cudaCheckError(cudaGetLastError());
+  for (uint64_t s = 0; s < desired_streams; ++s) {
+    cudaCheckError(cudaStreamSynchronize(streams[s]));
+    cudaCheckError(cudaStreamDestroy(streams[s]));
+  }
+  cudaCheckError(cudaDeviceSynchronize());
+  auto end = std::chrono::high_resolution_clock::now();
+  auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+
+  return static_cast<double>(duration) / 1000.0;
+}
  
-   for (int buf_index = threadIdx.y * blockDim.x + threadIdx.x;
-        buf_index < buf_ofst; buf_index += blockDim.x * blockDim.y) {
-     buf[buf_index] = 0.0f;
-   }
-   __syncthreads();
- 
-   for (uint64_t k_ptr = meta_data[tiny4d_ofst[4] + j_ptr];
-        k_ptr < meta_data[tiny4d_ofst[4] + j_ptr + 1]; ++k_ptr) {
-     uint64_t k = meta_data[tiny4d_ofst[5] + k_ptr];
- 
-     int buf_index = threadIdx.y * blockDim.x + threadIdx.x;
-     if (buf_index < ranks[3]) {
-       buf[buf_ofst + buf_index] = 0.0f;
-     }
-     __syncthreads();
- 
-     for (uint64_t l_ptr_ofst = meta_data[tiny4d_ofst[6] + k_ptr];
-          l_ptr_ofst < meta_data[tiny4d_ofst[6] + k_ptr + 1];
-          l_ptr_ofst += blockDim.y) {
-       uint64_t l_ptr = l_ptr_ofst + threadIdx.y;
-       if (l_ptr < meta_data[tiny4d_ofst[6] + k_ptr + 1]) {
-         uint64_t l = meta_data[tiny4d_ofst[7] + l_ptr];
-         for (uint32_t t_ofst = 0; t_ofst < ranks[3]; t_ofst += blockDim.x) {
-           uint32_t t = t_ofst + threadIdx.x;
-           if (t < ranks[3]) {
-             atomicAdd(&buf[buf_ofst + t], values[l_ptr] *
-               factor_matrices[fact_ofst[2] + l * ranks[3] + t]);
-           }
-         }
-       }
-     }
-     __syncthreads();
- 
-     for (uint32_t s_ofst = 0; s_ofst < ranks[2]; s_ofst += blockDim.y) {
-       uint32_t s = s_ofst + threadIdx.y;
-       if (s < ranks[2]) {
-         for (uint32_t t_ofst = 0; t_ofst < ranks[3]; t_ofst += blockDim.x) {
-           uint32_t t = t_ofst + threadIdx.x;
-           if (t < ranks[3]) {
-             atomicAdd(&buf[s * ranks[3] + t], buf[buf_ofst + t] *
-               factor_matrices[fact_ofst[1] + k * ranks[2] + s]);
-           }
-         }
-       }
-     }
-     __syncthreads();
-   }
-   __syncthreads();
- 
-   for (uint32_t r = 0; r < ranks[1]; ++r) {
-     for (uint32_t s_ofst = 0; s_ofst < ranks[2]; s_ofst += blockDim.y) {
-       uint32_t s = s_ofst + threadIdx.y;
-       if (s < ranks[2]) {
-         for (uint32_t t_ofst = 0; t_ofst < ranks[3]; t_ofst += blockDim.x) {
-           uint32_t t = t_ofst + threadIdx.x;
-           if (t < ranks[3]) {
-             atomicAdd(&arr_O[ i * ranks[1] * ranks[2] * ranks[3]
-               + r * ranks[2] * ranks[3]
-               + s * ranks[3]
-               + t],
-               buf[s * ranks[3] + t] * factor_matrices[fact_ofst[0] + j * ranks[1] + r]);
-           }
-         }
-       }
-     }
-   }
- }
- 
- static double launch_ttmc4_tiny_streams_flat(
-   uint64_t** mode_ptrs, uint64_t** mode_idxs,   // HOST: for launch loop + d_meta_data
-   const scalar_t* d_values,                      // GPU: pre-uploaded values
-   scalar_t** d_factor_mats,                      // GPU: pre-uploaded factor matrices
-   const uint64_t* factor_sizes,
-   scalar_t* d_arr_O,
-   int ncm, uint64_t* ranks, int order,
-   const uint64_t size_mode_ptr[], const uint64_t size_mode_idx[],
-   int stream_hint)
- {
-   uint64_t num_i = size_mode_ptr[1] - 1;
-   if (num_i == 0) {
-     return 0.0;
-   }
- 
-   uint64_t offset[8] = {0};
-   uint64_t meta_size = 0;
-   for (int i = 0; i < order; ++i) {
-     offset[2 * i] = meta_size;
-     meta_size += size_mode_ptr[i];
-     offset[2 * i + 1] = meta_size;
-     meta_size += size_mode_idx[i];
-   }
-   cudaCheckError(cudaMemcpyToSymbol(tiny4d_ofst, offset, sizeof(uint64_t) * 2 * order));
- 
-   uint64_t* d_meta_data = nullptr;
-   cudaCheckError(cudaMalloc(&d_meta_data, sizeof(uint64_t) * meta_size));
-   for (int i = 0; i < order; ++i) {
-     cudaCheckError(cudaMemcpy(d_meta_data + offset[2 * i], mode_ptrs[i],
-                               sizeof(uint64_t) * size_mode_ptr[i], cudaMemcpyHostToDevice));
-     cudaCheckError(cudaMemcpy(d_meta_data + offset[2 * i + 1], mode_idxs[i],
-                               sizeof(uint64_t) * size_mode_idx[i], cudaMemcpyHostToDevice));
-   }
- 
-   uint64_t fact_offsets[3] = {0};
-   uint64_t fact_size = 0;
-   int idx = 0;
-   for (int i = 0; i < order; ++i) {
-     if (i == ncm) continue;
-     fact_offsets[idx++] = fact_size;
-     fact_size += factor_sizes[i];
-   }
- 
-   scalar_t* d_factor_matrices = nullptr;
-   cudaCheckError(cudaMalloc(&d_factor_matrices, sizeof(scalar_t) * fact_size));
-   idx = 0;
-   fact_size = 0;
-   for (int i = 0; i < order; ++i) {
-     if (i == ncm) continue;
-     cudaCheckError(cudaMemcpy(d_factor_matrices + fact_size,
-                               d_factor_mats[i],
-                               sizeof(scalar_t) * factor_sizes[i],
-                               cudaMemcpyDeviceToDevice));
-     fact_size += factor_sizes[i];
-   }
- 
-   uint64_t* d_fact_ofst = nullptr;
-   cudaCheckError(cudaMalloc(&d_fact_ofst, sizeof(uint64_t) * (order - 1)));
-   cudaCheckError(cudaMemcpy(d_fact_ofst, fact_offsets, sizeof(uint64_t) * (order - 1), cudaMemcpyHostToDevice));
- 
-   uint64_t* d_ranks = nullptr;
-   cudaCheckError(cudaMalloc(&d_ranks, sizeof(uint64_t) * order));
-   cudaCheckError(cudaMemcpy(d_ranks, ranks, sizeof(uint64_t) * order, cudaMemcpyHostToDevice));
- 
-   int default_streams = std::max(1, stream_hint);
-   uint64_t desired_streams = static_cast<uint64_t>(default_streams);
-   if (desired_streams > num_i) {
-     desired_streams = num_i;
-   }
-   std::vector<cudaStream_t> streams(desired_streams);
-   for (uint64_t s = 0; s < desired_streams; ++s) {
-     cudaCheckError(cudaStreamCreate(&streams[s]));
-   }
- 
-   dim3 blockDim(32, 32);
-   size_t sharedMemBytes = ranks[2] * ranks[3] * sizeof(scalar_t) + ranks[3] * sizeof(scalar_t);
- 
-   auto start = std::chrono::high_resolution_clock::now();
-   for (uint64_t i_ptr = 0; i_ptr < num_i; ++i_ptr) {
-     uint64_t begin = mode_ptrs[1][i_ptr];
-     uint64_t end = mode_ptrs[1][i_ptr + 1];
-     if (begin >= end) continue;
-     dim3 gridDim(static_cast<unsigned int>(end - begin));
-     if (gridDim.x == 0) continue;
-     uint64_t i = mode_idxs[0][i_ptr];
-     cudaStream_t stream = streams[i_ptr % desired_streams];
-     kernel_ttmc4_tiny_stream<<<gridDim, blockDim, sharedMemBytes, stream>>>(
-       d_meta_data, d_values,
-       d_factor_matrices, d_fact_ofst,
-       d_arr_O, d_ranks, ncm, order,
-       begin, i
-     );
-   }
-   cudaCheckError(cudaGetLastError());
-   for (uint64_t s = 0; s < desired_streams; ++s) {
-     cudaCheckError(cudaStreamSynchronize(streams[s]));
-     cudaCheckError(cudaStreamDestroy(streams[s]));
-   }
-   cudaCheckError(cudaDeviceSynchronize());
-   auto end = std::chrono::high_resolution_clock::now();
-   auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
- 
-   cudaFree(d_meta_data);
-   cudaFree(d_factor_matrices);
-   cudaFree(d_fact_ofst);
-   cudaFree(d_ranks);
- 
-   return static_cast<double>(duration) / 1000.0;
- }
  
 __global__ void compute_inv_sigma(const scalar_t* W, scalar_t* diag, 
   int N, int R, scalar_t eps) {
@@ -1337,13 +1292,15 @@ __global__ void convert_scalar_to_dp(const scalar_t* src, double* dst, long long
        else if (order == 4) {
          if (cache.prefer_tiny_streams) {
            // tiny_streams needs HOST mode data for its launch loop; use ptrs cached at prepare time.
+           uint64_t num_i = cache.size_mode_ptr[1] - 1;
            double duration_ms = launch_ttmc4_tiny_streams_flat(
              cache.h_mode_ptrs.data(), cache.h_mode_idxs.data(),
+             d_mode_ptrs, d_mode_idxs,
              d_values,
-             d_factor_mats, cache.factor_sizes.data(),
+             d_factor_mats[idx_A], d_factor_mats[idx_B], d_factor_mats[idx_C],
              d_arr_O,
-             ncm, ranks, order,
-             cache.size_mode_ptr.data(), cache.size_mode_idx.data(),
+             f1, f2, f3,
+             num_i,
              cache.tiny_stream_count);
            cout << "Method: launch_ttmc4_tiny_streams_flat/kernel_ttmc4_tiny_stream, Time: "
                 << duration_ms << " ms" << endl;
@@ -1607,11 +1564,6 @@ void gpu_full_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_t cub
   cudaEventCreate(&ev0); cudaEventCreate(&ev1);
   if (verbose) std::cout << "  M = " << M << ", N = " << N << ", R = " << R << "\n";
   
-  cublasMath_t mode;
-  cublasSetMathMode(cublasH, CUBLAS_PEDANTIC_MATH);
-  cublasGetMathMode(cublasH, &mode);
-  std::cout << "Math mode: " << mode << "\n";
-  
   if (M > N) {
     // --- cusolverDnSgesvd / cusolverDnDgesvd: jobu='S', jobvt='N' (works when M > N) ---
     scalar_t *d_S, *d_U, *d_VT_dummy; int *d_info;
@@ -1739,10 +1691,6 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
      cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
      cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
      if (verbose) std::cout << "  ATA alloc: " << ev_ms << " ms\n";
-
-     cublasMath_t mode;
-     cublasGetMathMode(cublasH, &mode);
-     CHECK_CUBLAS(cublasSetMathMode(cublasH, CUBLAS_PEDANTIC_MATH));
 
      cudaEventRecord(ev_start);
      CHECK_CUBLAS(cublasGemmT(cublasH, CUBLAS_OP_N, CUBLAS_OP_T,
@@ -1897,10 +1845,6 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
      cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
      cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
      if (verbose) std::cout << "  ATA alloc (dp): " << ev_ms << " ms\n";
-
-     cublasMath_t mode;
-     cublasGetMathMode(cublasH, &mode);
-     CHECK_CUBLAS(cublasSetMathMode(cublasH, CUBLAS_PEDANTIC_MATH));
 
      // A^T*A in double. Try full M×N double alloc; fall back to blocked if OOM.
      double alpha_dp = 1.0, beta_zero = 0.0;
@@ -2107,7 +2051,7 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
    CHECK_CUDA(cudaDeviceSynchronize());
    cudaEventDestroy(ev_start);
    cudaEventDestroy(ev_stop);
- }
+}
  
  
  
@@ -2434,6 +2378,7 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
      cublasHandle_t cublasH = nullptr;
      CHECK_CUSOLVER(cusolverDnCreate(&cusolverH));
      CHECK_CUBLAS(cublasCreate(&cublasH));
+     CHECK_CUBLAS(cublasSetMathMode(cublasH, CUBLAS_PEDANTIC_MATH));
  
      // Factor matrices on GPU — always kept row-major (same layout as CPU)
      std::vector<scalar_t*> d_factors(order, nullptr);
