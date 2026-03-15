@@ -1255,15 +1255,15 @@ __global__ void compute_inv_sigma_dp(const double* W, scalar_t* diag,
 }
 
 // Convert double array to scalar_t (no-op when scalar_t is double)
-__global__ void convert_dp_to_scalar(const double* src, scalar_t* dst, int n) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
+__global__ void convert_dp_to_scalar(const double* src, scalar_t* dst, long long n) {
+  long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n)
     dst[i] = (scalar_t)src[i];
 }
 
 // Convert scalar_t array to double
-__global__ void convert_scalar_to_dp(const scalar_t* src, double* dst, int n) {
-  int i = blockIdx.x * blockDim.x + threadIdx.x;
+__global__ void convert_scalar_to_dp(const scalar_t* src, double* dst, long long n) {
+  long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n)
     dst[i] = (double)src[i];
 }
@@ -1315,6 +1315,8 @@ __global__ void convert_scalar_to_dp(const scalar_t* src, double* dst, int n) {
                 << " ms" << endl;
          } else {
            cudaCheckError(cudaMemset(cache.d_task_counter, 0, sizeof(unsigned long long)));
+           cudaCheckError(cudaFuncSetAttribute(kernel_ttmc3_dynamic_tasks,
+             cudaFuncAttributeMaxDynamicSharedMemorySize, (int)cache.d_shared_mem));
            auto start = std::chrono::high_resolution_clock::now();
            if (!cache.host_tasks.empty()) {
              kernel_ttmc3_dynamic_tasks<<<cache.d_grid_size, cache.d_block_size, cache.d_shared_mem>>>(
@@ -1347,6 +1349,8 @@ __global__ void convert_scalar_to_dp(const scalar_t* src, double* dst, int n) {
                 << duration_ms << " ms" << endl;
          } else {
            cudaCheckError(cudaMemset(cache.d_task_counter, 0, sizeof(unsigned long long)));
+           cudaCheckError(cudaFuncSetAttribute(kernel_ttmc4_dynamic_tasks,
+             cudaFuncAttributeMaxDynamicSharedMemorySize, (int)cache.d_shared_mem));
            auto start = std::chrono::high_resolution_clock::now();
            if (!cache.host_tasks.empty()) {
              kernel_ttmc4_dynamic_tasks<<<cache.d_grid_size, cache.d_block_size, cache.d_shared_mem>>>(
@@ -1722,40 +1726,207 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
    cudaEventCreate(&ev_start);
    cudaEventCreate(&ev_stop);
  
+// =====================================================================
+// When scalar_t is already double, use direct GEMM/EVD — no casting.
+// When scalar_t is float, cast to double for Gram + EVD precision.
+// =====================================================================
+#if SCALAR_DOUBLE
+   // --- scalar_t == double: direct path (no type conversion needed) ---
    if (M > N) {
-     // ---- Gram & EVD in double precision (block-based accumulation) ----
+     scalar_t* d_Gram;
+     cudaEventRecord(ev_start);
+     CHECK_CUDA(cudaMalloc(&d_Gram, sizeof(scalar_t) * N * N));
+     cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
+     cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
+     if (verbose) std::cout << "  ATA alloc: " << ev_ms << " ms\n";
+
+     cublasMath_t mode;
+     cublasGetMathMode(cublasH, &mode);
+     CHECK_CUBLAS(cublasSetMathMode(cublasH, CUBLAS_PEDANTIC_MATH));
+
+     cudaEventRecord(ev_start);
+     CHECK_CUBLAS(cublasGemmT(cublasH, CUBLAS_OP_N, CUBLAS_OP_T,
+       N, N, M, &alpha, d_A, N, d_A, N, &beta, d_Gram, N));
+     cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
+     cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
+     if (verbose) std::cout << "  ATA gemm: " << ev_ms << " ms\n";
+
+     scalar_t *d_W;
+     CHECK_CUDA(cudaMalloc(&d_W, sizeof(scalar_t) * N));
+     int lwork = 0;
+     CHECK_CUSOLVER(cusolverSyevdBufSizeT(cusolverH, CUSOLVER_EIG_MODE_VECTOR,
+       CUBLAS_FILL_MODE_UPPER, N, d_Gram, N, d_W, &lwork));
+
+     scalar_t *d_work; int *d_info;
+     cudaEventRecord(ev_start);
+     CHECK_CUDA(cudaMalloc(&d_work, sizeof(scalar_t) * lwork));
+     CHECK_CUDA(cudaMalloc(&d_info, sizeof(int)));
+     cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
+     cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
+     if (verbose) std::cout << "  eig buf alloc: " << ev_ms << " ms\n";
+     if (verbose) std::cout << "  d_work (MB): " << sizeof(scalar_t) * lwork / (1024.0 * 1024.0) << "\n";
+
+     cudaEventRecord(ev_start);
+     CHECK_CUSOLVER(cusolverSyevdT(cusolverH, CUSOLVER_EIG_MODE_VECTOR,
+       CUBLAS_FILL_MODE_UPPER, N, d_Gram, N, d_W, d_work, lwork, d_info));
+     cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
+     cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
+     if (verbose) std::cout << "  eig decomp: " << ev_ms << " ms\n";
+     int h_info = 0;
+     CHECK_CUDA(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
+     if (h_info != 0) {
+       std::cerr << "  WARNING: cusolverSyevdT info=" << h_info << "\n";
+       CHECK_CUDA(cudaFree(d_Gram)); CHECK_CUDA(cudaFree(d_W));
+       CHECK_CUDA(cudaFree(d_work)); CHECK_CUDA(cudaFree(d_info));
+       return;
+     }
+
+     CHECK_CUDA(cudaMemset(d_info, 0, sizeof(int)));
+     if (R > 1)
+      check_resolution<<<1, R - 1>>>(d_W, M + N, N, R, eps_mach, d_info);
+     CHECK_CUDA(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
+     if (h_info != 0) {
+       if (verbose)
+         std::cout << "  resolution condition failed among top-" << R
+                   << " eigenvalues, falling back to full SVD\n";
+       CHECK_CUDA(cudaFree(d_Gram)); CHECK_CUDA(cudaFree(d_W));
+       CHECK_CUDA(cudaFree(d_work)); CHECK_CUDA(cudaFree(d_info));
+       gpu_full_svd_update_factor(cusolverH, cublasH, d_A, M, N, R, d_factor, verbose);
+       return;
+     }
+
+     scalar_t* d_V_R = d_Gram + (long long)(N - R) * N;
+     cudaEventRecord(ev_start);
+     CHECK_CUBLAS(cublasGemmT(cublasH, CUBLAS_OP_T, CUBLAS_OP_N,
+       R, M, N, &alpha, d_V_R, N, d_A, N, &beta, d_factor, R));
+     cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
+     cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
+     if (verbose) std::cout << "  AV gemm: " << ev_ms << " ms\n";
+
+     scalar_t* d_diag;
+     CHECK_CUDA(cudaMalloc(&d_diag, sizeof(scalar_t) * R));
+     cudaEventRecord(ev_start);
+     compute_inv_sigma<<<(R+255)/256, 256>>>(d_W, d_diag, N, R, (scalar_t)1e-12);
+     CHECK_CUBLAS(cublasDgmmT(cublasH, CUBLAS_SIDE_LEFT, R, M,
+       d_factor, R, d_diag, 1, d_factor, R));
+     cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
+     cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
+     if (verbose) std::cout << "  normalize (1/sigma): " << ev_ms << " ms\n";
+
+     CHECK_CUDA(cudaFree(d_diag));
+     CHECK_CUDA(cudaFree(d_Gram)); CHECK_CUDA(cudaFree(d_W));
+     CHECK_CUDA(cudaFree(d_work)); CHECK_CUDA(cudaFree(d_info));
+   } else {
+    scalar_t* d_Gram;
+    cudaEventRecord(ev_start);
+    CHECK_CUDA(cudaMalloc(&d_Gram, sizeof(scalar_t) * M * M));
+    cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
+    cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
+    if (verbose) std::cout << "  AA^T alloc: " << ev_ms << " ms\n";
+
+    cudaEventRecord(ev_start);
+    CHECK_CUBLAS(cublasSyrkT(cublasH, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_T,
+        M, N, &alpha, d_A, N, &beta, d_Gram, M));
+    cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
+    cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
+    if (verbose) std::cout << "  AA^T syrk: " << ev_ms << " ms\n";
+
+    scalar_t *d_W;
+    CHECK_CUDA(cudaMalloc(&d_W, sizeof(scalar_t) * M));
+    int lwork = 0;
+    CHECK_CUSOLVER(cusolverSyevdBufSizeT(cusolverH, CUSOLVER_EIG_MODE_VECTOR,
+        CUBLAS_FILL_MODE_UPPER, M, d_Gram, M, d_W, &lwork));
+
+    scalar_t *d_work; int *d_info;
+    cudaEventRecord(ev_start);
+    CHECK_CUDA(cudaMalloc(&d_work, sizeof(scalar_t) * lwork));
+    CHECK_CUDA(cudaMalloc(&d_info, sizeof(int)));
+    cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
+    cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
+    if (verbose) std::cout << "  eig buf alloc: " << ev_ms << " ms\n";
+
+    cudaEventRecord(ev_start);
+    CHECK_CUSOLVER(cusolverSyevdT(cusolverH, CUSOLVER_EIG_MODE_VECTOR,
+        CUBLAS_FILL_MODE_UPPER, M, d_Gram, M, d_W, d_work, lwork, d_info));
+    cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
+    cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
+    if (verbose) std::cout << "  eig decomp: " << ev_ms << " ms\n";
+
+    int h_info = 0;
+    CHECK_CUDA(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
+    if (h_info != 0) {
+        std::cerr << "  syevd failed: devInfo = " << h_info << "\n";
+    }
+
+    CHECK_CUDA(cudaMemset(d_info, 0, sizeof(int)));
+    if (R > 1)
+    check_resolution<<<1, R - 1>>>(d_W, N + M, M, R, eps_mach, d_info);
+    CHECK_CUDA(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
+    if (h_info != 0) {
+      if (verbose)
+        std::cout << "  resolution condition failed among top-" << R
+                  << " eigenvalues, falling back to full SVD\n";
+      CHECK_CUDA(cudaFree(d_Gram)); CHECK_CUDA(cudaFree(d_W));
+      CHECK_CUDA(cudaFree(d_work)); CHECK_CUDA(cudaFree(d_info));
+      gpu_full_svd_update_factor(cusolverH, cublasH, d_A, M, N, R, d_factor, verbose);
+      return;
+    }
+
+    cudaEventRecord(ev_start);
+    { scalar_t one = (scalar_t)1, zero = (scalar_t)0;
+      CHECK_CUBLAS(cublasGeamT(cublasH, CUBLAS_OP_T, CUBLAS_OP_N,
+          R, M,
+          &one,  d_Gram + (long long)(M - R) * M, M,
+          &zero, d_factor, R,
+          d_factor, R));
+    }
+    cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
+    cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
+    if (verbose) std::cout << "  transpose eigvecs: " << ev_ms << " ms\n";
+
+    CHECK_CUDA(cudaFree(d_Gram)); CHECK_CUDA(cudaFree(d_W));
+    CHECK_CUDA(cudaFree(d_work)); CHECK_CUDA(cudaFree(d_info));
+}
+#else
+   // --- scalar_t == float: cast to double for Gram + EVD precision ---
+   if (M > N) {
      const double eps_mach_dp = 1.1102230246251565e-16; // DBL_EPSILON
      double* d_Gram_dp;
      cudaEventRecord(ev_start);
      CHECK_CUDA(cudaMalloc(&d_Gram_dp, sizeof(double) * N * N));
-     CHECK_CUDA(cudaMemset(d_Gram_dp, 0, sizeof(double) * N * N));
      cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
      cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
      if (verbose) std::cout << "  ATA alloc (dp): " << ev_ms << " ms\n";
- 
- 
+
      cublasMath_t mode;
      cublasGetMathMode(cublasH, &mode);
      CHECK_CUBLAS(cublasSetMathMode(cublasH, CUBLAS_PEDANTIC_MATH));
 
      // A^T*A in double. Try full M×N double alloc; fall back to blocked if OOM.
-     // d_A is row-major (M,N) = col-major B=A^T (N,M) lda=N.
      double alpha_dp = 1.0, beta_zero = 0.0;
      long long MN = (long long)M * N;
      double* d_A_dp = nullptr;
      cudaError_t alloc_err = cudaMalloc(&d_A_dp, sizeof(double) * MN);
 
+     bool use_blocked = false;
      cudaEventRecord(ev_start);
      if (alloc_err == cudaSuccess) {
-       // Full conversion path: convert once, single cublasDgemm
        convert_scalar_to_dp<<<(MN + 255)/256, 256>>>(d_A, d_A_dp, MN);
-       CHECK_CUBLAS(cublasDgemm(cublasH, CUBLAS_OP_N, CUBLAS_OP_T,
-         N, N, M, &alpha_dp, d_A_dp, N, d_A_dp, N, &beta_zero, d_Gram_dp, N));
+       CHECK_CUDA(cudaGetLastError());
+       cublasStatus_t gemm_st = cublasDgemm(cublasH, CUBLAS_OP_N, CUBLAS_OP_T,
+         N, N, M, &alpha_dp, d_A_dp, N, d_A_dp, N, &beta_zero, d_Gram_dp, N);
        CHECK_CUDA(cudaFree(d_A_dp));
+       if (gemm_st != CUBLAS_STATUS_SUCCESS) {
+         if (verbose) std::cout << "  full dp gemm failed (status=" << gemm_st
+                                << "), falling back to blocked\n";
+         use_blocked = true;
+       }
      } else {
-       // OOM: fall back to block-based accumulation
-       cudaGetLastError(); // clear the failed alloc error
+       cudaGetLastError();
        if (verbose) std::cout << "  full dp alloc failed, using blocked path\n";
+       use_blocked = true;
+     }
+     if (use_blocked) {
        const int BSIZ = 32768;
        double* d_blk_dp;
        CHECK_CUDA(cudaMalloc(&d_blk_dp, sizeof(double) * std::min(BSIZ, M) * N));
@@ -1774,8 +1945,7 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
      cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
      cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
      if (verbose) std::cout << "  ATA gemm (dp): " << ev_ms << " ms\n";
- 
-     // EVD in double precision
+
      double *d_W_dp;
      CHECK_CUDA(cudaMalloc(&d_W_dp, sizeof(double) * N));
      int lwork = 0;
@@ -1806,7 +1976,6 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
        return;
      }
 
-     // --- Resolution check (double eigenvalues, DBL_EPSILON) ---
      CHECK_CUDA(cudaMemset(d_info, 0, sizeof(int)));
      if (R > 1)
       check_resolution_dp<<<1, R - 1>>>(d_W_dp, M + N, N, R, eps_mach_dp, d_info);
@@ -1821,13 +1990,12 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
        return;
      }
 
-     // Convert top-R eigenvectors from double to scalar_t (N×R, small)
+     // Convert top-R eigenvectors double→float (N×R, small)
      double* d_V_R_dp = d_Gram_dp + (long long)(N - R) * N;
      scalar_t* d_V_R;
      CHECK_CUDA(cudaMalloc(&d_V_R, sizeof(scalar_t) * N * R));
      convert_dp_to_scalar<<<((long long)N*R + 255)/256, 256>>>(d_V_R_dp, d_V_R, N * R);
 
-     // V_R^T*B = col-major (R,M) lda=R = row-major (M,R) directly.
      cudaEventRecord(ev_start);
      CHECK_CUBLAS(cublasGemmT(cublasH, CUBLAS_OP_T, CUBLAS_OP_N,
        R, M, N, &alpha, d_V_R, N, d_A, N, &beta, d_factor, R));
@@ -1835,7 +2003,6 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
      cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
      if (verbose) std::cout << "  AV gemm: " << ev_ms << " ms\n";
 
-     // diag[j] = 1/sigma_j = 1/sqrt(eigenvalue[N-R+j]) from double eigenvalues.
      scalar_t* d_diag;
      CHECK_CUDA(cudaMalloc(&d_diag, sizeof(scalar_t) * R));
      cudaEventRecord(ev_start);
@@ -1851,21 +2018,13 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
      CHECK_CUDA(cudaFree(d_Gram_dp)); CHECK_CUDA(cudaFree(d_W_dp));
      CHECK_CUDA(cudaFree(d_work_dp)); CHECK_CUDA(cudaFree(d_info));
    } else {
-    // ============================================================
-    // M <= N path: eigendecompose AA^T (M×M) to get left singular
-    // vectors directly (eigvecs of AA^T = u_r, already unit-norm)
-    // ============================================================
-
-    // ---- Gram & EVD in double (M ≤ N, both small — no blocking needed) ----
-    const double eps_mach_dp = 1.1102230246251565e-16; // DBL_EPSILON
+    const double eps_mach_dp = 1.1102230246251565e-16;
     double alpha_dp = 1.0, beta_zero_dp = 0.0;
 
-    // --- 1. Convert entire d_A to double (M*N is small) ---
     double* d_A_dp;
     CHECK_CUDA(cudaMalloc(&d_A_dp, sizeof(double) * (long long)M * N));
     convert_scalar_to_dp<<<((long long)M*N + 255)/256, 256>>>(d_A, d_A_dp, (long long)M * N);
 
-    // --- 2. Allocate & compute Gram = A A^T (M×M) in double via syrk ---
     double* d_Gram_dp;
     cudaEventRecord(ev_start);
     CHECK_CUDA(cudaMalloc(&d_Gram_dp, sizeof(double) * M * M));
@@ -1873,8 +2032,6 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
     cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
     if (verbose) std::cout << "  AA^T alloc (dp): " << ev_ms << " ms\n";
 
-    //   d_A_dp is row-major (M,N) → col-major B = A^T (N,M), lda=N
-    //   Want A A^T = B^T B → CUBLAS_OP_T, output M×M
     cudaEventRecord(ev_start);
     CHECK_CUBLAS(cublasDsyrk(cublasH, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_T,
         M, N, &alpha_dp, d_A_dp, N, &beta_zero_dp, d_Gram_dp, M));
@@ -1883,7 +2040,6 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
     if (verbose) std::cout << "  AA^T syrk (dp): " << ev_ms << " ms\n";
     CHECK_CUDA(cudaFree(d_A_dp));
 
-    // --- 3. Query workspace for double eigendecomposition ---
     double *d_W_dp;
     CHECK_CUDA(cudaMalloc(&d_W_dp, sizeof(double) * M));
     int lwork = 0;
@@ -1898,7 +2054,6 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
     cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
     if (verbose) std::cout << "  eig buf alloc: " << ev_ms << " ms\n";
 
-    // --- 4. Eigendecompose in double ---
     cudaEventRecord(ev_start);
     CHECK_CUSOLVER(cusolverDnDsyevd(cusolverH, CUSOLVER_EIG_MODE_VECTOR,
         CUBLAS_FILL_MODE_UPPER, M, d_Gram_dp, M, d_W_dp, d_work_dp, lwork, d_info));
@@ -1906,14 +2061,12 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
     cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
     if (verbose) std::cout << "  eig decomp (dp): " << ev_ms << " ms\n";
 
-    // --- 5. Check convergence ---
     int h_info = 0;
     CHECK_CUDA(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
     if (h_info != 0) {
         std::cerr << "  syevd failed: devInfo = " << h_info << "\n";
     }
 
-    // --- 5c. Resolution check (double eigenvalues, DBL_EPSILON) ---
     CHECK_CUDA(cudaMemset(d_info, 0, sizeof(int)));
     if (R > 1)
     check_resolution_dp<<<1, R - 1>>>(d_W_dp, N + M, M, R, eps_mach_dp, d_info);
@@ -1928,8 +2081,7 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
       return;
     }
 
-    // --- 6. Convert top-R eigenvectors from double to scalar_t, then transpose ---
-    //   d_Gram_dp: col-major (M, M) double. Last R cols at offset (M-R)*M.
+    // Convert top-R eigenvectors double→float, then transpose
     scalar_t* d_eigvecs;
     CHECK_CUDA(cudaMalloc(&d_eigvecs, sizeof(scalar_t) * M * R));
     convert_dp_to_scalar<<<((long long)M*R + 255)/256, 256>>>(
@@ -1938,20 +2090,20 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
     cudaEventRecord(ev_start);
     { scalar_t one = (scalar_t)1, zero = (scalar_t)0;
       CHECK_CUBLAS(cublasGeamT(cublasH, CUBLAS_OP_T, CUBLAS_OP_N,
-          R, M,                    // output dims (R × M) col-major
-          &one,  d_eigvecs, M,     // src: (M, R) col-major, lda = M
-          &zero, d_factor, R,      // B unused (beta=0), ldb = R
-          d_factor, R));           // dst: col-major (R,M) = row-major (M,R)
+          R, M,
+          &one,  d_eigvecs, M,
+          &zero, d_factor, R,
+          d_factor, R));
     }
     cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
     cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
     if (verbose) std::cout << "  transpose eigvecs: " << ev_ms << " ms\n";
 
-    // --- 7. Cleanup ---
     CHECK_CUDA(cudaFree(d_eigvecs));
     CHECK_CUDA(cudaFree(d_Gram_dp)); CHECK_CUDA(cudaFree(d_W_dp));
     CHECK_CUDA(cudaFree(d_work_dp)); CHECK_CUDA(cudaFree(d_info));
 }
+#endif
    CHECK_CUDA(cudaDeviceSynchronize());
    cudaEventDestroy(ev_start);
    cudaEventDestroy(ev_stop);
@@ -2204,6 +2356,11 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
           << "  -t, --tol T           Convergence tolerance on fit (default 1e-5)\n";
      return 1;
    }
+   #if SCALAR_DOUBLE
+   std::cout << "Using double precision for TTMc" << std::endl;
+   #else
+   std::cout << "Using float precision for TTMc" << std::endl;
+   #endif
  
    try {
      // ===================================================================
@@ -2407,6 +2564,13 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
         //  gpu_full_svd_update_factor(cusolverH, cublasH, d_arr_O,
         //    static_cast<int>(M), static_cast<int>(N),
         //    static_cast<int>(ranks[n]), d_factors[n], verbose);
+
+        if (check && iter == 0)
+        {
+          // Sync GPU factor back to HOST (needed for CPU reference check)
+           CHECK_CUDA(cudaMemcpy(factors[n], d_factors[n],
+             sizeof(scalar_t) * factor_sizes[n], cudaMemcpyDeviceToHost));
+        }
          auto svd_end = std::chrono::high_resolution_clock::now();
          double svd_us = std::chrono::duration_cast<std::chrono::microseconds>(
            svd_end - svd_start).count();
