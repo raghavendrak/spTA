@@ -43,6 +43,7 @@
  // Data type selection: change SCALAR_DOUBLE to 1 for FP64 (double).
  // ===================================================================
  #define SCALAR_DOUBLE 0  // 0 = float (FP32), 1 = double (FP64)
+//  #define temp 1
  
  #if SCALAR_DOUBLE
    using scalar_t = double;
@@ -56,6 +57,7 @@
    #define cusolverGesvdBufSizeT cusolverDnDgesvd_bufferSize
    #define cusolverGesvdT        cusolverDnDgesvd
    #define cublasSyrkT           cublasDsyrk
+   #define cublasDasumT          cublasDasum
  #else
    using scalar_t = float;
    #define cublasGemmT           cublasSgemm
@@ -68,6 +70,7 @@
    #define cusolverGesvdBufSizeT cusolverDnSgesvd_bufferSize
    #define cusolverGesvdT        cusolverDnSgesvd
    #define cublasSyrkT           cublasSsyrk
+   #define cublasDasumT          cublasSasum
  #endif
  
  #if SCALAR_DOUBLE
@@ -1173,13 +1176,12 @@ __global__ void compute_inv_sigma(const scalar_t* W, scalar_t* diag,
 // GNR_{j,j+1} = (W[j+1] - W[j]) / (2 * dim * eps_mach * W[dim-1])
 // If any consecutive pair has GNR <= 1, sets flag[0] = 1.
 __global__ void check_resolution(const scalar_t* W, int c, int dim, int R,
-  scalar_t eps_mach, int* flag) {
+  scalar_t eps_mach, int* flag, scalar_t trace) {
   int j = blockIdx.x * blockDim.x + threadIdx.x;
   if (j < R - 1) {
     scalar_t lam_j  = W[dim - R + j];
     scalar_t lam_j1 = W[dim - R + j + 1];
-    scalar_t lam_max = W[dim - 1];
-    scalar_t gnr = (lam_j1 - lam_j) / ((scalar_t)2 * c * eps_mach * lam_max);
+    scalar_t gnr = (lam_j1 - lam_j) / ((scalar_t)2 * c * eps_mach * trace);
     if (gnr <= (scalar_t)1)
       atomicExch(flag, 1);
   }
@@ -1189,13 +1191,12 @@ __global__ void check_resolution(const scalar_t* W, int c, int dim, int R,
 
 // Double-precision resolution check (uses DBL_EPSILON always)
 __global__ void check_resolution_dp(const double* W, int c, int dim, int R,
-  double eps_mach_dp, int* flag) {
+  double eps_mach_dp, int* flag, double trace) {
   int j = blockIdx.x * blockDim.x + threadIdx.x;
   if (j < R - 1) {
     double lam_j  = W[dim - R + j];
     double lam_j1 = W[dim - R + j + 1];
-    double lam_max = W[dim - 1];
-    double gnr = (lam_j1 - lam_j) / (2.0 * c * eps_mach_dp * lam_max);
+    double gnr = (lam_j1 - lam_j) / (2.0 * c * eps_mach_dp * trace);
     if (gnr <= 1.0)
       atomicExch(flag, 1);
   }
@@ -1683,6 +1684,7 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
 // When scalar_t is float, cast to double for Gram + EVD precision.
 // =====================================================================
 #if SCALAR_DOUBLE
+// #if temp
    // --- scalar_t == double: direct path (no type conversion needed) ---
    if (M > N) {
      scalar_t* d_Gram;
@@ -1698,6 +1700,11 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
      cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
      cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
      if (verbose) std::cout << "  ATA gemm: " << ev_ms << " ms\n";
+
+     // trace(A^T A) = ||A||_F^2  — dasum on diagonal (all entries >= 0 for Gram)
+     scalar_t traceATA;
+     CHECK_CUBLAS(cublasDasumT(cublasH, N, d_Gram, N + 1, &traceATA));
+     if (verbose) std::cout << "  trace(ATA): " << traceATA << "\n";
 
      scalar_t *d_W;
      CHECK_CUDA(cudaMalloc(&d_W, sizeof(scalar_t) * N));
@@ -1731,7 +1738,7 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
 
      CHECK_CUDA(cudaMemset(d_info, 0, sizeof(int)));
      if (R > 1)
-      check_resolution<<<1, R - 1>>>(d_W, M + N, N, R, eps_mach, d_info);
+      check_resolution<<<1, R - 1>>>(d_W, M + N, N, R, eps_mach, d_info, traceATA);
      CHECK_CUDA(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
      if (h_info != 0) {
        if (verbose)
@@ -1779,6 +1786,11 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
     cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
     if (verbose) std::cout << "  AA^T syrk: " << ev_ms << " ms\n";
 
+    // trace(AA^T) = ||A||_F^2  — dasum on diagonal (all entries >= 0 for Gram)
+    scalar_t traceAAT;
+    CHECK_CUBLAS(cublasDasumT(cublasH, M, d_Gram, M + 1, &traceAAT));
+    if (verbose) std::cout << "  trace(AAT): " << traceAAT << "\n";
+
     scalar_t *d_W;
     CHECK_CUDA(cudaMalloc(&d_W, sizeof(scalar_t) * M));
     int lwork = 0;
@@ -1808,7 +1820,7 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
 
     CHECK_CUDA(cudaMemset(d_info, 0, sizeof(int)));
     if (R > 1)
-    check_resolution<<<1, R - 1>>>(d_W, N + M, M, R, eps_mach, d_info);
+    check_resolution<<<1, R - 1>>>(d_W, N + M, M, R, eps_mach, d_info, traceAAT);
     CHECK_CUDA(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
     if (h_info != 0) {
       if (verbose)
@@ -1890,6 +1902,11 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
      cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
      if (verbose) std::cout << "  ATA gemm (dp): " << ev_ms << " ms\n";
 
+     // trace(A^T A) = ||A||_F^2  — dasum on diagonal (all entries >= 0 for Gram)
+     double traceATA;
+     CHECK_CUBLAS(cublasDasum(cublasH, N, d_Gram_dp, N + 1, &traceATA));
+     if (verbose) std::cout << "  trace(ATA): " << traceATA << "\n";
+
      double *d_W_dp;
      CHECK_CUDA(cudaMalloc(&d_W_dp, sizeof(double) * N));
      int lwork = 0;
@@ -1922,7 +1939,7 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
 
      CHECK_CUDA(cudaMemset(d_info, 0, sizeof(int)));
      if (R > 1)
-      check_resolution_dp<<<1, R - 1>>>(d_W_dp, M + N, N, R, eps_mach_dp, d_info);
+      check_resolution_dp<<<1, R - 1>>>(d_W_dp, M + N, N, R, eps_mach_dp, d_info, traceATA);
      CHECK_CUDA(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
      if (h_info != 0) {
        if (verbose)
@@ -1984,6 +2001,11 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
     if (verbose) std::cout << "  AA^T syrk (dp): " << ev_ms << " ms\n";
     CHECK_CUDA(cudaFree(d_A_dp));
 
+    // trace(AA^T) = ||A||_F^2  — dasum on diagonal (all entries >= 0 for Gram)
+    double traceAAT;
+    CHECK_CUBLAS(cublasDasum(cublasH, M, d_Gram_dp, M + 1, &traceAAT));
+    if (verbose) std::cout << "  trace(AAT): " << traceAAT << "\n";
+
     double *d_W_dp;
     CHECK_CUDA(cudaMalloc(&d_W_dp, sizeof(double) * M));
     int lwork = 0;
@@ -2013,7 +2035,7 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
 
     CHECK_CUDA(cudaMemset(d_info, 0, sizeof(int)));
     if (R > 1)
-    check_resolution_dp<<<1, R - 1>>>(d_W_dp, N + M, M, R, eps_mach_dp, d_info);
+    check_resolution_dp<<<1, R - 1>>>(d_W_dp, N + M, M, R, eps_mach_dp, d_info, traceAAT);
     CHECK_CUDA(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
     if (h_info != 0) {
       if (verbose)
@@ -2555,7 +2577,10 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
                  << "  fit=" << fit
                  << "  delta_fit=" << delta_fit << "\n";
  
-       if (!(iter == 0) && delta_fit < tol) {
+       if ( 
+        iter>=max_iters - 1
+        // !(iter == 0) && delta_fit < tol
+      ) {
          std::cout << "Converged (delta_fit " << delta_fit << " < tol " << tol << ")\n";
          iter++;
          break;
