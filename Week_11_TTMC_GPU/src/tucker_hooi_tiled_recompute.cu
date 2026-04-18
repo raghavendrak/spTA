@@ -4031,15 +4031,24 @@ static TiledModeUpdateStats runTiledModeUpdate(
        return max_size;
      };
 
-     if (ttmc_path == TTMcStorageMode::Auto) {
-       size_t free_bytes = 0, total_bytes = 0;
-       CHECK_CUDA(cudaMemGetInfo(&free_bytes, &total_bytes));
-       const size_t reserve_bytes = 2ULL * 1024ULL * 1024ULL * 1024ULL;
-       uint64_t max_full_arr_O_size = recompute_max_full_arr_O_size();
-       while (max_full_arr_O_size > 0 &&
-              (size_t)max_full_arr_O_size * sizeof(scalar_t) + reserve_bytes > free_bytes) {
-         int mode_to_tile = choose_mode_to_tile();
-         if (mode_to_tile < 0) break;
+    if (ttmc_path == TTMcStorageMode::Auto) {
+      size_t free_bytes = 0, total_bytes = 0;
+      CHECK_CUDA(cudaMemGetInfo(&free_bytes, &total_bytes));
+      const size_t reserve_bytes = 2ULL * 1024ULL * 1024ULL * 1024ULL;
+      const size_t hard_4d_full_y_threshold = 16ULL * 1024ULL * 1024ULL * 1024ULL;
+      if (order == 4) {
+        for (int n = 0; n < order; n++) {
+          if (!supports_tiled[n] || use_tiled[n]) continue;
+          if (arr_O_bytes[n] >= hard_4d_full_y_threshold) {
+            use_tiled[n] = true;
+          }
+        }
+      }
+      uint64_t max_full_arr_O_size = recompute_max_full_arr_O_size();
+      while (max_full_arr_O_size > 0 &&
+             (size_t)max_full_arr_O_size * sizeof(scalar_t) + reserve_bytes > free_bytes) {
+        int mode_to_tile = choose_mode_to_tile();
+        if (mode_to_tile < 0) break;
          use_tiled[mode_to_tile] = true;
          max_full_arr_O_size = recompute_max_full_arr_O_size();
        }
@@ -4165,26 +4174,35 @@ static TiledModeUpdateStats runTiledModeUpdate(
        }
      }
 
-     auto choose_tiled_mode_to_shrink = [&]() -> int {
-       int best = -1;
-       size_t best_bytes = 0;
-       for (int n = 0; n < order; n++) {
-         if (!use_tiled[n] || tiled_tile_rows[n] <= 1) continue;
-         size_t bytes = tiledModeWorkspaceBytes(tiled_tile_rows[n], rank_products[n], ranks[n]);
+    auto choose_tiled_mode_to_shrink = [&]() -> int {
+      int best = -1;
+      size_t best_bytes = 0;
+      for (int n = 0; n < order; n++) {
+        if (!use_tiled[n] || tiled_tile_rows[n] <= 1) continue;
+        size_t bytes = tiledModeWorkspaceBytes(tiled_tile_rows[n], rank_products[n], ranks[n]);
          if (bytes > best_bytes) {
            best_bytes = bytes;
            best = n;
          }
-       }
-       return best;
-     };
+      }
+      return best;
+    };
 
-     if (std::any_of(use_tiled.begin(), use_tiled.end(), [](bool v) { return v; })) {
-       while (true) {
-         uint64_t max_y_elems = 0;
-         uint64_t max_factor_elems = 0;
+    bool need_shared_tiled_workspace_in_loop = false;
+    for (int n = 0; n < order; n++) {
+      if (!use_tiled[n]) continue;
+      if (order != 4) {
+        need_shared_tiled_workspace_in_loop = true;
+        break;
+      }
+    }
+
+    if (need_shared_tiled_workspace_in_loop) {
+      while (true) {
+        uint64_t max_y_elems = 0;
+        uint64_t max_factor_elems = 0;
 #if !SCALAR_DOUBLE
-         uint64_t max_dp_elems = 0;
+        uint64_t max_dp_elems = 0;
 #endif
          for (int n = 0; n < order; n++) {
            if (!use_tiled[n]) continue;
@@ -4229,31 +4247,29 @@ static TiledModeUpdateStats runTiledModeUpdate(
          rebuild_tiled_mode(shrink_mode);
          std::cout << "  mode " << shrink_mode
                    << ": shared tiled workspace allocation failed, retrying with "
-                   << new_rows << " root slices per tile -> "
-                   << tiled_mode_tiles[shrink_mode].size() << " tiles\n";
-       }
-     }
-     bool need_shared_tiled_workspace_in_loop = false;
-     for (int n = 0; n < order; n++) {
-       if (!use_tiled[n]) continue;
-       bool tiled_4d_mode = (order == 4);
-       if (!tiled_4d_mode) {
-         need_shared_tiled_workspace_in_loop = true;
-         break;
-       }
-     }
-     if (!need_shared_tiled_workspace_in_loop) {
-       freeTiledModeWorkspace(tiled_workspace);
-     }
+                    << new_rows << " root slices per tile -> "
+                    << tiled_mode_tiles[shrink_mode].size() << " tiles\n";
+      }
+    }
 
-     for (int n = 0; n < order; n++) {
-       if (!use_tiled[n]) continue;
-       if (order != 4) continue;
-       while (!tryAllocateTiledPass1AndGram(tiled_tile_rows[n], rank_products[n])) {
-         uint64_t old_rows = tiled_tile_rows[n];
-         uint64_t new_rows = std::max<uint64_t>(1, old_rows / 2);
-         if (new_rows == old_rows && old_rows > 1) --new_rows;
-         if (new_rows == 0 || new_rows == old_rows) {
+    if (!need_shared_tiled_workspace_in_loop) {
+      freeTiledModeWorkspace(tiled_workspace);
+    }
+
+    auto needs_tiled_4d_pass1_gram_probe = [&](int n) -> bool {
+      if (!use_tiled[n] || order != 4) return false;
+      const uint64_t gram_bytes = sizeof(double) * rank_products[n] * rank_products[n];
+      const uint64_t hard_4d_gram_threshold = 8ULL * 1024ULL * 1024ULL * 1024ULL;
+      return gram_bytes >= hard_4d_gram_threshold;
+    };
+
+    for (int n = 0; n < order; n++) {
+      if (!needs_tiled_4d_pass1_gram_probe(n)) continue;
+      while (!tryAllocateTiledPass1AndGram(tiled_tile_rows[n], rank_products[n])) {
+        uint64_t old_rows = tiled_tile_rows[n];
+        uint64_t new_rows = std::max<uint64_t>(1, old_rows / 2);
+        if (new_rows == old_rows && old_rows > 1) --new_rows;
+        if (new_rows == 0 || new_rows == old_rows) {
            throw std::runtime_error("Unable to size tiled pass-1 workspace and Gram together.");
          }
          tiled_tile_rows[n] = new_rows;
