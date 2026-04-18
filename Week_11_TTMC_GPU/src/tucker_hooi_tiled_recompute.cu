@@ -36,6 +36,10 @@
  #include <cuda_runtime.h>
  #include <cusolverDn.h>
  #include <cublas_v2.h>
+#ifdef USE_MAGMA_EXACT_GPU
+#include <magma_v2.h>
+#include <magma_d.h>
+#endif
  // #include "matrix_utils.h"
  
  
@@ -114,12 +118,17 @@ inline int getEnvInt(const char* name, int default_value)
   return atoi(value);
 }
 
+static bool forceGpuIterativeEig()
+{
+  return getEnvInt("TTMC_FORCE_GPU_ITERATIVE_EIG", 0) != 0;
+}
+
 inline bool useSyrkForGram(int cols)
 {
   const int min_cols = std::max(1, getEnvInt("TTMC_SYRK_MIN_COLS", 512));
   return cols >= min_cols;
 }
- 
+
  inline bool getEnvFlag(const char* name)
  {
    const char* value = std::getenv(name);
@@ -1216,6 +1225,7 @@ __global__ void compute_inv_sigma_dp(const double* W, scalar_t* diag,
     diag[j] = (scalar_t)(1.0 / sqrt(fmax(W[N - R + j], eps)));
 }
 
+
 // Convert double array to scalar_t (no-op when scalar_t is double)
 __global__ void convert_dp_to_scalar(const double* src, scalar_t* dst, long long n) {
   long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
@@ -1479,19 +1489,458 @@ void run_ttmc_cuda(
      }                                                                       \
    } while (0)
  
- #define CHECK_CUBLAS(call)                                                      \
-   do {                                                                        \
-     cublasStatus_t status = (call);                                         \
-     if (status != CUBLAS_STATUS_SUCCESS) {                                  \
-       std::cerr << "cuBLAS error at " << __FILE__ << ":" << __LINE__      \
-            << " status=" << static_cast<int>(status) << "\n";        \
-       std::exit(EXIT_FAILURE);                                            \
-     }                                                                       \
-   } while (0)
- 
- 
- // ===================================================================
- // GPU memory tracking (enabled by -g / --gpu-stats flag)
+#define CHECK_CUBLAS(call)                                                      \
+  do {                                                                        \
+    cublasStatus_t status = (call);                                         \
+    if (status != CUBLAS_STATUS_SUCCESS) {                                  \
+      std::cerr << "cuBLAS error at " << __FILE__ << ":" << __LINE__      \
+           << " status=" << static_cast<int>(status) << "\n";        \
+      std::exit(EXIT_FAILURE);                                            \
+    }                                                                       \
+  } while (0)
+
+static std::string formatBytes(double bytes);
+
+static bool topREigenvaluesPassResolutionHost(
+  const std::vector<double>& top_eigs,
+  int c,
+  double trace)
+{
+  if (top_eigs.size() < 2) return true;
+  const double eps_mach_dp = 1.1102230246251565e-16;
+  for (size_t j = 0; j + 1 < top_eigs.size(); ++j) {
+    double gnr = (top_eigs[j + 1] - top_eigs[j]) / (2.0 * c * eps_mach_dp * trace);
+    if (gnr <= 1.0) return false;
+  }
+  return true;
+}
+
+static bool solveTopREigensystemDpExact(
+  cusolverDnHandle_t cusolverH,
+  double* d_gram_dp,
+  int dim,
+  int rank,
+  int c,
+  double trace,
+  scalar_t** d_VR_out,
+  scalar_t** d_inv_sigma_out,
+  double* core_norm_sq_out,
+  bool verbose)
+{
+  if (d_VR_out) *d_VR_out = nullptr;
+  if (d_inv_sigma_out) *d_inv_sigma_out = nullptr;
+  if (core_norm_sq_out) *core_norm_sq_out = 0.0;
+  rank = std::min(rank, dim);
+  if (rank <= 0) return false;
+
+  double* d_W_dp = nullptr;
+  void* d_work_dp = nullptr;
+  void* h_work = nullptr;
+  int* d_info = nullptr;
+  size_t workspace_bytes_device = 0;
+  size_t workspace_bytes_host = 0;
+  int64_t meig = 0;
+  const int64_t il = dim - rank + 1;
+  const int64_t iu = dim;
+  cusolverDnParams_t params = nullptr;
+
+  CHECK_CUDA(cudaMalloc(&d_W_dp, sizeof(double) * dim));
+
+  CHECK_CUSOLVER(cusolverDnCreateParams(&params));
+
+  cusolverStatus_t st = cusolverDnXsyevdx_bufferSize(
+    cusolverH, params,
+    CUSOLVER_EIG_MODE_VECTOR, CUSOLVER_EIG_RANGE_I,
+    CUBLAS_FILL_MODE_UPPER,
+    (int64_t)dim,
+    CUDA_R_64F, d_gram_dp, (int64_t)dim,
+    nullptr, nullptr, il, iu, &meig,
+    CUDA_R_64F, d_W_dp,
+    CUDA_R_64F,
+    &workspace_bytes_device,
+    &workspace_bytes_host);
+  if (st != CUSOLVER_STATUS_SUCCESS) {
+    if (verbose) {
+      std::cout << "  exact top-R eigensolver bufferSize failed with status="
+                << cusolverStatusString(st) << "\n";
+    }
+    CHECK_CUDA(cudaFree(d_W_dp));
+    cusolverDnDestroyParams(params);
+    return false;
+  }
+
+  if (verbose) {
+    size_t free_bytes = 0, total_bytes = 0;
+    CHECK_CUDA(cudaMemGetInfo(&free_bytes, &total_bytes));
+    std::cout << "  exact top-R eigensolver workspace: device "
+              << formatBytes((double)workspace_bytes_device)
+              << " host " << formatBytes((double)workspace_bytes_host)
+              << "  free GPU before work alloc " << formatBytes((double)free_bytes)
+              << "\n";
+  }
+
+  cudaError_t err = cudaMalloc(&d_work_dp, std::max<size_t>(workspace_bytes_device, 1));
+  if (err != cudaSuccess) {
+    cudaGetLastError();
+    if (verbose) std::cout << "  exact top-R eigensolver work alloc failed\n";
+    CHECK_CUDA(cudaFree(d_W_dp));
+    cusolverDnDestroyParams(params);
+    return false;
+  }
+  if (workspace_bytes_host > 0) {
+    h_work = std::malloc(workspace_bytes_host);
+    if (!h_work) {
+      if (verbose) std::cout << "  exact top-R eigensolver host work alloc failed\n";
+      CHECK_CUDA(cudaFree(d_W_dp));
+      CHECK_CUDA(cudaFree(d_work_dp));
+      cusolverDnDestroyParams(params);
+      return false;
+    }
+  }
+  CHECK_CUDA(cudaMalloc(&d_info, sizeof(int)));
+
+  st = cusolverDnXsyevdx(
+    cusolverH, params,
+    CUSOLVER_EIG_MODE_VECTOR, CUSOLVER_EIG_RANGE_I,
+    CUBLAS_FILL_MODE_UPPER,
+    (int64_t)dim,
+    CUDA_R_64F, d_gram_dp, (int64_t)dim,
+    nullptr, nullptr, il, iu, &meig,
+    CUDA_R_64F, d_W_dp,
+    CUDA_R_64F,
+    d_work_dp, workspace_bytes_device,
+    h_work, workspace_bytes_host,
+    d_info);
+  if (st != CUSOLVER_STATUS_SUCCESS) {
+    if (verbose) {
+      std::cout << "  exact top-R eigensolver failed with status="
+                << cusolverStatusString(st) << "\n";
+    }
+    CHECK_CUDA(cudaFree(d_W_dp));
+    CHECK_CUDA(cudaFree(d_work_dp));
+    CHECK_CUDA(cudaFree(d_info));
+    if (h_work) std::free(h_work);
+    cusolverDnDestroyParams(params);
+    return false;
+  }
+
+  int h_info = 0;
+  CHECK_CUDA(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
+  if (h_info != 0 || meig < rank) {
+    if (verbose) {
+      std::cout << "  exact top-R eigensolver returned info=" << h_info
+                << " meig=" << meig << "\n";
+    }
+    CHECK_CUDA(cudaFree(d_W_dp));
+    CHECK_CUDA(cudaFree(d_work_dp));
+    CHECK_CUDA(cudaFree(d_info));
+    if (h_work) std::free(h_work);
+    cusolverDnDestroyParams(params);
+    return false;
+  }
+
+  std::vector<double> h_top(rank);
+  CHECK_CUDA(cudaMemcpy(
+    h_top.data(),
+    d_W_dp,
+    sizeof(double) * rank,
+    cudaMemcpyDeviceToHost));
+  if (!topREigenvaluesPassResolutionHost(h_top, c, trace)) {
+    if (verbose) {
+      std::cout << "  exact top-R eigensolver resolution check failed among top-" << rank
+                << " eigenvalues\n";
+    }
+    CHECK_CUDA(cudaFree(d_W_dp));
+    CHECK_CUDA(cudaFree(d_work_dp));
+    CHECK_CUDA(cudaFree(d_info));
+    if (h_work) std::free(h_work);
+    cusolverDnDestroyParams(params);
+    return false;
+  }
+
+  if (core_norm_sq_out) {
+    double sum = 0.0;
+    for (double lam : h_top) sum += std::max(lam, 0.0);
+    *core_norm_sq_out = sum;
+  }
+
+  std::vector<scalar_t> h_inv_sigma(rank);
+  for (int j = 0; j < rank; ++j) {
+    h_inv_sigma[j] = (scalar_t)(1.0 / std::sqrt(std::max(h_top[j], 1e-12)));
+  }
+
+  CHECK_CUDA(cudaMalloc(d_VR_out, sizeof(scalar_t) * (long long)dim * rank));
+  convert_dp_to_scalar<<<((long long)dim * rank + 255) / 256, 256>>>(
+    d_gram_dp, *d_VR_out, (long long)dim * rank);
+  CHECK_CUDA(cudaGetLastError());
+
+  CHECK_CUDA(cudaMalloc(d_inv_sigma_out, sizeof(scalar_t) * rank));
+  CHECK_CUDA(cudaMemcpy(
+    *d_inv_sigma_out,
+    h_inv_sigma.data(),
+    sizeof(scalar_t) * rank,
+    cudaMemcpyHostToDevice));
+
+  CHECK_CUDA(cudaFree(d_W_dp));
+  CHECK_CUDA(cudaFree(d_work_dp));
+  CHECK_CUDA(cudaFree(d_info));
+  if (h_work) std::free(h_work);
+  cusolverDnDestroyParams(params);
+  return true;
+}
+
+static bool symmetricEigenvaluesGpuSmall(
+  cusolverDnHandle_t cusolverH,
+  double* d_a,
+  int n,
+  std::vector<double>& evals_out,
+  bool verbose)
+{
+  evals_out.assign(n, 0.0);
+  double* d_w = nullptr;
+  double* d_work = nullptr;
+  int* d_info = nullptr;
+  int lwork = 0;
+
+  CHECK_CUDA(cudaMalloc(&d_w, sizeof(double) * n));
+  cusolverStatus_t st = cusolverDnDsyevd_bufferSize(
+    cusolverH, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_UPPER,
+    n, d_a, n, d_w, &lwork);
+  if (st != CUSOLVER_STATUS_SUCCESS) {
+    if (verbose) {
+      std::cout << "  small symmetric eig workspace query failed status="
+                << cusolverStatusString(st) << "\n";
+    }
+    CHECK_CUDA(cudaFree(d_w));
+    return false;
+  }
+
+  CHECK_CUDA(cudaMalloc(&d_work, sizeof(double) * std::max(lwork, 1)));
+  CHECK_CUDA(cudaMalloc(&d_info, sizeof(int)));
+  st = cusolverDnDsyevd(
+    cusolverH, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_UPPER,
+    n, d_a, n, d_w, d_work, lwork, d_info);
+  if (st != CUSOLVER_STATUS_SUCCESS) {
+    if (verbose) {
+      std::cout << "  small symmetric eig failed status="
+                << cusolverStatusString(st) << "\n";
+    }
+    CHECK_CUDA(cudaFree(d_w));
+    CHECK_CUDA(cudaFree(d_work));
+    CHECK_CUDA(cudaFree(d_info));
+    return false;
+  }
+
+  int h_info = 0;
+  CHECK_CUDA(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
+  if (h_info != 0) {
+    if (verbose) {
+      std::cout << "  small symmetric eig failed info=" << h_info << "\n";
+    }
+    CHECK_CUDA(cudaFree(d_w));
+    CHECK_CUDA(cudaFree(d_work));
+    CHECK_CUDA(cudaFree(d_info));
+    return false;
+  }
+
+  CHECK_CUDA(cudaMemcpy(evals_out.data(), d_w, sizeof(double) * n, cudaMemcpyDeviceToHost));
+  CHECK_CUDA(cudaFree(d_w));
+  CHECK_CUDA(cudaFree(d_work));
+  CHECK_CUDA(cudaFree(d_info));
+  return true;
+}
+
+__global__ static void extractTrailingColumnsKernel(
+  const double* src,
+  double* dst,
+  int rows,
+  int cols,
+  int keep_cols)
+{
+  long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+  long long total = (long long)rows * keep_cols;
+  if (idx >= total) return;
+  int row = idx % rows;
+  int col = idx / rows;
+  int src_col = cols - keep_cols + col;
+  dst[idx] = src[(long long)row + (long long)src_col * rows];
+}
+
+static bool orthonormalizeBasisGpu(
+  cusolverDnHandle_t cusolverH,
+  cublasHandle_t cublasH,
+  const double* d_in,
+  int n,
+  int k,
+  double* d_out,
+  bool verbose)
+{
+  double* d_s = nullptr;
+  double* d_inv = nullptr;
+  CHECK_CUDA(cudaMalloc(&d_s, sizeof(double) * k * k));
+  const double alpha = 1.0;
+  const double beta = 0.0;
+  CHECK_CUBLAS(cublasDsyrk(
+    cublasH, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_T,
+    k, n, &alpha, d_in, n, &beta, d_s, k));
+
+  std::vector<double> h_eval;
+  if (!symmetricEigenvaluesGpuSmall(cusolverH, d_s, k, h_eval, verbose)) {
+    CHECK_CUDA(cudaFree(d_s));
+    return false;
+  }
+  std::vector<double> h_inv(k);
+  for (int j = 0; j < k; ++j) {
+    if (h_eval[j] <= 1e-20) {
+      if (verbose) std::cout << "  orthonormalization failed: nonpositive Gram eigenvalue\n";
+      CHECK_CUDA(cudaFree(d_s));
+      return false;
+    }
+    h_inv[j] = 1.0 / std::sqrt(h_eval[j]);
+  }
+  CHECK_CUDA(cudaMalloc(&d_inv, sizeof(double) * k));
+  CHECK_CUDA(cudaMemcpy(d_inv, h_inv.data(), sizeof(double) * k, cudaMemcpyHostToDevice));
+
+  CHECK_CUBLAS(cublasDgemm(
+    cublasH, CUBLAS_OP_N, CUBLAS_OP_N,
+    n, k, k, &alpha, d_in, n, d_s, k, &beta, d_out, n));
+  CHECK_CUBLAS(cublasDdgmm(
+    cublasH, CUBLAS_SIDE_RIGHT,
+    n, k, d_out, n, d_inv, 1, d_out, n));
+
+  CHECK_CUDA(cudaFree(d_s));
+  CHECK_CUDA(cudaFree(d_inv));
+  return true;
+}
+
+static bool solveTopREigensystemDpIterativeGpu(
+  cusolverDnHandle_t cusolverH,
+  cublasHandle_t cublasH,
+  double* d_gram_dp,
+  int dim,
+  int rank,
+  int c,
+  double trace,
+  scalar_t** d_VR_out,
+  scalar_t** d_inv_sigma_out,
+  double* core_norm_sq_out,
+  bool verbose)
+{
+  if (d_VR_out) *d_VR_out = nullptr;
+  if (d_inv_sigma_out) *d_inv_sigma_out = nullptr;
+  if (core_norm_sq_out) *core_norm_sq_out = 0.0;
+  rank = std::min(rank, dim);
+  if (rank <= 0) return false;
+
+  int oversample = std::max(0, getEnvInt("TTMC_GPU_ITER_OVERSAMPLE", 8));
+  int max_iters = std::max(1, getEnvInt("TTMC_GPU_ITER_ITERS", 8));
+  int k = std::min(dim, rank + oversample);
+  if (verbose) {
+    std::cout << "  trying iterative GPU top-R eigensolver: block=" << k
+              << " iters=" << max_iters << "\n";
+  }
+
+  double* d_q = nullptr;
+  double* d_z = nullptr;
+  CHECK_CUDA(cudaMalloc(&d_q, sizeof(double) * (size_t)dim * k));
+  CHECK_CUDA(cudaMalloc(&d_z, sizeof(double) * (size_t)dim * k));
+
+  std::vector<double> h_init((size_t)dim * k);
+  std::mt19937_64 rng(1234567);
+  std::normal_distribution<double> normal(0.0, 1.0);
+  for (double& x : h_init) x = normal(rng);
+  CHECK_CUDA(cudaMemcpy(d_q, h_init.data(), sizeof(double) * h_init.size(), cudaMemcpyHostToDevice));
+  if (!orthonormalizeBasisGpu(cusolverH, cublasH, d_q, dim, k, d_z, verbose)) {
+    CHECK_CUDA(cudaFree(d_q));
+    CHECK_CUDA(cudaFree(d_z));
+    return false;
+  }
+  std::swap(d_q, d_z);
+
+  const double alpha = 1.0;
+  const double beta = 0.0;
+  for (int it = 0; it < max_iters; ++it) {
+    CHECK_CUBLAS(cublasDsymm(
+      cublasH, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_UPPER,
+      dim, k, &alpha, d_gram_dp, dim, d_q, dim, &beta, d_z, dim));
+    if (!orthonormalizeBasisGpu(cusolverH, cublasH, d_z, dim, k, d_q, verbose)) {
+      CHECK_CUDA(cudaFree(d_q));
+      CHECK_CUDA(cudaFree(d_z));
+      return false;
+    }
+  }
+
+  CHECK_CUBLAS(cublasDsymm(
+    cublasH, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_UPPER,
+    dim, k, &alpha, d_gram_dp, dim, d_q, dim, &beta, d_z, dim));
+
+  double* d_t = nullptr;
+  CHECK_CUDA(cudaMalloc(&d_t, sizeof(double) * k * k));
+  CHECK_CUBLAS(cublasDgemm(
+    cublasH, CUBLAS_OP_T, CUBLAS_OP_N,
+    k, k, dim, &alpha, d_q, dim, d_z, dim, &beta, d_t, k));
+
+  std::vector<double> h_eval;
+  if (!symmetricEigenvaluesGpuSmall(cusolverH, d_t, k, h_eval, verbose)) {
+    CHECK_CUDA(cudaFree(d_t));
+    CHECK_CUDA(cudaFree(d_q));
+    CHECK_CUDA(cudaFree(d_z));
+    return false;
+  }
+
+  std::vector<double> h_top(rank);
+  for (int j = 0; j < rank; ++j) h_top[j] = h_eval[k - rank + j];
+  if (!topREigenvaluesPassResolutionHost(h_top, c, trace)) {
+    if (verbose) {
+      std::cout << "  iterative GPU eigensolver resolution check failed among top-" << rank
+                << " eigenvalues\n";
+    }
+    CHECK_CUDA(cudaFree(d_t));
+    CHECK_CUDA(cudaFree(d_q));
+    CHECK_CUDA(cudaFree(d_z));
+    return false;
+  }
+
+  std::vector<scalar_t> h_inv_sigma(rank);
+  double core_sum = 0.0;
+  for (int j = 0; j < rank; ++j) {
+    core_sum += std::max(h_top[j], 0.0);
+    h_inv_sigma[j] = (scalar_t)(1.0 / std::sqrt(std::max(h_top[j], 1e-12)));
+  }
+  if (core_norm_sq_out) *core_norm_sq_out = core_sum;
+
+  double* d_vselect = nullptr;
+  CHECK_CUDA(cudaMalloc(&d_vselect, sizeof(double) * (size_t)k * rank));
+  extractTrailingColumnsKernel<<<((long long)k * rank + 255) / 256, 256>>>(d_t, d_vselect, k, k, rank);
+  CHECK_CUDA(cudaGetLastError());
+  CHECK_CUBLAS(cublasDgemm(
+    cublasH, CUBLAS_OP_N, CUBLAS_OP_N,
+    dim, rank, k, &alpha, d_q, dim, d_vselect, k, &beta, d_z, dim));
+
+  CHECK_CUDA(cudaMalloc(d_VR_out, sizeof(scalar_t) * (size_t)dim * rank));
+  convert_dp_to_scalar<<<((long long)dim * rank + 255) / 256, 256>>>(
+    d_z, *d_VR_out, (long long)dim * rank);
+  CHECK_CUDA(cudaGetLastError());
+
+  CHECK_CUDA(cudaMalloc(d_inv_sigma_out, sizeof(scalar_t) * rank));
+  CHECK_CUDA(cudaMemcpy(
+    *d_inv_sigma_out,
+    h_inv_sigma.data(),
+    sizeof(scalar_t) * rank,
+    cudaMemcpyHostToDevice));
+
+  CHECK_CUDA(cudaFree(d_vselect));
+  CHECK_CUDA(cudaFree(d_t));
+  CHECK_CUDA(cudaFree(d_q));
+  CHECK_CUDA(cudaFree(d_z));
+  if (verbose) {
+    std::cout << "  iterative GPU top-R eigensolver completed\n";
+  }
+  return true;
+}
+
+// ===================================================================
+// GPU memory tracking (enabled by -g / --gpu-stats flag)
  // Shadows cudaMalloc so every allocation prints its size when the flag is set.
  // Must be defined after cuda_runtime.h is included.
  // ===================================================================
@@ -1678,7 +2127,7 @@ void gpu_full_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_t cub
   CHECK_CUDA(cudaDeviceSynchronize());
   cudaEventDestroy(ev0); cudaEventDestroy(ev1);
 }
- 
+
  // Truncated SVD via eigendecomposition of the Gram matrix.
 // d_A: row-major (M, N) — equivalently, col-major A^T of shape (N, M) with lda=N.
 // Output: top-R left singular vectors in d_factor (M×R col-major).
@@ -1912,12 +2361,25 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
        use_blocked = true;
      }
      if (use_blocked) {
-       const int BSIZ = 32768;
-       double* d_blk_dp;
-       CHECK_CUDA(cudaMalloc(&d_blk_dp, sizeof(double) * std::min(BSIZ, M) * N));
+       int block_rows = std::min(std::max(1, getEnvInt("TTMC_BLOCKED_DP_ROWS", 32768)), M);
+       double* d_blk_dp = nullptr;
+       while (block_rows > 0) {
+         cudaError_t blk_err = cudaMalloc(&d_blk_dp, sizeof(double) * (long long)block_rows * N);
+         if (blk_err == cudaSuccess) break;
+         cudaGetLastError();
+         if (verbose) {
+           std::cout << "  blocked dp alloc failed for " << block_rows
+                     << " rows, retrying smaller block\n";
+         }
+         block_rows /= 2;
+       }
+       if (!d_blk_dp) {
+         std::cerr << "  blocked dp alloc failed even after shrinking block rows\n";
+         CHECK_CUDA(cudaErrorMemoryAllocation);
+       }
        double beta_one = 1.0;
-       for (int s = 0; s < M; s += BSIZ) {
-         int b = std::min(BSIZ, M - s);
+       for (int s = 0; s < M; s += block_rows) {
+         int b = std::min(block_rows, M - s);
          long long chunk_elems = (long long)b * N;
          convert_scalar_to_dp<<<(chunk_elems + 255)/256, 256>>>(
            d_A + (long long)s * N, d_blk_dp, chunk_elems);
@@ -1945,52 +2407,123 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
      double *d_W_dp;
      CHECK_CUDA(cudaMalloc(&d_W_dp, sizeof(double) * N));
      int lwork = 0;
-     CHECK_CUSOLVER(cusolverDnDsyevd_bufferSize(cusolverH, CUSOLVER_EIG_MODE_VECTOR,
-       CUBLAS_FILL_MODE_UPPER, N, d_Gram_dp, N, d_W_dp, &lwork));
+     bool used_topr_solver = forceGpuIterativeEig();
+     scalar_t* d_V_R = nullptr;
+     scalar_t* d_diag = nullptr;
+     double* d_work_dp = nullptr;
+     int* d_info = nullptr;
 
-     double *d_work_dp; int *d_info;
-     cudaEventRecord(ev_start);
-     CHECK_CUDA(cudaMalloc(&d_work_dp, sizeof(double) * lwork));
-     CHECK_CUDA(cudaMalloc(&d_info, sizeof(int)));
-     cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
-     cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
-     if (verbose) std::cout << "  eig buf alloc: " << ev_ms << " ms\n";
-     if (verbose) std::cout << "  d_work (MB): " << sizeof(double) * lwork / (1024.0 * 1024.0) << "\n";
+     cusolverStatus_t full_st = CUSOLVER_STATUS_SUCCESS;
+     if (!used_topr_solver) {
+       full_st = cusolverDnDsyevd_bufferSize(
+         cusolverH, CUSOLVER_EIG_MODE_VECTOR,
+         CUBLAS_FILL_MODE_UPPER, N, d_Gram_dp, N, d_W_dp, &lwork);
+       if (full_st != CUSOLVER_STATUS_SUCCESS) {
+         if (verbose) {
+           std::cout << "  full eigensolver bufferSize failed with status="
+                     << cusolverStatusString(full_st)
+                     << ", trying exact top-R eigensolver\n";
+         }
+         used_topr_solver = true;
+       } else {
+         cudaEventRecord(ev_start);
+         cudaError_t work_err = cudaMalloc(&d_work_dp, sizeof(double) * std::max(lwork, 1));
+         if (work_err != cudaSuccess) {
+           cudaGetLastError();
+           used_topr_solver = true;
+           if (verbose) {
+             std::cout << "  full eigensolver work alloc failed, trying exact top-R eigensolver\n";
+           }
+         } else {
+           CHECK_CUDA(cudaMalloc(&d_info, sizeof(int)));
+           cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
+           cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
+           if (verbose) std::cout << "  eig buf alloc: " << ev_ms << " ms\n";
+           if (verbose) std::cout << "  d_work (MB): " << sizeof(double) * lwork / (1024.0 * 1024.0) << "\n";
 
-     cudaEventRecord(ev_start);
-     CHECK_CUSOLVER(cusolverDnDsyevd(cusolverH, CUSOLVER_EIG_MODE_VECTOR,
-       CUBLAS_FILL_MODE_UPPER, N, d_Gram_dp, N, d_W_dp, d_work_dp, lwork, d_info));
-     cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
-     cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
-     if (verbose) std::cout << "  eig decomp (dp): " << ev_ms << " ms\n";
-     int h_info = 0;
-     CHECK_CUDA(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
-     if (h_info != 0) {
-       std::cerr << "  WARNING: cusolverDnDsyevd info=" << h_info << "\n";
-       CHECK_CUDA(cudaFree(d_Gram_dp)); CHECK_CUDA(cudaFree(d_W_dp));
-       CHECK_CUDA(cudaFree(d_work_dp)); CHECK_CUDA(cudaFree(d_info));
-       return;
+           cudaEventRecord(ev_start);
+           full_st = cusolverDnDsyevd(cusolverH, CUSOLVER_EIG_MODE_VECTOR,
+             CUBLAS_FILL_MODE_UPPER, N, d_Gram_dp, N, d_W_dp, d_work_dp, lwork, d_info);
+           cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
+           cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
+           if (verbose) std::cout << "  eig decomp (dp): " << ev_ms << " ms\n";
+           if (full_st != CUSOLVER_STATUS_SUCCESS) {
+             if (verbose) {
+               std::cout << "  full eigensolver failed with status="
+                         << cusolverStatusString(full_st)
+                         << ", trying exact top-R eigensolver\n";
+             }
+             CHECK_CUDA(cudaFree(d_work_dp));
+             d_work_dp = nullptr;
+             CHECK_CUDA(cudaFree(d_info));
+             d_info = nullptr;
+             used_topr_solver = true;
+           }
+         }
+       }
+     } else if (verbose) {
+       if (forceGpuIterativeEig()) {
+         std::cout << "  exact top-R eigensolver forced to iterative GPU fallback\n";
+       }
      }
 
-     CHECK_CUDA(cudaMemset(d_info, 0, sizeof(int)));
-     if (R > 1)
-      check_resolution_dp<<<1, R - 1>>>(d_W_dp, M + N, N, R, eps_mach_dp, d_info, traceATA);
-     CHECK_CUDA(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
-     if (h_info != 0) {
-       if (verbose)
-         std::cout << "  resolution condition failed among top-" << R
-                   << " eigenvalues, falling back to full SVD\n";
-       CHECK_CUDA(cudaFree(d_Gram_dp)); CHECK_CUDA(cudaFree(d_W_dp));
-       CHECK_CUDA(cudaFree(d_work_dp)); CHECK_CUDA(cudaFree(d_info));
-       gpu_full_svd_update_factor(cusolverH, cublasH, d_A, M, N, R, d_factor, verbose);
-       return;
-     }
+     if (!used_topr_solver) {
+       int h_info = 0;
+       CHECK_CUDA(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
+       if (h_info != 0) {
+         std::cerr << "  WARNING: cusolverDnDsyevd info=" << h_info << "\n";
+         CHECK_CUDA(cudaFree(d_Gram_dp)); CHECK_CUDA(cudaFree(d_W_dp));
+         CHECK_CUDA(cudaFree(d_work_dp)); CHECK_CUDA(cudaFree(d_info));
+         return;
+       }
 
-     // Convert top-R eigenvectors double→float (N×R, small)
-     double* d_V_R_dp = d_Gram_dp + (long long)(N - R) * N;
-     scalar_t* d_V_R;
-     CHECK_CUDA(cudaMalloc(&d_V_R, sizeof(scalar_t) * N * R));
-     convert_dp_to_scalar<<<((long long)N*R + 255)/256, 256>>>(d_V_R_dp, d_V_R, N * R);
+       CHECK_CUDA(cudaMemset(d_info, 0, sizeof(int)));
+       if (R > 1)
+        check_resolution_dp<<<1, R - 1>>>(d_W_dp, M + N, N, R, eps_mach_dp, d_info, traceATA);
+       CHECK_CUDA(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
+       if (h_info != 0) {
+         if (verbose)
+           std::cout << "  resolution condition failed among top-" << R
+                     << " eigenvalues, falling back to full SVD\n";
+         CHECK_CUDA(cudaFree(d_Gram_dp)); CHECK_CUDA(cudaFree(d_W_dp));
+         CHECK_CUDA(cudaFree(d_work_dp)); CHECK_CUDA(cudaFree(d_info));
+         gpu_full_svd_update_factor(cusolverH, cublasH, d_A, M, N, R, d_factor, verbose);
+         return;
+       }
+
+       // Convert top-R eigenvectors double→float (N×R, small)
+       double* d_V_R_dp = d_Gram_dp + (long long)(N - R) * N;
+       CHECK_CUDA(cudaMalloc(&d_V_R, sizeof(scalar_t) * N * R));
+       convert_dp_to_scalar<<<((long long)N*R + 255)/256, 256>>>(d_V_R_dp, d_V_R, N * R);
+       CHECK_CUDA(cudaMalloc(&d_diag, sizeof(scalar_t) * R));
+       compute_inv_sigma_dp<<<(R+255)/256, 256>>>(d_W_dp, d_diag, N, R, 1e-12);
+     } else {
+       CHECK_CUDA(cudaFree(d_W_dp));
+       d_W_dp = nullptr;
+       bool top_r_ok = false;
+       if (forceGpuIterativeEig()) {
+         top_r_ok = solveTopREigensystemDpIterativeGpu(
+           cusolverH, cublasH, d_Gram_dp, N, R, M + N, traceATA,
+           &d_V_R, &d_diag, nullptr, verbose);
+       } else {
+         top_r_ok = solveTopREigensystemDpExact(
+           cusolverH, d_Gram_dp, N, R, M + N, traceATA,
+           &d_V_R, &d_diag, nullptr, verbose);
+         if (!top_r_ok) {
+           if (verbose) {
+             std::cout << "  exact GPU top-R eigensolver failed, trying iterative GPU fallback\n";
+           }
+           top_r_ok = solveTopREigensystemDpIterativeGpu(
+             cusolverH, cublasH, d_Gram_dp, N, R, M + N, traceATA,
+             &d_V_R, &d_diag, nullptr, verbose);
+         }
+       }
+       if (!top_r_ok) {
+         CHECK_CUDA(cudaFree(d_Gram_dp));
+         throw std::runtime_error("Exact and iterative GPU eigensolvers failed in full Gram path.");
+       }
+     }
+     CHECK_CUDA(cudaGetLastError());
 
      cudaEventRecord(ev_start);
      CHECK_CUBLAS(cublasGemmT(cublasH, CUBLAS_OP_T, CUBLAS_OP_N,
@@ -1999,10 +2532,7 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
      cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
      if (verbose) std::cout << "  AV gemm: " << ev_ms << " ms\n";
 
-     scalar_t* d_diag;
-     CHECK_CUDA(cudaMalloc(&d_diag, sizeof(scalar_t) * R));
      cudaEventRecord(ev_start);
-     compute_inv_sigma_dp<<<(R+255)/256, 256>>>(d_W_dp, d_diag, N, R, 1e-12);
      CHECK_CUBLAS(cublasDgmmT(cublasH, CUBLAS_SIDE_LEFT, R, M,
        d_factor, R, d_diag, 1, d_factor, R));
      cudaEventRecord(ev_stop); cudaEventSynchronize(ev_stop);
@@ -2011,8 +2541,10 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
 
      CHECK_CUDA(cudaFree(d_diag));
      CHECK_CUDA(cudaFree(d_V_R));
-     CHECK_CUDA(cudaFree(d_Gram_dp)); CHECK_CUDA(cudaFree(d_W_dp));
-     CHECK_CUDA(cudaFree(d_work_dp)); CHECK_CUDA(cudaFree(d_info));
+     CHECK_CUDA(cudaFree(d_Gram_dp));
+     if (d_W_dp) CHECK_CUDA(cudaFree(d_W_dp));
+     if (d_work_dp) CHECK_CUDA(cudaFree(d_work_dp));
+     if (d_info) CHECK_CUDA(cudaFree(d_info));
    } else {
     const double eps_mach_dp = 1.1102230246251565e-16;
     double alpha_dp = 1.0, beta_zero_dp = 0.0;
@@ -2309,6 +2841,20 @@ static uint64_t chooseTileRootCount(
   return std::min(rows, num_roots);
 }
 
+static size_t tiledModeWorkspaceBytes(
+  uint64_t tile_rows,
+  uint64_t rank_product,
+  uint64_t rank)
+{
+  size_t bytes = sizeof(scalar_t) * tile_rows * (size_t)rank_product;
+  bytes += sizeof(scalar_t) * tile_rows * (size_t)rank;
+#if !SCALAR_DOUBLE
+  bytes += sizeof(double) * std::min<uint64_t>(tile_rows, 8192ULL) * (size_t)rank_product;
+#endif
+  return bytes;
+}
+
+
 struct TiledGramSVDResult {
   scalar_t* d_VR = nullptr;        // col-major (P x R)
   scalar_t* d_inv_sigma = nullptr; // length R
@@ -2364,9 +2910,11 @@ struct TiledModeWorkspace {
   double* d_tile_block_dp = nullptr;
   int dp_block_rows = 0;
 #endif
-  uint64_t max_rows = 0;
-  int cols = 0;
-  int rank = 0;
+  uint64_t y_capacity_elems = 0;
+  uint64_t factor_capacity_elems = 0;
+#if !SCALAR_DOUBLE
+  uint64_t dp_capacity_elems = 0;
+#endif
 };
 
 struct TiledModeUpdateStats {
@@ -2406,31 +2954,110 @@ static void freeTiledModeWorkspace(TiledModeWorkspace& ws) {
     ws.d_tile_block_dp = nullptr;
   }
   ws.dp_block_rows = 0;
+  ws.dp_capacity_elems = 0;
 #endif
-  ws.max_rows = 0;
-  ws.cols = 0;
-  ws.rank = 0;
+  ws.y_capacity_elems = 0;
+  ws.factor_capacity_elems = 0;
 }
 
-static void prepareTiledModeWorkspace(
+static uint64_t tiledWorkspaceYElems(uint64_t max_rows, int cols)
+{
+  return max_rows * (uint64_t)std::max(cols, 0);
+}
+
+static uint64_t tiledWorkspaceFactorElems(uint64_t max_rows, int rank)
+{
+  return max_rows * (uint64_t)std::max(rank, 0);
+}
+
+#if !SCALAR_DOUBLE
+static uint64_t tiledWorkspaceDPElems(uint64_t max_rows, int cols)
+{
+  return std::min<uint64_t>(max_rows, 8192ULL) * (uint64_t)std::max(cols, 0);
+}
+#endif
+
+static bool tryPrepareTiledModeWorkspace(
   TiledModeWorkspace& ws,
-  uint64_t max_rows,
-  int cols,
-  int rank)
+  uint64_t y_capacity_elems,
+  uint64_t factor_capacity_elems,
+#if !SCALAR_DOUBLE
+  uint64_t dp_capacity_elems
+#endif
+)
 {
   freeTiledModeWorkspace(ws);
-  ws.max_rows = max_rows;
-  ws.cols = cols;
-  ws.rank = rank;
-  if (max_rows == 0) return;
-  CHECK_CUDA(cudaMalloc(&ws.d_y_tile, sizeof(scalar_t) * max_rows * (uint64_t)cols));
-  CHECK_CUDA(cudaMalloc(&ws.d_factor_tile, sizeof(scalar_t) * max_rows * (uint64_t)rank));
+  ws.y_capacity_elems = y_capacity_elems;
+  ws.factor_capacity_elems = factor_capacity_elems;
+  if (y_capacity_elems == 0 && factor_capacity_elems == 0
 #if !SCALAR_DOUBLE
-  ws.dp_block_rows = (int)std::min<uint64_t>(max_rows, 8192);
-  CHECK_CUDA(cudaMalloc(
-    &ws.d_tile_block_dp,
-    sizeof(double) * (uint64_t)ws.dp_block_rows * (uint64_t)cols));
+      && dp_capacity_elems == 0
 #endif
+  ) {
+    return true;
+  }
+
+  cudaError_t err = cudaSuccess;
+  if (y_capacity_elems > 0) {
+    err = cudaMalloc(&ws.d_y_tile, sizeof(scalar_t) * y_capacity_elems);
+    if (err != cudaSuccess) {
+      cudaGetLastError();
+      freeTiledModeWorkspace(ws);
+      return false;
+    }
+  }
+  if (factor_capacity_elems > 0) {
+    err = cudaMalloc(&ws.d_factor_tile, sizeof(scalar_t) * factor_capacity_elems);
+    if (err != cudaSuccess) {
+      cudaGetLastError();
+      freeTiledModeWorkspace(ws);
+      return false;
+    }
+  }
+#if !SCALAR_DOUBLE
+  ws.dp_capacity_elems = dp_capacity_elems;
+  ws.dp_block_rows = (dp_capacity_elems > 0) ? 8192 : 0;
+  if (dp_capacity_elems > 0) {
+    err = cudaMalloc(&ws.d_tile_block_dp, sizeof(double) * dp_capacity_elems);
+    if (err != cudaSuccess) {
+      cudaGetLastError();
+      freeTiledModeWorkspace(ws);
+      return false;
+    }
+  }
+#endif
+  return true;
+}
+
+static bool tryAllocateTiledPass1AndGram(
+  uint64_t tile_rows,
+  uint64_t rank_product)
+{
+  TiledModeWorkspace probe_ws;
+  bool ws_ok = tryPrepareTiledModeWorkspace(
+    probe_ws,
+    tiledWorkspaceYElems(tile_rows, (int)rank_product),
+    /*factor_capacity_elems=*/0,
+#if !SCALAR_DOUBLE
+    tiledWorkspaceDPElems(tile_rows, (int)rank_product)
+#endif
+  );
+  if (!ws_ok) {
+    freeTiledModeWorkspace(probe_ws);
+    return false;
+  }
+
+  void* d_gram_probe = nullptr;
+#if SCALAR_DOUBLE
+  cudaError_t gram_err = cudaMalloc(&d_gram_probe, sizeof(scalar_t) * rank_product * rank_product);
+#else
+  cudaError_t gram_err = cudaMalloc(&d_gram_probe, sizeof(double) * rank_product * rank_product);
+#endif
+  bool ok = (gram_err == cudaSuccess);
+  if (!ok) cudaGetLastError();
+  if (d_gram_probe) CHECK_CUDA(cudaFree(d_gram_probe));
+  freeTiledModeWorkspace(probe_ws);
+  return ok;
 }
 
 static void freeTTMCTile3D(TTMCTile3D& tile) {
@@ -2883,60 +3510,125 @@ static bool solveTallGramEigensystem(
   int* d_info = nullptr;
   int lwork = 0;
   CHECK_CUDA(cudaMalloc(&d_W, sizeof(double) * cols));
-  CHECK_CUSOLVER(cusolverDnDsyevd_bufferSize(
-    cusolverH, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_UPPER,
-    cols, d_gram, cols, d_W, &lwork));
-  CHECK_CUDA(cudaMalloc(&d_work, sizeof(double) * lwork));
-  CHECK_CUDA(cudaMalloc(&d_info, sizeof(int)));
-  CHECK_CUSOLVER(cusolverDnDsyevd(
-    cusolverH, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_UPPER,
-    cols, d_gram, cols, d_W, d_work, lwork, d_info));
+  bool used_topr_solver = forceGpuIterativeEig();
+  cusolverStatus_t full_st = CUSOLVER_STATUS_SUCCESS;
+  if (!used_topr_solver) {
+    full_st = cusolverDnDsyevd_bufferSize(
+      cusolverH, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_UPPER,
+      cols, d_gram, cols, d_W, &lwork);
+    if (full_st != CUSOLVER_STATUS_SUCCESS) {
+      if (verbose) {
+        std::cout << "  tiled full eigensolver bufferSize failed with status="
+                  << cusolverStatusString(full_st)
+                  << ", trying exact top-R eigensolver\n";
+      }
+      used_topr_solver = true;
+    } else {
+      cudaError_t work_err = cudaMalloc(&d_work, sizeof(double) * std::max(lwork, 1));
+      if (work_err != cudaSuccess) {
+        cudaGetLastError();
+        used_topr_solver = true;
+        if (verbose) {
+          std::cout << "  tiled full eigensolver work alloc failed, trying exact top-R eigensolver\n";
+        }
+      } else {
+        CHECK_CUDA(cudaMalloc(&d_info, sizeof(int)));
+        full_st = cusolverDnDsyevd(
+          cusolverH, CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_UPPER,
+          cols, d_gram, cols, d_W, d_work, lwork, d_info);
+        if (full_st != CUSOLVER_STATUS_SUCCESS) {
+          if (verbose) {
+            std::cout << "  tiled full eigensolver failed with status="
+                      << cusolverStatusString(full_st)
+                      << ", trying exact top-R eigensolver\n";
+          }
+          CHECK_CUDA(cudaFree(d_work));
+          d_work = nullptr;
+          CHECK_CUDA(cudaFree(d_info));
+          d_info = nullptr;
+          used_topr_solver = true;
+        }
+      }
+    }
+  } else if (verbose) {
+    if (forceGpuIterativeEig()) {
+      std::cout << "  exact tiled top-R eigensolver forced to iterative GPU fallback\n";
+    }
+  }
 
-  int h_info = 0;
-  CHECK_CUDA(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
-  if (h_info != 0) {
-    std::cerr << "  WARNING: tiled Gram eigendecomposition failed with info=" << h_info << "\n";
+  if (!used_topr_solver) {
+    int h_info = 0;
+    CHECK_CUDA(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
+    if (h_info != 0) {
+      std::cerr << "  WARNING: tiled Gram eigendecomposition failed with info=" << h_info << "\n";
+      CHECK_CUDA(cudaFree(d_W));
+      CHECK_CUDA(cudaFree(d_work));
+      CHECK_CUDA(cudaFree(d_info));
+      return false;
+    }
+
+    CHECK_CUDA(cudaMemset(d_info, 0, sizeof(int)));
+    if (rank > 1)
+      check_resolution_dp<<<1, rank - 1>>>(d_W, M_total + cols, cols, rank, eps_mach_dp, d_info, traceATA);
+    CHECK_CUDA(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
+    if (h_info != 0) {
+      if (verbose)
+        std::cout << "  tiled Gram resolution check failed; full fallback is unavailable in tiled mode\n";
+      CHECK_CUDA(cudaFree(d_W));
+      CHECK_CUDA(cudaFree(d_work));
+      CHECK_CUDA(cudaFree(d_info));
+      return false;
+    }
+
+    std::vector<double> h_top(rank);
+    CHECK_CUDA(cudaMemcpy(
+      h_top.data(),
+      d_W + (cols - rank),
+      sizeof(double) * rank,
+      cudaMemcpyDeviceToHost));
+    for (double lam : h_top) result.core_norm_sq += std::max(lam, 0.0);
+
+    CHECK_CUDA(cudaMalloc(&result.d_VR, sizeof(scalar_t) * cols * rank));
+    convert_dp_to_scalar<<<((long long)cols * rank + 255) / 256, 256>>>(
+      d_gram + (long long)(cols - rank) * cols,
+      result.d_VR,
+      (long long)cols * rank);
+    CHECK_CUDA(cudaGetLastError());
+
+    CHECK_CUDA(cudaMalloc(&result.d_inv_sigma, sizeof(scalar_t) * rank));
+    compute_inv_sigma_dp<<<(rank + 255) / 256, 256>>>(d_W, result.d_inv_sigma, cols, rank, 1e-12);
+    CHECK_CUDA(cudaGetLastError());
+
     CHECK_CUDA(cudaFree(d_W));
     CHECK_CUDA(cudaFree(d_work));
     CHECK_CUDA(cudaFree(d_info));
-    return false;
-  }
-
-  CHECK_CUDA(cudaMemset(d_info, 0, sizeof(int)));
-  if (rank > 1)
-    check_resolution_dp<<<1, rank - 1>>>(d_W, M_total + cols, cols, rank, eps_mach_dp, d_info, traceATA);
-  CHECK_CUDA(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
-  if (h_info != 0) {
-    if (verbose)
-      std::cout << "  tiled Gram resolution check failed; full fallback is unavailable in tiled mode\n";
+  } else {
     CHECK_CUDA(cudaFree(d_W));
-    CHECK_CUDA(cudaFree(d_work));
-    CHECK_CUDA(cudaFree(d_info));
-    return false;
+    d_W = nullptr;
+    bool top_r_ok = false;
+    if (forceGpuIterativeEig()) {
+      top_r_ok = solveTopREigensystemDpIterativeGpu(
+        cusolverH, cublasH, d_gram, cols, rank, M_total + cols, traceATA,
+        &result.d_VR, &result.d_inv_sigma, &result.core_norm_sq, verbose);
+    } else {
+      top_r_ok = solveTopREigensystemDpExact(
+        cusolverH, d_gram, cols, rank, M_total + cols, traceATA,
+        &result.d_VR, &result.d_inv_sigma, &result.core_norm_sq, verbose);
+      if (!top_r_ok) {
+        if (verbose) {
+          std::cout << "  exact GPU top-R eigensolver failed in tiled path, trying iterative GPU fallback\n";
+        }
+        top_r_ok = solveTopREigensystemDpIterativeGpu(
+          cusolverH, cublasH, d_gram, cols, rank, M_total + cols, traceATA,
+          &result.d_VR, &result.d_inv_sigma, &result.core_norm_sq, verbose);
+      }
+    }
+    if (!top_r_ok) {
+      if (d_work) CHECK_CUDA(cudaFree(d_work));
+      if (d_info) CHECK_CUDA(cudaFree(d_info));
+      return false;
+    }
   }
-
-  std::vector<double> h_top(rank);
-  CHECK_CUDA(cudaMemcpy(
-    h_top.data(),
-    d_W + (cols - rank),
-    sizeof(double) * rank,
-    cudaMemcpyDeviceToHost));
-  for (double lam : h_top) result.core_norm_sq += std::max(lam, 0.0);
-
-  CHECK_CUDA(cudaMalloc(&result.d_VR, sizeof(scalar_t) * cols * rank));
-  convert_dp_to_scalar<<<((long long)cols * rank + 255) / 256, 256>>>(
-    d_gram + (long long)(cols - rank) * cols,
-    result.d_VR,
-    (long long)cols * rank);
-  CHECK_CUDA(cudaGetLastError());
-
-  CHECK_CUDA(cudaMalloc(&result.d_inv_sigma, sizeof(scalar_t) * rank));
-  compute_inv_sigma_dp<<<(rank + 255) / 256, 256>>>(d_W, result.d_inv_sigma, cols, rank, 1e-12);
-  CHECK_CUDA(cudaGetLastError());
-
-  CHECK_CUDA(cudaFree(d_W));
-  CHECK_CUDA(cudaFree(d_work));
-  CHECK_CUDA(cudaFree(d_info));
 #endif
 
   return true;
@@ -2953,6 +3645,7 @@ static TiledModeUpdateStats runTiledModeUpdate(
   uint64_t* ranks_v,
   int order,
   int M_total,
+  bool split_workspace_for_tiled_4d,
   bool verbose)
 {
   TiledModeUpdateStats stats;
@@ -2961,8 +3654,27 @@ static TiledModeUpdateStats runTiledModeUpdate(
   const int rank = (int)ranks_v[0];
   scalar_t alpha = (scalar_t)1;
   scalar_t beta = (scalar_t)0;
+  uint64_t max_rows = 0;
+  for (const auto& tile : tiles) max_rows = std::max(max_rows, tile.num_rows);
 
   auto total_start = std::chrono::high_resolution_clock::now();
+
+  const TiledModeWorkspace* pass1_ws = &ws;
+  TiledModeWorkspace local_pass1_ws;
+  TiledModeWorkspace local_pass2_ws;
+  if (split_workspace_for_tiled_4d) {
+    if (!tryPrepareTiledModeWorkspace(
+          local_pass1_ws,
+          tiledWorkspaceYElems(max_rows, cols),
+          /*factor_capacity_elems=*/0,
+#if !SCALAR_DOUBLE
+          tiledWorkspaceDPElems(max_rows, cols)
+#endif
+        )) {
+      throw std::runtime_error("Failed to allocate tiled pass-1 workspace.");
+    }
+    pass1_ws = &local_pass1_ws;
+  }
 
 #if SCALAR_DOUBLE
   scalar_t* d_gram = nullptr;
@@ -2978,13 +3690,17 @@ static TiledModeUpdateStats runTiledModeUpdate(
     run_ttmc_cuda(
       tile.d_ptrs.data(), tile.d_idxs.data(), tile.d_values,
       d_factor_mats_v,
-      ws.d_y_tile, tile.output_elems,
+      pass1_ws->d_y_tile, tile.output_elems,
       /*ncm=*/0, ranks_v, order,
       tile.cache, /*log_method=*/false);
     auto t1 = std::chrono::high_resolution_clock::now();
     stats.ttmc_us += std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
 
-    accumulateGramFromTile(cublasH, ws, d_gram, tile.num_rows, cols, gram_initialized);
+    accumulateGramFromTile(cublasH, *pass1_ws, d_gram, tile.num_rows, cols, gram_initialized);
+  }
+
+  if (split_workspace_for_tiled_4d) {
+    freeTiledModeWorkspace(local_pass1_ws);
   }
 
   TiledGramSVDResult svd_result;
@@ -3000,12 +3716,28 @@ static TiledModeUpdateStats runTiledModeUpdate(
   CHECK_CUDA(cudaFree(d_gram));
   CHECK_CUDA(cudaMemset(d_factor_out, 0, sizeof(scalar_t) * factor_size_out));
 
+  const TiledModeWorkspace* pass2_ws = &ws;
+  if (split_workspace_for_tiled_4d) {
+    if (!tryPrepareTiledModeWorkspace(
+          local_pass2_ws,
+          tiledWorkspaceYElems(max_rows, cols),
+          tiledWorkspaceFactorElems(max_rows, rank),
+#if !SCALAR_DOUBLE
+          /*dp_capacity_elems=*/0
+#endif
+        )) {
+      freeTiledGramSVDResult(svd_result);
+      throw std::runtime_error("Failed to allocate tiled pass-2 workspace.");
+    }
+    pass2_ws = &local_pass2_ws;
+  }
+
   for (auto& tile : tiles) {
     auto t0 = std::chrono::high_resolution_clock::now();
     run_ttmc_cuda(
       tile.d_ptrs.data(), tile.d_idxs.data(), tile.d_values,
       d_factor_mats_v,
-      ws.d_y_tile, tile.output_elems,
+      pass2_ws->d_y_tile, tile.output_elems,
       /*ncm=*/0, ranks_v, order,
       tile.cache, /*log_method=*/false);
     auto t1 = std::chrono::high_resolution_clock::now();
@@ -3017,20 +3749,20 @@ static TiledModeUpdateStats runTiledModeUpdate(
       rank, (int)tile.num_rows, cols,
       &alpha,
       svd_result.d_VR, cols,
-      ws.d_y_tile, cols,
+      pass2_ws->d_y_tile, cols,
       &beta,
-      ws.d_factor_tile, rank));
+      pass2_ws->d_factor_tile, rank));
     CHECK_CUBLAS(cublasDgmmT(
       cublasH,
       CUBLAS_SIDE_LEFT,
       rank, (int)tile.num_rows,
-      ws.d_factor_tile, rank,
+      pass2_ws->d_factor_tile, rank,
       svd_result.d_inv_sigma, 1,
-      ws.d_factor_tile, rank));
+      pass2_ws->d_factor_tile, rank));
 
     uint64_t total_scatter = tile.num_rows * (uint64_t)rank;
     scatter_factor_rows_kernel<<<(total_scatter + 255) / 256, 256>>>(
-      tile.d_global_rows, ws.d_factor_tile, d_factor_out, tile.num_rows, rank);
+      tile.d_global_rows, pass2_ws->d_factor_tile, d_factor_out, tile.num_rows, rank);
     CHECK_CUDA(cudaGetLastError());
   }
 
@@ -3038,6 +3770,9 @@ static TiledModeUpdateStats runTiledModeUpdate(
   auto total_end = std::chrono::high_resolution_clock::now();
   stats.total_us = std::chrono::duration_cast<std::chrono::microseconds>(total_end - total_start).count();
   stats.core_norm_sq = svd_result.core_norm_sq;
+  if (split_workspace_for_tiled_4d) {
+    freeTiledModeWorkspace(local_pass2_ws);
+  }
   freeTiledGramSVDResult(svd_result);
   return stats;
 }
@@ -3351,12 +4086,32 @@ static TiledModeUpdateStats runTiledModeUpdate(
      // ===================================================================
      std::vector<TTMcCache> ttmc_caches(order);
      std::vector<std::vector<TTMCTile3D>> tiled_mode_tiles(order);
-     std::vector<TiledModeWorkspace> tiled_workspaces(order);
+     TiledModeWorkspace tiled_workspace;
      std::vector<uint64_t> tiled_tile_rows(order, 0);
+     std::vector<std::vector<uint64_t>> tiled_ranks_v(order);
+     std::vector<std::vector<uint64_t>> tiled_dims_v(order);
+     std::vector<std::vector<uint64_t>> tiled_fsizes_v(order);
      const size_t tile_reserve_bytes = 2ULL * 1024ULL * 1024ULL * 1024ULL;
      int tiled_modes_remaining = 0;
      for (int n = 0; n < order; n++)
        if (use_tiled[n]) ++tiled_modes_remaining;
+
+     auto rebuild_tiled_mode = [&](int n) {
+       freeTTMcTiles3D(tiled_mode_tiles[n]);
+       if (order == 3) {
+         prepareTTMcTiles3D(
+           csf_copies[n],
+           tiled_ranks_v[n].data(), tiled_fsizes_v[n].data(), tiled_dims_v[n].data(),
+           tiled_tile_rows[n],
+           tiled_mode_tiles[n]);
+       } else {
+         prepareTTMcTiles4D(
+           csf_copies[n],
+           tiled_ranks_v[n].data(), tiled_fsizes_v[n].data(), tiled_dims_v[n].data(),
+           tiled_tile_rows[n],
+           tiled_mode_tiles[n]);
+       }
+     };
 
      for (int n = 0; n < order; n++) {
        CSFCopy& csf = csf_copies[n];
@@ -3379,6 +4134,9 @@ static TiledModeUpdateStats runTiledModeUpdate(
                            ranks_v.data(), fsizes_v.data(), dims_v.data(),
                            /*ncm=*/0, order, ttmc_caches[n]);
        } else {
+         tiled_ranks_v[n] = ranks_v;
+         tiled_dims_v[n] = dims_v;
+         tiled_fsizes_v[n] = fsizes_v;
          size_t tile_target_bytes = 0;
          if (tile_mb_hint > 0) {
            tile_target_bytes = (size_t)tile_mb_hint * 1024ULL * 1024ULL;
@@ -3399,28 +4157,111 @@ static TiledModeUpdateStats runTiledModeUpdate(
            tile_roots_override,
            tile_target_bytes);
          tiled_tile_rows[n] = tile_rows;
-         if (order == 3) {
-           prepareTTMcTiles3D(
-             csf,
-             ranks_v.data(), fsizes_v.data(), dims_v.data(),
-             tile_rows,
-             tiled_mode_tiles[n]);
-         } else {
-           prepareTTMcTiles4D(
-             csf,
-             ranks_v.data(), fsizes_v.data(), dims_v.data(),
-             tile_rows,
-             tiled_mode_tiles[n]);
-         }
-         prepareTiledModeWorkspace(
-           tiled_workspaces[n],
-           tile_rows,
-           (int)rank_products[n],
-           (int)ranks[n]);
+         rebuild_tiled_mode(n);
          std::cout << "  mode " << n << ": tiled into " << tiled_mode_tiles[n].size()
                    << " tiles of up to " << tile_rows << " root slices"
                    << " (tile budget " << formatBytes((double)tile_target_bytes) << ")\n";
          --tiled_modes_remaining;
+       }
+     }
+
+     auto choose_tiled_mode_to_shrink = [&]() -> int {
+       int best = -1;
+       size_t best_bytes = 0;
+       for (int n = 0; n < order; n++) {
+         if (!use_tiled[n] || tiled_tile_rows[n] <= 1) continue;
+         size_t bytes = tiledModeWorkspaceBytes(tiled_tile_rows[n], rank_products[n], ranks[n]);
+         if (bytes > best_bytes) {
+           best_bytes = bytes;
+           best = n;
+         }
+       }
+       return best;
+     };
+
+     if (std::any_of(use_tiled.begin(), use_tiled.end(), [](bool v) { return v; })) {
+       while (true) {
+         uint64_t max_y_elems = 0;
+         uint64_t max_factor_elems = 0;
+#if !SCALAR_DOUBLE
+         uint64_t max_dp_elems = 0;
+#endif
+         for (int n = 0; n < order; n++) {
+           if (!use_tiled[n]) continue;
+           max_y_elems = std::max(
+             max_y_elems,
+             tiledWorkspaceYElems(tiled_tile_rows[n], (int)rank_products[n]));
+           max_factor_elems = std::max(
+             max_factor_elems,
+             tiledWorkspaceFactorElems(tiled_tile_rows[n], (int)ranks[n]));
+#if !SCALAR_DOUBLE
+           max_dp_elems = std::max(
+             max_dp_elems,
+             tiledWorkspaceDPElems(tiled_tile_rows[n], (int)rank_products[n]));
+#endif
+         }
+
+         bool workspace_ready = tryPrepareTiledModeWorkspace(
+           tiled_workspace,
+           max_y_elems,
+           max_factor_elems,
+#if !SCALAR_DOUBLE
+           max_dp_elems
+#endif
+         );
+         if (workspace_ready) break;
+
+         int shrink_mode = choose_tiled_mode_to_shrink();
+         if (shrink_mode < 0) {
+           std::cerr << "Unable to allocate shared tiled workspace even after exhausting tile backoff.\n";
+           std::exit(EXIT_FAILURE);
+         }
+
+         uint64_t old_rows = tiled_tile_rows[shrink_mode];
+         uint64_t new_rows = std::max<uint64_t>(1, old_rows / 2);
+         if (new_rows == old_rows && old_rows > 1) --new_rows;
+         if (new_rows == 0 || new_rows == old_rows) {
+           std::cerr << "Unable to back off tiled mode " << shrink_mode << " any further.\n";
+           std::exit(EXIT_FAILURE);
+         }
+
+         tiled_tile_rows[shrink_mode] = new_rows;
+         rebuild_tiled_mode(shrink_mode);
+         std::cout << "  mode " << shrink_mode
+                   << ": shared tiled workspace allocation failed, retrying with "
+                   << new_rows << " root slices per tile -> "
+                   << tiled_mode_tiles[shrink_mode].size() << " tiles\n";
+       }
+     }
+     bool need_shared_tiled_workspace_in_loop = false;
+     for (int n = 0; n < order; n++) {
+       if (!use_tiled[n]) continue;
+       bool tiled_4d_mode = (order == 4);
+       if (!tiled_4d_mode) {
+         need_shared_tiled_workspace_in_loop = true;
+         break;
+       }
+     }
+     if (!need_shared_tiled_workspace_in_loop) {
+       freeTiledModeWorkspace(tiled_workspace);
+     }
+
+     for (int n = 0; n < order; n++) {
+       if (!use_tiled[n]) continue;
+       if (order != 4) continue;
+       while (!tryAllocateTiledPass1AndGram(tiled_tile_rows[n], rank_products[n])) {
+         uint64_t old_rows = tiled_tile_rows[n];
+         uint64_t new_rows = std::max<uint64_t>(1, old_rows / 2);
+         if (new_rows == old_rows && old_rows > 1) --new_rows;
+         if (new_rows == 0 || new_rows == old_rows) {
+           throw std::runtime_error("Unable to size tiled pass-1 workspace and Gram together.");
+         }
+         tiled_tile_rows[n] = new_rows;
+         rebuild_tiled_mode(n);
+         std::cout << "  mode " << n
+                   << ": pass-1 workspace + Gram probe failed, retrying with "
+                   << new_rows << " root slices per tile -> "
+                   << tiled_mode_tiles[n].size() << " tiles\n";
        }
      }
 
@@ -3448,6 +4289,52 @@ static TiledModeUpdateStats runTiledModeUpdate(
        CHECK_CUDA(cudaMalloc(&d_G_core, sizeof(scalar_t) * R0 * N_rest));
      }
 
+     auto ensure_full_arr_O = [&]() {
+       if (max_full_arr_O_size == 0 || d_arr_O) return;
+       CHECK_CUDA(cudaMalloc(&d_arr_O, sizeof(scalar_t) * max_full_arr_O_size));
+     };
+
+     auto ensure_mode0_core_buffer = [&]() {
+       if (use_tiled[0] || d_G_core) return;
+       CHECK_CUDA(cudaMalloc(&d_G_core, sizeof(scalar_t) * R0 * N_rest));
+     };
+
+     auto prepare_full_mode_cache = [&](int n, const std::vector<uint64_t>& ranks_v) {
+       if (ttmc_caches[n].initialized) return;
+       CSFCopy& cache_csf = csf_copies[n];
+       std::vector<uint64_t*> ptrs_raw(order), idxs_raw(order);
+       std::vector<uint64_t>  size_ptr(order), size_idx(order);
+       std::vector<uint64_t>  dims_v(order), fsizes_v(order, 0);
+       for (int l = 0; l < order; l++) {
+         ptrs_raw[l] = cache_csf.ptrs[l].data();
+         idxs_raw[l] = cache_csf.idxs[l].data();
+         size_ptr[l] = (uint64_t)cache_csf.ptrs[l].size();
+         size_idx[l] = (uint64_t)cache_csf.idxs[l].size();
+         dims_v[l]   = coo.dims[cache_csf.modeOrder[l]];
+         if (l > 0) fsizes_v[l] = factor_sizes[cache_csf.modeOrder[l]];
+       }
+       prepare_ttmc_cuda(
+         ptrs_raw.data(), idxs_raw.data(),
+         size_ptr.data(), size_idx.data(),
+         const_cast<uint64_t*>(ranks_v.data()), fsizes_v.data(), dims_v.data(),
+         /*ncm=*/0, order, ttmc_caches[n]);
+     };
+
+     auto release_full_mode_state_for_tiled_4d = [&](int current_mode) {
+       if (d_arr_O) {
+         CHECK_CUDA(cudaFree(d_arr_O));
+         d_arr_O = nullptr;
+       }
+       if (d_G_core) {
+         CHECK_CUDA(cudaFree(d_G_core));
+         d_G_core = nullptr;
+       }
+       for (int m = 0; m < order; m++) {
+         if (m == current_mode || use_tiled[m]) continue;
+         if (ttmc_caches[m].initialized) free_ttmc_cache(ttmc_caches[m]);
+       }
+     };
+
      for (iter = 0; iter < max_iters; iter++) {
        double mode0_core_norm_sq = 0.0;
        bool mode0_core_ready = false;
@@ -3465,6 +4352,8 @@ static TiledModeUpdateStats runTiledModeUpdate(
            d_factor_mats_v[l] = d_factors[csf.modeOrder[l]];
 
          if (!use_tiled[n]) {
+           ensure_full_arr_O();
+           prepare_full_mode_cache(n, ranks_v);
            auto ttmc_start = std::chrono::high_resolution_clock::now();
            run_ttmc_cuda(
              csf.d_ptrs.data(), csf.d_idxs.data(), csf.d_values,
@@ -3508,6 +4397,10 @@ static TiledModeUpdateStats runTiledModeUpdate(
            if (verbose)
              std::cout << "  SVD: " << svd_us << " us\n";
          } else {
+           bool tiled_4d_mode = (order == 4);
+           if (tiled_4d_mode) {
+             release_full_mode_state_for_tiled_4d(n);
+           }
            if (check && iter == 0 && verbose) {
              std::cout << "[iter 0 mode " << n
                        << "] skipping CPU TTMc check in tiled mode because Y is never fully materialized\n";
@@ -3515,13 +4408,14 @@ static TiledModeUpdateStats runTiledModeUpdate(
            TiledModeUpdateStats tiled_stats = runTiledModeUpdate(
              cusolverH, cublasH,
              tiled_mode_tiles[n],
-             tiled_workspaces[n],
+             tiled_workspace,
              d_factor_mats_v.data(),
              d_factors[n],
              factor_sizes[n],
              ranks_v.data(),
              order,
              (int)coo.dims[n],
+             tiled_4d_mode,
              verbose);
            ttmc_time_us[n] += tiled_stats.ttmc_us;
            svd_time_us[n] += (tiled_stats.total_us - tiled_stats.ttmc_us);
@@ -3551,6 +4445,8 @@ static TiledModeUpdateStats runTiledModeUpdate(
 
        scalar_t core_norm = (scalar_t)0;
        if (!use_tiled[0]) {
+         ensure_full_arr_O();
+         ensure_mode0_core_buffer();
          scalar_t gemm_alpha = (scalar_t)1, gemm_beta = (scalar_t)0;
          CHECK_CUBLAS(cublasGemmT(cublasH, CUBLAS_OP_N, CUBLAS_OP_T,
            N_rest, R0, I0, &gemm_alpha,
@@ -3591,6 +4487,8 @@ static TiledModeUpdateStats runTiledModeUpdate(
      int num_iters = std::min(iter, max_iters);
 
      if (!use_tiled[0]) {
+       ensure_full_arr_O();
+       ensure_mode0_core_buffer();
        scalar_t a = (scalar_t)1, b = (scalar_t)0;
        CHECK_CUBLAS(cublasGemmT(cublasH, CUBLAS_OP_N, CUBLAS_OP_T,
          N_rest, R0, I0, &a,
@@ -3604,8 +4502,8 @@ static TiledModeUpdateStats runTiledModeUpdate(
      for (int n = 0; n < order; n++) {
        if (!use_tiled[n]) free_ttmc_cache(ttmc_caches[n]);
        else freeTTMcTiles3D(tiled_mode_tiles[n]);
-       freeTiledModeWorkspace(tiled_workspaces[n]);
      }
+     freeTiledModeWorkspace(tiled_workspace);
      if (d_G_core) CHECK_CUDA(cudaFree(d_G_core));
      if (d_arr_O) CHECK_CUDA(cudaFree(d_arr_O));
      for (int i = 0; i < order; i++) CHECK_CUDA(cudaFree(d_factors[i]));
