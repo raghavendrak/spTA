@@ -129,6 +129,112 @@ inline bool useSyrkForGram(int cols)
   return cols >= min_cols;
 }
 
+#if !SCALAR_DOUBLE
+struct PinnedBlockedFullSVDPlan {
+  bool active = false;
+  bool use_syrk = false;
+  int block_rows = 0;
+  int lwork = 0;
+  int full_svd_lwork = 0;
+  int full_svd_min_mn = 0;
+};
+
+struct PinnedBlockedFullSVDWorkspace {
+  double* d_gram_dp = nullptr;
+  double* d_blk_dp = nullptr;
+  double* d_W_dp = nullptr;
+  double* d_work_dp = nullptr;
+  scalar_t* d_full_s = nullptr;
+  scalar_t* d_full_u = nullptr;
+  scalar_t* d_full_colmaj_A = nullptr;
+  scalar_t* d_full_work = nullptr;
+  scalar_t* d_full_vt_dummy = nullptr;
+  int* d_info = nullptr;
+  uint64_t gram_elems = 0;
+  uint64_t blk_elems = 0;
+  uint64_t w_elems = 0;
+  uint64_t work_elems = 0;
+  uint64_t full_s_elems = 0;
+  uint64_t full_u_elems = 0;
+  uint64_t full_colmaj_elems = 0;
+  uint64_t full_work_elems = 0;
+};
+
+static void freePinnedBlockedFullSVDWorkspace(PinnedBlockedFullSVDWorkspace& ws)
+{
+  if (ws.d_gram_dp) cudaFree(ws.d_gram_dp);
+  if (ws.d_blk_dp) cudaFree(ws.d_blk_dp);
+  if (ws.d_W_dp) cudaFree(ws.d_W_dp);
+  if (ws.d_work_dp) cudaFree(ws.d_work_dp);
+  if (ws.d_full_s) cudaFree(ws.d_full_s);
+  if (ws.d_full_u) cudaFree(ws.d_full_u);
+  if (ws.d_full_colmaj_A) cudaFree(ws.d_full_colmaj_A);
+  if (ws.d_full_work) cudaFree(ws.d_full_work);
+  if (ws.d_full_vt_dummy) cudaFree(ws.d_full_vt_dummy);
+  if (ws.d_info) cudaFree(ws.d_info);
+  ws = PinnedBlockedFullSVDWorkspace{};
+}
+
+static bool tryPreparePinnedBlockedFullSVDWorkspace(
+  PinnedBlockedFullSVDWorkspace& ws,
+  uint64_t gram_elems,
+  uint64_t blk_elems,
+  uint64_t w_elems,
+  uint64_t work_elems,
+  uint64_t full_s_elems,
+  uint64_t full_u_elems,
+  uint64_t full_colmaj_elems,
+  uint64_t full_work_elems)
+{
+  freePinnedBlockedFullSVDWorkspace(ws);
+  if (gram_elems == 0 || blk_elems == 0 || w_elems == 0 || work_elems == 0) return true;
+
+  cudaError_t err = cudaMalloc(&ws.d_gram_dp, sizeof(double) * gram_elems);
+  if (err != cudaSuccess) { cudaGetLastError(); freePinnedBlockedFullSVDWorkspace(ws); return false; }
+
+  err = cudaMalloc(&ws.d_blk_dp, sizeof(double) * blk_elems);
+  if (err != cudaSuccess) { cudaGetLastError(); freePinnedBlockedFullSVDWorkspace(ws); return false; }
+
+  err = cudaMalloc(&ws.d_W_dp, sizeof(double) * w_elems);
+  if (err != cudaSuccess) { cudaGetLastError(); freePinnedBlockedFullSVDWorkspace(ws); return false; }
+
+  err = cudaMalloc(&ws.d_work_dp, sizeof(double) * work_elems);
+  if (err != cudaSuccess) { cudaGetLastError(); freePinnedBlockedFullSVDWorkspace(ws); return false; }
+
+  if (full_s_elems > 0) {
+    err = cudaMalloc(&ws.d_full_s, sizeof(scalar_t) * full_s_elems);
+    if (err != cudaSuccess) { cudaGetLastError(); freePinnedBlockedFullSVDWorkspace(ws); return false; }
+  }
+  if (full_u_elems > 0) {
+    err = cudaMalloc(&ws.d_full_u, sizeof(scalar_t) * full_u_elems);
+    if (err != cudaSuccess) { cudaGetLastError(); freePinnedBlockedFullSVDWorkspace(ws); return false; }
+  }
+  if (full_colmaj_elems > 0) {
+    err = cudaMalloc(&ws.d_full_colmaj_A, sizeof(scalar_t) * full_colmaj_elems);
+    if (err != cudaSuccess) { cudaGetLastError(); freePinnedBlockedFullSVDWorkspace(ws); return false; }
+  }
+  if (full_work_elems > 0) {
+    err = cudaMalloc(&ws.d_full_work, sizeof(scalar_t) * full_work_elems);
+    if (err != cudaSuccess) { cudaGetLastError(); freePinnedBlockedFullSVDWorkspace(ws); return false; }
+  }
+  err = cudaMalloc(&ws.d_full_vt_dummy, sizeof(scalar_t));
+  if (err != cudaSuccess) { cudaGetLastError(); freePinnedBlockedFullSVDWorkspace(ws); return false; }
+
+  err = cudaMalloc(&ws.d_info, sizeof(int));
+  if (err != cudaSuccess) { cudaGetLastError(); freePinnedBlockedFullSVDWorkspace(ws); return false; }
+
+  ws.gram_elems = gram_elems;
+  ws.blk_elems = blk_elems;
+  ws.w_elems = w_elems;
+  ws.work_elems = work_elems;
+  ws.full_s_elems = full_s_elems;
+  ws.full_u_elems = full_u_elems;
+  ws.full_colmaj_elems = full_colmaj_elems;
+  ws.full_work_elems = full_work_elems;
+  return true;
+}
+#endif
+
  inline bool getEnvFlag(const char* name)
  {
    const char* value = std::getenv(name);
@@ -2216,7 +2322,7 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
                    << " eigenvalues, falling back to full SVD\n";
        CHECK_CUDA(cudaFree(d_Gram)); CHECK_CUDA(cudaFree(d_W));
        CHECK_CUDA(cudaFree(d_work)); CHECK_CUDA(cudaFree(d_info));
-       gpu_full_svd_update_factor(cusolverH, cublasH, d_A, M, N, R, d_factor, verbose);
+       gpu_full_svd_update_factor_pinned_workspace(cusolverH, cublasH, d_A, M, N, R, d_factor, plan, ws, verbose);
        return;
      }
 
@@ -2641,6 +2747,230 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
    cudaEventDestroy(ev_start);
    cudaEventDestroy(ev_stop);
 }
+
+#if !SCALAR_DOUBLE
+static void gpu_full_svd_update_factor_pinned_workspace(
+  cusolverDnHandle_t cusolverH,
+  cublasHandle_t cublasH,
+  scalar_t* d_A,
+  int M,
+  int N,
+  int R,
+  scalar_t* d_factor,
+  const PinnedBlockedFullSVDPlan& plan,
+  PinnedBlockedFullSVDWorkspace& ws,
+  bool verbose)
+{
+  int min_mn = std::min(M, N);
+  R = std::min(R, min_mn);
+  cudaEvent_t ev0, ev1;
+  float ev_ms = 0.f;
+  cudaEventCreate(&ev0);
+  cudaEventCreate(&ev1);
+
+  if (!(M > N) || !plan.active) {
+    cudaEventDestroy(ev0);
+    cudaEventDestroy(ev1);
+    throw std::runtime_error("Pinned full SVD fallback requires an active M>N plan.");
+  }
+  if (!ws.d_full_s || !ws.d_full_u || !ws.d_full_colmaj_A || !ws.d_full_vt_dummy || !ws.d_info) {
+    cudaEventDestroy(ev0);
+    cudaEventDestroy(ev1);
+    throw std::runtime_error("Pinned full SVD fallback workspace is not initialized.");
+  }
+
+  scalar_t* d_S = ws.d_full_s;
+  scalar_t* d_U = ws.d_full_u;
+  scalar_t* d_VT_dummy = ws.d_full_vt_dummy;
+  scalar_t* d_colmaj_A = ws.d_full_colmaj_A;
+  int* d_info = ws.d_info;
+  int lwork = plan.full_svd_lwork;
+  scalar_t* d_work = ws.d_full_work;
+  bool free_local_work = false;
+  if (!d_work || lwork <= 0) {
+    lwork = 0;
+    CHECK_CUSOLVER(cusolverGesvdBufSizeT(cusolverH, M, N, &lwork));
+    CHECK_CUDA(cudaMalloc(&d_work, sizeof(scalar_t) * std::max(lwork, 1)));
+    free_local_work = true;
+  }
+
+  scalar_t one = (scalar_t)1;
+  scalar_t zero = (scalar_t)0;
+  CHECK_CUBLAS(cublasGeamT(cublasH, CUBLAS_OP_T, CUBLAS_OP_N, M, N,
+    &one, d_A, N, &zero, d_colmaj_A, M, d_colmaj_A, M));
+
+  CHECK_CUDA(cudaMemset(d_info, 0, sizeof(int)));
+  cudaEventRecord(ev0);
+  CHECK_CUSOLVER(cusolverGesvdT(cusolverH, 'S', 'N', M, N, d_colmaj_A, M,
+    d_S, d_U, M, d_VT_dummy, 1, d_work, lwork, nullptr, d_info));
+  cudaEventRecord(ev1);
+  cudaEventSynchronize(ev1);
+  cudaEventElapsedTime(&ev_ms, ev0, ev1);
+  if (verbose) std::cout << "  cusolverDnGesvd: " << ev_ms << " ms\n";
+
+  int h_info = 0;
+  CHECK_CUDA(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
+  if (h_info != 0)
+    std::cerr << "  WARNING: cusolverDnGesvd info=" << h_info << "\n";
+
+  CHECK_CUBLAS(cublasGeamT(cublasH, CUBLAS_OP_T, CUBLAS_OP_N, R, M,
+    &one, d_U, M, &zero, d_factor, R, d_factor, R));
+
+  if (free_local_work) CHECK_CUDA(cudaFree(d_work));
+  CHECK_CUDA(cudaDeviceSynchronize());
+  cudaEventDestroy(ev0);
+  cudaEventDestroy(ev1);
+}
+
+static void gpu_truncated_svd_update_factor_pinned_blocked(
+  cusolverDnHandle_t cusolverH,
+  cublasHandle_t cublasH,
+  scalar_t* d_A,
+  int M,
+  int N,
+  int R,
+  scalar_t* d_factor,
+  const PinnedBlockedFullSVDPlan& plan,
+  PinnedBlockedFullSVDWorkspace& ws,
+  bool verbose)
+{
+  scalar_t alpha = (scalar_t)1, beta = (scalar_t)0;
+  const double eps_mach_dp = 1.1102230246251565e-16;
+  const double alpha_dp = 1.0;
+  const double beta_zero = 0.0;
+  const double beta_one = 1.0;
+  cudaEvent_t ev_start, ev_stop;
+  float ev_ms = 0.f;
+  cudaEventCreate(&ev_start);
+  cudaEventCreate(&ev_stop);
+
+  int K = std::min(M, N);
+  R = std::min(R, K);
+  if (!(M > N) || !plan.active) {
+    cudaEventDestroy(ev_start);
+    cudaEventDestroy(ev_stop);
+    throw std::runtime_error("Pinned blocked full SVD path requires an active M>N plan.");
+  }
+  if (!ws.d_gram_dp || !ws.d_blk_dp || !ws.d_W_dp || !ws.d_work_dp || !ws.d_info) {
+    cudaEventDestroy(ev_start);
+    cudaEventDestroy(ev_stop);
+    throw std::runtime_error("Pinned blocked full SVD workspace is not initialized.");
+  }
+
+  double* d_Gram_dp = ws.d_gram_dp;
+  double* d_blk_dp = ws.d_blk_dp;
+  double* d_W_dp = ws.d_W_dp;
+  double* d_work_dp = ws.d_work_dp;
+  int* d_info = ws.d_info;
+
+  cudaEventRecord(ev_start);
+  for (int s = 0; s < M; s += plan.block_rows) {
+    int b = std::min(plan.block_rows, M - s);
+    long long chunk_elems = (long long)b * N;
+    convert_scalar_to_dp<<<(chunk_elems + 255) / 256, 256>>>(
+      d_A + (long long)s * N, d_blk_dp, chunk_elems);
+    CHECK_CUDA(cudaGetLastError());
+    if (plan.use_syrk) {
+      CHECK_CUBLAS(cublasDsyrk(cublasH, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N,
+        N, b, &alpha_dp, d_blk_dp, N,
+        (s == 0) ? &beta_zero : &beta_one, d_Gram_dp, N));
+    } else {
+      CHECK_CUBLAS(cublasDgemm(cublasH, CUBLAS_OP_N, CUBLAS_OP_T,
+        N, N, b, &alpha_dp, d_blk_dp, N, d_blk_dp, N,
+        (s == 0) ? &beta_zero : &beta_one, d_Gram_dp, N));
+    }
+  }
+  cudaEventRecord(ev_stop);
+  cudaEventSynchronize(ev_stop);
+  cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
+  if (verbose) std::cout << "  ATA " << (plan.use_syrk ? "syrk" : "gemm") << " (dp): " << ev_ms << " ms\n";
+
+  double traceATA = 0.0;
+  CHECK_CUBLAS(cublasDasum(cublasH, N, d_Gram_dp, N + 1, &traceATA));
+  if (verbose) std::cout << "  trace(ATA): " << traceATA << "\n";
+
+  CHECK_CUDA(cudaMemset(d_info, 0, sizeof(int)));
+  cudaEventRecord(ev_start);
+  cusolverStatus_t st = cusolverDnDsyevd(
+    cusolverH, CUSOLVER_EIG_MODE_VECTOR,
+    CUBLAS_FILL_MODE_UPPER, N, d_Gram_dp, N, d_W_dp, d_work_dp, plan.lwork, d_info);
+  cudaEventRecord(ev_stop);
+  cudaEventSynchronize(ev_stop);
+  cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
+  if (verbose) std::cout << "  eig decomp (dp): " << ev_ms << " ms\n";
+  if (st != CUSOLVER_STATUS_SUCCESS) {
+    if (verbose) {
+      std::cout << "  pinned blocked eigensolver failed with status="
+                << cusolverStatusString(st)
+                << ", falling back to pinned full SVD\n";
+    }
+    cudaEventDestroy(ev_start);
+    cudaEventDestroy(ev_stop);
+    gpu_full_svd_update_factor_pinned_workspace(cusolverH, cublasH, d_A, M, N, R, d_factor, plan, ws, verbose);
+    return;
+  }
+
+  int h_info = 0;
+  CHECK_CUDA(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
+  if (h_info != 0) {
+    if (verbose) {
+      std::cout << "  pinned blocked eigensolver returned info=" << h_info
+                << ", falling back to pinned full SVD\n";
+    }
+    cudaEventDestroy(ev_start);
+    cudaEventDestroy(ev_stop);
+    gpu_full_svd_update_factor_pinned_workspace(cusolverH, cublasH, d_A, M, N, R, d_factor, plan, ws, verbose);
+    return;
+  }
+
+  CHECK_CUDA(cudaMemset(d_info, 0, sizeof(int)));
+  if (R > 1)
+    check_resolution_dp<<<1, R - 1>>>(d_W_dp, M + N, N, R, eps_mach_dp, d_info, traceATA);
+  CHECK_CUDA(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
+  if (h_info != 0) {
+    if (verbose)
+      std::cout << "  resolution condition failed among top-" << R
+                << " eigenvalues, falling back to full SVD\n";
+    cudaEventDestroy(ev_start);
+    cudaEventDestroy(ev_stop);
+    gpu_full_svd_update_factor_pinned_workspace(cusolverH, cublasH, d_A, M, N, R, d_factor, plan, ws, verbose);
+    return;
+  }
+
+  scalar_t* d_V_R = nullptr;
+  scalar_t* d_diag = nullptr;
+  double* d_V_R_dp = d_Gram_dp + (long long)(N - R) * N;
+  CHECK_CUDA(cudaMalloc(&d_V_R, sizeof(scalar_t) * (long long)N * R));
+  convert_dp_to_scalar<<<((long long)N * R + 255) / 256, 256>>>(d_V_R_dp, d_V_R, (long long)N * R);
+  CHECK_CUDA(cudaGetLastError());
+  CHECK_CUDA(cudaMalloc(&d_diag, sizeof(scalar_t) * R));
+  compute_inv_sigma_dp<<<(R + 255) / 256, 256>>>(d_W_dp, d_diag, N, R, 1e-12);
+  CHECK_CUDA(cudaGetLastError());
+
+  cudaEventRecord(ev_start);
+  CHECK_CUBLAS(cublasGemmT(cublasH, CUBLAS_OP_T, CUBLAS_OP_N,
+    R, M, N, &alpha, d_V_R, N, d_A, N, &beta, d_factor, R));
+  cudaEventRecord(ev_stop);
+  cudaEventSynchronize(ev_stop);
+  cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
+  if (verbose) std::cout << "  AV gemm: " << ev_ms << " ms\n";
+
+  cudaEventRecord(ev_start);
+  CHECK_CUBLAS(cublasDgmmT(cublasH, CUBLAS_SIDE_LEFT, R, M,
+    d_factor, R, d_diag, 1, d_factor, R));
+  cudaEventRecord(ev_stop);
+  cudaEventSynchronize(ev_stop);
+  cudaEventElapsedTime(&ev_ms, ev_start, ev_stop);
+  if (verbose) std::cout << "  normalize (1/sigma): " << ev_ms << " ms\n";
+
+  CHECK_CUDA(cudaFree(d_diag));
+  CHECK_CUDA(cudaFree(d_V_R));
+  CHECK_CUDA(cudaDeviceSynchronize());
+  cudaEventDestroy(ev_start);
+  cudaEventDestroy(ev_stop);
+}
+#endif
+
  
  
  
@@ -4090,6 +4420,103 @@ static TiledModeUpdateStats runTiledModeUpdate(
        arr_O_host = allocate_aligned_array(max_full_arr_O_size);
      }
 
+#if !SCALAR_DOUBLE
+     std::vector<PinnedBlockedFullSVDPlan> pinned_blocked_full_svd_plans(order);
+     PinnedBlockedFullSVDWorkspace pinned_blocked_full_svd_workspace;
+     bool have_pinned_blocked_full_svd_modes = false;
+     if (!forceGpuIterativeEig()) {
+       const size_t pinned_large_full_mode_threshold = 1ULL * 1024ULL * 1024ULL * 1024ULL;
+       uint64_t max_gram_elems = 0;
+       uint64_t max_blk_elems = 0;
+       uint64_t max_w_elems = 0;
+       uint64_t max_work_elems = 0;
+       uint64_t max_full_s_elems = 0;
+       uint64_t max_full_u_elems = 0;
+       uint64_t max_full_colmaj_elems = 0;
+       uint64_t max_full_work_elems = 0;
+       for (int n = 0; n < order; n++) {
+         if (use_tiled[n]) continue;
+         int M = static_cast<int>(coo.dims[n]);
+         int N = static_cast<int>(rank_products[n]);
+         if (!(M > N) || N <= 0) continue;
+
+         long long mn = (long long)M * N;
+         double* d_A_dp_probe = nullptr;
+         cudaError_t direct_err = cudaMalloc(&d_A_dp_probe, sizeof(double) * mn);
+         bool force_pin_large_full_mode = (order == 3 && arr_O_bytes[n] >= pinned_large_full_mode_threshold);
+         if (direct_err == cudaSuccess) {
+           CHECK_CUDA(cudaFree(d_A_dp_probe));
+           if (!force_pin_large_full_mode) {
+             continue;
+           }
+         } else {
+           cudaGetLastError();
+         }
+
+         auto& plan = pinned_blocked_full_svd_plans[n];
+         plan.use_syrk = useSyrkForGram(N);
+         plan.block_rows = std::min(std::max(1, getEnvInt("TTMC_BLOCKED_DP_ROWS", 32768)), M);
+
+         double* d_blk_probe = nullptr;
+         while (plan.block_rows > 0) {
+           cudaError_t blk_err = cudaMalloc(&d_blk_probe, sizeof(double) * (long long)plan.block_rows * N);
+           if (blk_err == cudaSuccess) break;
+           cudaGetLastError();
+           plan.block_rows /= 2;
+         }
+         if (!d_blk_probe) {
+           throw std::runtime_error("Unable to prepare pinned blocked full-SVD probe workspace.");
+         }
+         CHECK_CUDA(cudaFree(d_blk_probe));
+
+         double* d_gram_probe = nullptr;
+         double* d_w_probe = nullptr;
+         double* d_work_probe = nullptr;
+         CHECK_CUDA(cudaMalloc(&d_gram_probe, sizeof(double) * (long long)N * N));
+         CHECK_CUDA(cudaMalloc(&d_w_probe, sizeof(double) * N));
+         int lwork = 0;
+         CHECK_CUSOLVER(cusolverDnDsyevd_bufferSize(
+           cusolverH, CUSOLVER_EIG_MODE_VECTOR,
+           CUBLAS_FILL_MODE_UPPER, N, d_gram_probe, N, d_w_probe, &lwork));
+         CHECK_CUDA(cudaMalloc(&d_work_probe, sizeof(double) * std::max(lwork, 1)));
+         CHECK_CUDA(cudaFree(d_work_probe));
+         CHECK_CUDA(cudaFree(d_w_probe));
+         CHECK_CUDA(cudaFree(d_gram_probe));
+
+         int full_svd_lwork = 0;
+         cusolverStatus_t full_svd_st = cusolverGesvdBufSizeT(cusolverH, M, N, &full_svd_lwork);
+         plan.lwork = std::max(lwork, 1);
+         plan.full_svd_lwork = (full_svd_st == CUSOLVER_STATUS_SUCCESS) ? std::max(full_svd_lwork, 1) : 0;
+         plan.full_svd_min_mn = N;
+         plan.active = true;
+         have_pinned_blocked_full_svd_modes = true;
+         max_gram_elems = std::max<uint64_t>(max_gram_elems, (uint64_t)N * N);
+         max_blk_elems = std::max<uint64_t>(max_blk_elems, (uint64_t)plan.block_rows * N);
+         max_w_elems = std::max<uint64_t>(max_w_elems, (uint64_t)N);
+         max_work_elems = std::max<uint64_t>(max_work_elems, (uint64_t)plan.lwork);
+         max_full_s_elems = std::max<uint64_t>(max_full_s_elems, (uint64_t)plan.full_svd_min_mn);
+         max_full_u_elems = std::max<uint64_t>(max_full_u_elems, (uint64_t)M * plan.full_svd_min_mn);
+         max_full_colmaj_elems = std::max<uint64_t>(max_full_colmaj_elems, (uint64_t)M * N);
+         max_full_work_elems = std::max<uint64_t>(max_full_work_elems, (uint64_t)plan.full_svd_lwork);
+       }
+
+       if (have_pinned_blocked_full_svd_modes) {
+         if (!tryPreparePinnedBlockedFullSVDWorkspace(
+               pinned_blocked_full_svd_workspace,
+               max_gram_elems,
+               max_blk_elems,
+               max_w_elems,
+               max_work_elems,
+               max_full_s_elems,
+               max_full_u_elems,
+               max_full_colmaj_elems,
+               max_full_work_elems)) {
+           throw std::runtime_error("Unable to allocate pinned blocked full-SVD workspace.");
+         }
+       }
+     }
+#endif
+
      // ===================================================================
      // 7. Prepare TTMc caches / tiled workspaces before the HOOI loop
      // ===================================================================
@@ -4352,6 +4779,7 @@ static TiledModeUpdateStats runTiledModeUpdate(
      };
 
      for (iter = 0; iter < max_iters; iter++) {
+       auto iter_start = std::chrono::high_resolution_clock::now();
        double mode0_core_norm_sq = 0.0;
        bool mode0_core_ready = false;
 
@@ -4399,9 +4827,23 @@ static TiledModeUpdateStats runTiledModeUpdate(
            uint64_t M = coo.dims[n];
            uint64_t N = rank_products[n];
            auto svd_start = std::chrono::high_resolution_clock::now();
-           gpu_truncated_svd_update_factor(cusolverH, cublasH, d_arr_O,
-             static_cast<int>(M), static_cast<int>(N),
-             static_cast<int>(ranks[n]), d_factors[n], verbose);
+#if !SCALAR_DOUBLE
+           if (pinned_blocked_full_svd_plans[n].active) {
+             gpu_truncated_svd_update_factor_pinned_blocked(
+               cusolverH, cublasH, d_arr_O,
+               static_cast<int>(M), static_cast<int>(N),
+               static_cast<int>(ranks[n]), d_factors[n],
+               pinned_blocked_full_svd_plans[n],
+               pinned_blocked_full_svd_workspace,
+               verbose);
+           } else {
+#endif
+             gpu_truncated_svd_update_factor(cusolverH, cublasH, d_arr_O,
+               static_cast<int>(M), static_cast<int>(N),
+               static_cast<int>(ranks[n]), d_factors[n], verbose);
+#if !SCALAR_DOUBLE
+           }
+#endif
            if (check && iter == 0) {
              CHECK_CUDA(cudaMemcpy(factors[n], d_factors[n],
                sizeof(scalar_t) * factor_sizes[n], cudaMemcpyDeviceToHost));
@@ -4486,10 +4928,16 @@ static TiledModeUpdateStats runTiledModeUpdate(
                  << "  fit=" << fit
                  << "  delta_fit=" << delta_fit << "\n";
 
-       if (
-        iter>=max_iters - 1
-        // !(iter == 0) && delta_fit < tol
-      ) {
+       auto iter_end = std::chrono::high_resolution_clock::now();
+       auto iter_us = std::chrono::duration_cast<std::chrono::microseconds>(
+         iter_end - iter_start).count();
+       std::cout << "[HOOI Iter Time] iter=" << iter
+                 << " runtime_us=" << iter_us << "\n";
+
+      if (
+       iter >= max_iters - 1 ||
+       (iter != 0 && delta_fit < tol)
+     ) {
          std::cout << "Converged (delta_fit " << delta_fit << " < tol " << tol << ")\n";
          iter++;
          break;
@@ -4520,6 +4968,9 @@ static TiledModeUpdateStats runTiledModeUpdate(
        else freeTTMcTiles3D(tiled_mode_tiles[n]);
      }
      freeTiledModeWorkspace(tiled_workspace);
+#if !SCALAR_DOUBLE
+     freePinnedBlockedFullSVDWorkspace(pinned_blocked_full_svd_workspace);
+#endif
      if (d_G_core) CHECK_CUDA(cudaFree(d_G_core));
      if (d_arr_O) CHECK_CUDA(cudaFree(d_arr_O));
      for (int i = 0; i < order; i++) CHECK_CUDA(cudaFree(d_factors[i]));
