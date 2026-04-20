@@ -1,0 +1,9 @@
+# Local build outputs
+/build/
+/build_local*/
+
+# Generated logs
+*.log
+
+# Keep documentation in this vendored tree even if parent ignore rules exclude Markdown.
+!*.md
