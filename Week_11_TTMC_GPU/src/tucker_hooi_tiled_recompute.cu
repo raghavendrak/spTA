@@ -24,6 +24,7 @@
  #include <array>
  #include <numeric>
  #include <algorithm>
+ #include <filesystem>
  #include <cstring>
  #include <chrono>
  #include <stdexcept>
@@ -118,9 +119,46 @@ inline int getEnvInt(const char* name, int default_value)
   return atoi(value);
 }
 
+struct TensorOptimizationPolicy {
+  std::string tensor_name;
+  bool enable_pinned_blocked_full_svd = false;
+  bool allow_iterative_eig_fallback = false;
+  bool force_iterative_eig = false;
+};
+
+static bool g_force_gpu_iterative_eig = false;
+static bool g_allow_gpu_iterative_eig_fallback = false;
+static bool g_enable_pinned_blocked_full_svd = false;
+
 static bool forceGpuIterativeEig()
 {
-  return getEnvInt("TTMC_FORCE_GPU_ITERATIVE_EIG", 0) != 0;
+  return g_force_gpu_iterative_eig;
+}
+
+static bool allowGpuIterativeEigFallback()
+{
+  return g_allow_gpu_iterative_eig_fallback;
+}
+
+static TensorOptimizationPolicy chooseTensorOptimizationPolicy(
+  const std::string& tns_file,
+  const std::vector<uint64_t>& ranks)
+{
+  TensorOptimizationPolicy policy;
+  policy.tensor_name = std::filesystem::path(tns_file).filename().string();
+  (void)ranks;
+
+  // Legacy-first default. Add explicit tensor/rank allowlist entries here only
+  // after auditing a concrete failing case.
+  policy.enable_pinned_blocked_full_svd =
+    getEnvInt("TTMC_ENABLE_PINNED_BLOCKED_FULL_SVD", 0) != 0;
+  // Forced iterative eig routing is intentionally disabled. The iterative
+  // solver is only allowed as a last-resort fallback after exact top-R fails.
+  policy.force_iterative_eig = false;
+  policy.allow_iterative_eig_fallback =
+    (getEnvInt("TTMC_ALLOW_GPU_ITERATIVE_EIG_FALLBACK", 1) != 0);
+
+  return policy;
 }
 
 inline bool useSyrkForGram(int cols)
@@ -2085,6 +2123,132 @@ static bool solveTopREigensystemDpIterativeGpu(
      }
    }
  }
+
+static std::string factorBinPath(const std::string& dir, int mode)
+{
+  return dir + "/mode" + std::to_string(mode) + ".bin";
+}
+
+struct FactorFilePayload
+{
+  uint64_t rows{0};
+  uint64_t cols{0};
+  std::vector<float> values;
+};
+
+static FactorFilePayload read_factor_file_float32(
+  const std::string& path,
+  uint64_t expected_rows,
+  uint64_t max_cols)
+{
+  std::ifstream in(path, std::ios::binary);
+  if (!in) {
+    throw std::runtime_error("failed to open factor file: " + path);
+  }
+
+  in.seekg(0, std::ios::end);
+  const std::streamsize file_size = in.tellg();
+  in.seekg(0, std::ios::beg);
+  if (file_size < 0) {
+    throw std::runtime_error("failed to stat factor file: " + path);
+  }
+
+  const std::streamsize bytes_per_row =
+    static_cast<std::streamsize>(expected_rows * sizeof(float));
+
+  auto read_values = [&](uint64_t rows, uint64_t cols, std::streamsize offset) {
+    FactorFilePayload payload;
+    payload.rows = rows;
+    payload.cols = cols;
+    payload.values.resize(static_cast<size_t>(rows * cols));
+    in.seekg(offset, std::ios::beg);
+    in.read(reinterpret_cast<char*>(payload.values.data()),
+            static_cast<std::streamsize>(payload.values.size() * sizeof(float)));
+    if (!in) {
+      throw std::runtime_error("failed to read factor file: " + path);
+    }
+    return payload;
+  };
+
+  if (file_size >= static_cast<std::streamsize>(2 * sizeof(uint64_t))) {
+    uint64_t fr = 0, fc = 0;
+    in.read(reinterpret_cast<char*>(&fr), sizeof(uint64_t));
+    in.read(reinterpret_cast<char*>(&fc), sizeof(uint64_t));
+    if (!in) {
+      throw std::runtime_error("failed to read factor header: " + path);
+    }
+    const std::streamsize header_bytes =
+      static_cast<std::streamsize>(2 * sizeof(uint64_t) + fr * fc * sizeof(float));
+    if (fr == expected_rows &&
+        fc > 0 &&
+        fc <= max_cols &&
+        header_bytes == file_size) {
+      return read_values(fr, fc, static_cast<std::streamsize>(2 * sizeof(uint64_t)));
+    }
+    in.clear();
+  }
+
+  if (bytes_per_row <= 0 || file_size % bytes_per_row != 0) {
+    std::ostringstream oss;
+    oss << "factor file size mismatch for " << path
+        << ": cannot infer raw float32 layout for " << expected_rows << " rows";
+    throw std::runtime_error(oss.str());
+  }
+
+  const uint64_t inferred_cols =
+    static_cast<uint64_t>(file_size / bytes_per_row);
+  if (inferred_cols == 0 || inferred_cols > max_cols) {
+    std::ostringstream oss;
+    oss << "factor file column mismatch for " << path
+        << ": inferred " << inferred_cols
+        << " cols for " << expected_rows << " rows, max allowed " << max_cols;
+    throw std::runtime_error(oss.str());
+  }
+  return read_values(expected_rows, inferred_cols, 0);
+}
+
+static void dump_factor_bin(const std::string& path, const scalar_t* A, uint64_t rows, uint64_t cols)
+{
+  std::filesystem::path out_path(path);
+  if (out_path.has_parent_path()) {
+    std::filesystem::create_directories(out_path.parent_path());
+   }
+  std::ofstream out(path, std::ios::binary);
+  if (!out) {
+    throw std::runtime_error("failed to open factor dump path: " + path);
+  }
+  std::vector<float> buf(static_cast<size_t>(rows * cols));
+  for (size_t i = 0; i < buf.size(); ++i) {
+    buf[i] = static_cast<float>(A[i]);
+  }
+  out.write(reinterpret_cast<const char*>(&rows), sizeof(uint64_t));
+  out.write(reinterpret_cast<const char*>(&cols), sizeof(uint64_t));
+  out.write(reinterpret_cast<const char*>(buf.data()),
+            static_cast<std::streamsize>(buf.size() * sizeof(float)));
+  if (!out) {
+    throw std::runtime_error("failed to write factor dump path: " + path);
+  }
+}
+
+static bool load_factor_bin(const std::string& path, scalar_t* A, uint64_t rows, uint64_t cols)
+{
+  std::ifstream probe(path, std::ios::binary);
+  if (!probe) return false;
+  probe.close();
+
+  FactorFilePayload payload = read_factor_file_float32(path, rows, cols);
+  if (payload.rows != rows || payload.cols != cols) {
+    std::ostringstream oss;
+    oss << "factor shape mismatch for " << path
+        << ": file " << payload.rows << "x" << payload.cols
+        << ", expected " << rows << "x" << cols;
+    throw std::runtime_error(oss.str());
+  }
+  for (size_t i = 0; i < payload.values.size(); ++i) {
+    A[i] = static_cast<scalar_t>(payload.values[i]);
+  }
+  return true;
+}
  
  // Function for aligned memory allocation
  scalar_t* allocate_aligned_array(size_t num_elements) {
@@ -2615,7 +2779,7 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
          top_r_ok = solveTopREigensystemDpExact(
            cusolverH, d_Gram_dp, N, R, M + N, traceATA,
            &d_V_R, &d_diag, nullptr, verbose);
-         if (!top_r_ok) {
+         if (!top_r_ok && allowGpuIterativeEigFallback()) {
            if (verbose) {
              std::cout << "  exact GPU top-R eigensolver failed, trying iterative GPU fallback\n";
            }
@@ -3944,7 +4108,7 @@ static bool solveTallGramEigensystem(
       top_r_ok = solveTopREigensystemDpExact(
         cusolverH, d_gram, cols, rank, M_total + cols, traceATA,
         &result.d_VR, &result.d_inv_sigma, &result.core_norm_sq, verbose);
-      if (!top_r_ok) {
+      if (!top_r_ok && allowGpuIterativeEigFallback()) {
         if (verbose) {
           std::cout << "  exact GPU top-R eigensolver failed in tiled path, trying iterative GPU fallback\n";
         }
@@ -4237,12 +4401,26 @@ static TiledModeUpdateStats runTiledModeUpdate(
      }
      while ((int)ranks.size() < order) ranks.push_back(10);
      for (int i = 0; i < order; i++) ranks[i] = std::min(ranks[i], coo.dims[i]);
+
+     const TensorOptimizationPolicy opt_policy =
+       chooseTensorOptimizationPolicy(tns_file, ranks);
+     g_enable_pinned_blocked_full_svd = opt_policy.enable_pinned_blocked_full_svd;
+     g_force_gpu_iterative_eig = opt_policy.force_iterative_eig;
+     g_allow_gpu_iterative_eig_fallback = opt_policy.allow_iterative_eig_fallback;
  
      std::cout << "Tensor:";
      for (int i = 0; i < order; i++) std::cout << " " << coo.dims[i];
      std::cout << "  nnz=" << coo.values.size() << "  ranks=(";
      for (int i = 0; i < order; i++) { if (i) std::cout << ","; std::cout << ranks[i]; }
      std::cout << ")\n";
+     std::cout << "Optimization policy: legacy-first"
+               << ", pinned-blocked-full-svd="
+               << (g_enable_pinned_blocked_full_svd ? "enabled" : "disabled")
+               << ", iterative-eig-fallback="
+               << (g_allow_gpu_iterative_eig_fallback ? "enabled" : "disabled")
+               << ", forced-iterative-eig="
+               << (g_force_gpu_iterative_eig ? "enabled" : "disabled")
+               << "\n";
  
      // ===================================================================
      // 2. Unique-index counts per mode (for CSF compression ordering)
@@ -4286,10 +4464,32 @@ static TiledModeUpdateStats runTiledModeUpdate(
      // ===================================================================
      std::vector<scalar_t*> factors(order);
      std::vector<uint64_t> factor_sizes(order);
+     const char* factors_dir_env = std::getenv("TUCKER_FACTORS_DIR");
+     const char* dump_dir_env = std::getenv("TUCKER_FACTORS_DUMP_DIR");
      for (int i = 0; i < order; i++) {
        factor_sizes[i] = coo.dims[i] * ranks[i];
        factors[i] = new scalar_t[factor_sizes[i]];
-       init_factor_orthonormal(coo.dims[i], ranks[i], 42 + i, factors[i]);
+       bool loaded = false;
+       if (factors_dir_env && *factors_dir_env) {
+         const std::string factor_path = factorBinPath(factors_dir_env, i);
+         loaded = load_factor_bin(factor_path, factors[i], coo.dims[i], ranks[i]);
+         if (loaded) {
+           std::cout << "[factors] loaded " << factor_path
+                     << " (" << coo.dims[i] << " x " << ranks[i] << ")\n";
+         }
+         else {
+           throw std::runtime_error("missing factor init file: " + factor_path);
+         }
+       }
+       if (!loaded) {
+         init_factor_orthonormal(coo.dims[i], ranks[i], 42 + i, factors[i]);
+       }
+       if (dump_dir_env && *dump_dir_env) {
+         const std::string factor_path = factorBinPath(dump_dir_env, i);
+         dump_factor_bin(factor_path, factors[i], coo.dims[i], ranks[i]);
+         std::cout << "[factors] dumped " << factor_path
+                   << " (" << coo.dims[i] << " x " << ranks[i] << ")\n";
+       }
      }
  
      cusolverDnHandle_t cusolverH = nullptr;
@@ -4361,33 +4561,12 @@ static TiledModeUpdateStats runTiledModeUpdate(
        return max_size;
      };
 
-    if (ttmc_path == TTMcStorageMode::Auto) {
-      size_t free_bytes = 0, total_bytes = 0;
-      CHECK_CUDA(cudaMemGetInfo(&free_bytes, &total_bytes));
-      const size_t reserve_bytes = 2ULL * 1024ULL * 1024ULL * 1024ULL;
-      const size_t hard_4d_full_y_threshold = 16ULL * 1024ULL * 1024ULL * 1024ULL;
-      if (order == 4) {
-        for (int n = 0; n < order; n++) {
-          if (!supports_tiled[n] || use_tiled[n]) continue;
-          if (arr_O_bytes[n] >= hard_4d_full_y_threshold) {
-            use_tiled[n] = true;
-          }
-        }
-      }
-      uint64_t max_full_arr_O_size = recompute_max_full_arr_O_size();
-      while (max_full_arr_O_size > 0 &&
-             (size_t)max_full_arr_O_size * sizeof(scalar_t) + reserve_bytes > free_bytes) {
-        int mode_to_tile = choose_mode_to_tile();
-        if (mode_to_tile < 0) break;
-         use_tiled[mode_to_tile] = true;
-         max_full_arr_O_size = recompute_max_full_arr_O_size();
-       }
-     }
-
      uint64_t max_full_arr_O_size = recompute_max_full_arr_O_size();
 
      scalar_t* d_arr_O = nullptr;
      while (max_full_arr_O_size > 0) {
+       // Legacy-first auto policy: keep every mode on the full-Y path until
+       // the actual full-buffer allocation fails, then tile one mode and retry.
        cudaError_t alloc_err = cudaMalloc(&d_arr_O, sizeof(scalar_t) * max_full_arr_O_size);
        if (alloc_err == cudaSuccess) break;
        cudaGetLastError();
@@ -4424,7 +4603,7 @@ static TiledModeUpdateStats runTiledModeUpdate(
      std::vector<PinnedBlockedFullSVDPlan> pinned_blocked_full_svd_plans(order);
      PinnedBlockedFullSVDWorkspace pinned_blocked_full_svd_workspace;
      bool have_pinned_blocked_full_svd_modes = false;
-     if (!forceGpuIterativeEig()) {
+     if (g_enable_pinned_blocked_full_svd && !forceGpuIterativeEig()) {
        const size_t pinned_large_full_mode_threshold = 1ULL * 1024ULL * 1024ULL * 1024ULL;
        uint64_t max_gram_elems = 0;
        uint64_t max_blk_elems = 0;
@@ -4443,7 +4622,10 @@ static TiledModeUpdateStats runTiledModeUpdate(
          long long mn = (long long)M * N;
          double* d_A_dp_probe = nullptr;
          cudaError_t direct_err = cudaMalloc(&d_A_dp_probe, sizeof(double) * mn);
-         bool force_pin_large_full_mode = (order == 3 && arr_O_bytes[n] >= pinned_large_full_mode_threshold);
+         bool force_pin_large_full_mode =
+           (g_enable_pinned_blocked_full_svd &&
+            order == 3 &&
+            arr_O_bytes[n] >= pinned_large_full_mode_threshold);
          if (direct_err == cudaSuccess) {
            CHECK_CUDA(cudaFree(d_A_dp_probe));
            if (!force_pin_large_full_mode) {
@@ -4828,7 +5010,8 @@ static TiledModeUpdateStats runTiledModeUpdate(
            uint64_t N = rank_products[n];
            auto svd_start = std::chrono::high_resolution_clock::now();
 #if !SCALAR_DOUBLE
-           if (pinned_blocked_full_svd_plans[n].active) {
+           if (g_enable_pinned_blocked_full_svd &&
+               pinned_blocked_full_svd_plans[n].active) {
              gpu_truncated_svd_update_factor_pinned_blocked(
                cusolverH, cublasH, d_arr_O,
                static_cast<int>(M), static_cast<int>(N),
@@ -4934,16 +5117,21 @@ static TiledModeUpdateStats runTiledModeUpdate(
        std::cout << "[HOOI Iter Time] iter=" << iter
                  << " runtime_us=" << iter_us << "\n";
 
-      if (
-       iter >= max_iters - 1 ||
-       (iter != 0 && delta_fit < tol)
-     ) {
-         std::cout << "Converged (delta_fit " << delta_fit << " < tol " << tol << ")\n";
-         iter++;
-         break;
-       }
-       prev_fit = fit;
-     }
+      const bool hit_max_iters = (iter >= max_iters - 1);
+      const bool hit_tol = (iter != 0 && delta_fit < tol);
+      if (hit_max_iters || hit_tol) {
+        if (hit_tol) {
+          std::cout << "Converged (delta_fit " << delta_fit << " < tol " << tol << ")\n";
+        } else {
+          std::cout << "Reached max_iters (" << max_iters
+                    << ") with delta_fit=" << delta_fit
+                    << " and tol=" << tol << "\n";
+        }
+        iter++;
+        break;
+      }
+      prev_fit = fit;
+    }
 
      auto total_end = std::chrono::high_resolution_clock::now();
      auto total_us  = std::chrono::duration_cast<std::chrono::microseconds>(
