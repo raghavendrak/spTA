@@ -4946,6 +4946,7 @@ static TiledModeUpdateStats runTiledModeUpdate(
      int iter;
      std::vector<double> ttmc_time_us(order, 0.0);
      std::vector<double> svd_time_us(order, 0.0);
+     std::vector<bool> late_pinned_blocked_disabled(order, false);
      scalar_t input_tsr_norm = std::sqrt(
        frobenius_norm_sq_sparse(coo.values.data(), coo.values.size()));
 
@@ -5063,6 +5064,7 @@ static TiledModeUpdateStats runTiledModeUpdate(
              g_enable_pinned_blocked_full_svd &&
              !forceGpuIterativeEig() &&
              !use_tiled[n] &&
+             !late_pinned_blocked_disabled[n] &&
              static_cast<int>(M) > static_cast<int>(N) &&
              static_cast<int>(N) > 0;
            try {
@@ -5081,9 +5083,10 @@ static TiledModeUpdateStats runTiledModeUpdate(
                static_cast<int>(M), static_cast<int>(N),
                static_cast<int>(ranks[n]), d_factors[n], verbose);
              if (!rescued) {
+               late_pinned_blocked_disabled[n] = true;
                if (allowGpuIterativeEigFallback()) {
                  std::cout << "  late pinned blocked full-SVD fallback unavailable or failed for mode "
-                           << n << ", retrying ordinary path with iterative GPU fallback enabled\n";
+                           << n << ", disabling late path 6 for later iterations and retrying ordinary path with iterative GPU fallback enabled\n";
                  gpu_truncated_svd_update_factor(
                    cusolverH, cublasH, d_arr_O,
                    static_cast<int>(M), static_cast<int>(N),
