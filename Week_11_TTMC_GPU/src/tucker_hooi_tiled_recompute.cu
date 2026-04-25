@@ -4947,6 +4947,7 @@ static TiledModeUpdateStats runTiledModeUpdate(
      std::vector<double> ttmc_time_us(order, 0.0);
      std::vector<double> svd_time_us(order, 0.0);
      std::vector<bool> late_pinned_blocked_disabled(order, false);
+     std::vector<bool> late_runtime_tiled_disabled(order, false);
      scalar_t input_tsr_norm = std::sqrt(
        frobenius_norm_sq_sparse(coo.values.data(), coo.values.size()));
 
@@ -5008,6 +5009,146 @@ static TiledModeUpdateStats runTiledModeUpdate(
          if (m == current_mode || use_tiled[m]) continue;
          if (ttmc_caches[m].initialized) free_ttmc_cache(ttmc_caches[m]);
        }
+     };
+
+     auto tryPromoteModeToTiledAtRuntime = [&](int n, const std::vector<uint64_t>& ranks_v) -> bool {
+       if (!supports_tiled[n] || use_tiled[n]) return false;
+
+       std::vector<TTMCTile3D> saved_tiles = std::move(tiled_mode_tiles[n]);
+       std::vector<uint64_t> saved_ranks = tiled_ranks_v[n];
+       std::vector<uint64_t> saved_dims = tiled_dims_v[n];
+       std::vector<uint64_t> saved_fsizes = tiled_fsizes_v[n];
+       uint64_t saved_tile_rows = tiled_tile_rows[n];
+       bool saved_use_tiled = use_tiled[n];
+
+       auto restore_mode = [&]() {
+         freeTTMcTiles3D(tiled_mode_tiles[n]);
+         tiled_mode_tiles[n] = std::move(saved_tiles);
+         tiled_ranks_v[n] = std::move(saved_ranks);
+         tiled_dims_v[n] = std::move(saved_dims);
+         tiled_fsizes_v[n] = std::move(saved_fsizes);
+         tiled_tile_rows[n] = saved_tile_rows;
+         use_tiled[n] = saved_use_tiled;
+         max_full_arr_O_size = recompute_max_full_arr_O_size();
+       };
+
+       use_tiled[n] = true;
+       max_full_arr_O_size = recompute_max_full_arr_O_size();
+       tiled_ranks_v[n] = ranks_v;
+       tiled_dims_v[n].resize(order);
+       tiled_fsizes_v[n].assign(order, 0);
+       for (int l = 0; l < order; ++l) {
+         tiled_dims_v[n][l] = coo.dims[csf_copies[n].modeOrder[l]];
+         if (l > 0) tiled_fsizes_v[n][l] = factor_sizes[csf_copies[n].modeOrder[l]];
+       }
+
+       size_t tile_target_bytes = 0;
+       if (tile_mb_hint > 0) {
+         tile_target_bytes = (size_t)tile_mb_hint * 1024ULL * 1024ULL;
+       } else {
+         size_t free_bytes = 0, total_bytes = 0;
+         CHECK_CUDA(cudaMemGetInfo(&free_bytes, &total_bytes));
+         size_t usable_bytes = (free_bytes > tile_reserve_bytes)
+           ? (free_bytes - tile_reserve_bytes)
+           : std::max<size_t>(free_bytes / 2, 1ULL << 20);
+         int active_tiled_modes = 0;
+         for (int m = 0; m < order; ++m)
+           if (use_tiled[m]) ++active_tiled_modes;
+         tile_target_bytes = std::max<size_t>(
+           usable_bytes / std::max(active_tiled_modes, 1),
+           (size_t)(rank_products[n] + ranks[n]) * sizeof(scalar_t));
+       }
+
+       uint64_t tile_rows = chooseTileRootCount(
+         (uint64_t)csf_copies[n].idxs[0].size(),
+         rank_products[n],
+         ranks[n],
+         tile_roots_override,
+         tile_target_bytes);
+       tiled_tile_rows[n] = tile_rows;
+       rebuild_tiled_mode(n);
+       std::cout << "  mode " << n << ": late tiled fallback starts with "
+                 << tiled_mode_tiles[n].size() << " tiles of up to " << tile_rows
+                 << " root slices (tile budget " << formatBytes((double)tile_target_bytes) << ")\n";
+
+       if (order != 4) {
+         TiledModeWorkspace trial_ws;
+         while (true) {
+           uint64_t max_y_elems = 0;
+           uint64_t max_factor_elems = 0;
+#if !SCALAR_DOUBLE
+           uint64_t max_dp_elems = 0;
+#endif
+           for (int m = 0; m < order; ++m) {
+             if (!use_tiled[m]) continue;
+             max_y_elems = std::max(
+               max_y_elems,
+               tiledWorkspaceYElems(tiled_tile_rows[m], rank_products[m]));
+             max_factor_elems = std::max(
+               max_factor_elems,
+               tiledWorkspaceFactorElems(tiled_tile_rows[m], ranks[m]));
+#if !SCALAR_DOUBLE
+             max_dp_elems = std::max(
+               max_dp_elems,
+               tiledWorkspaceDPElems(tiled_tile_rows[m], rank_products[m]));
+#endif
+           }
+
+           if (tryPrepareTiledModeWorkspace(
+                 trial_ws,
+                 max_y_elems,
+                 max_factor_elems,
+#if !SCALAR_DOUBLE
+                 max_dp_elems
+#endif
+               )) {
+             freeTiledModeWorkspace(tiled_workspace);
+             tiled_workspace = trial_ws;
+             trial_ws = TiledModeWorkspace{};
+             break;
+           }
+
+           uint64_t old_rows = tiled_tile_rows[n];
+           uint64_t new_rows = std::max<uint64_t>(1, old_rows / 2);
+           if (new_rows == old_rows && old_rows > 1) --new_rows;
+           if (new_rows == 0 || new_rows == old_rows) {
+             freeTiledModeWorkspace(trial_ws);
+             restore_mode();
+             return false;
+           }
+           tiled_tile_rows[n] = new_rows;
+           rebuild_tiled_mode(n);
+           std::cout << "  mode " << n
+                     << ": late tiled shared-workspace allocation failed, retrying with "
+                     << new_rows << " root slices per tile -> "
+                     << tiled_mode_tiles[n].size() << " tiles\n";
+         }
+       }
+
+       if (order == 4) {
+         const uint64_t gram_bytes = sizeof(double) * rank_products[n] * rank_products[n];
+         const uint64_t hard_4d_gram_threshold = 8ULL * 1024ULL * 1024ULL * 1024ULL;
+         if (gram_bytes >= hard_4d_gram_threshold) {
+           while (!tryAllocateTiledPass1AndGram(tiled_tile_rows[n], rank_products[n])) {
+             uint64_t old_rows = tiled_tile_rows[n];
+             uint64_t new_rows = std::max<uint64_t>(1, old_rows / 2);
+             if (new_rows == old_rows && old_rows > 1) --new_rows;
+             if (new_rows == 0 || new_rows == old_rows) {
+               restore_mode();
+               return false;
+             }
+             tiled_tile_rows[n] = new_rows;
+             rebuild_tiled_mode(n);
+             std::cout << "  mode " << n
+                       << ": late tiled pass-1 workspace + Gram probe failed, retrying with "
+                       << new_rows << " root slices per tile -> "
+                       << tiled_mode_tiles[n].size() << " tiles\n";
+           }
+         }
+       }
+
+       if (ttmc_caches[n].initialized) free_ttmc_cache(ttmc_caches[n]);
+       return true;
      };
 
      for (iter = 0; iter < max_iters; iter++) {
@@ -5084,9 +5225,61 @@ static TiledModeUpdateStats runTiledModeUpdate(
                static_cast<int>(ranks[n]), d_factors[n], verbose);
              if (!rescued) {
                late_pinned_blocked_disabled[n] = true;
+               if (ttmc_path == TTMcStorageMode::Auto &&
+                   supports_tiled[n] &&
+                   !use_tiled[n] &&
+                   !late_runtime_tiled_disabled[n]) {
+                 std::cout << "  late pinned blocked full-SVD fallback unavailable or failed for mode "
+                           << n << ", trying late tiled fallback before iterative GPU fallback\n";
+                 if (tryPromoteModeToTiledAtRuntime(n, ranks_v)) {
+                   auto failed_svd_end = std::chrono::high_resolution_clock::now();
+                   double failed_svd_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                     failed_svd_end - svd_start).count();
+                   svd_time_us[n] += failed_svd_us;
+
+                   bool tiled_4d_mode = (order == 4);
+                   if (tiled_4d_mode) {
+                     release_full_mode_state_for_tiled_4d(n);
+                   }
+                   TiledModeUpdateStats tiled_stats = runTiledModeUpdate(
+                     cusolverH, cublasH,
+                     tiled_mode_tiles[n],
+                     tiled_workspace,
+                     d_factor_mats_v.data(),
+                     d_factors[n],
+                     factor_sizes[n],
+                     ranks_v.data(),
+                     order,
+                     (int)coo.dims[n],
+                     tiled_4d_mode,
+                     verbose);
+                   ttmc_time_us[n] += tiled_stats.ttmc_us;
+                   svd_time_us[n] += (tiled_stats.total_us - tiled_stats.ttmc_us);
+                   if (n == 0) {
+                     mode0_core_norm_sq = tiled_stats.core_norm_sq;
+                     mode0_core_ready = true;
+                   }
+                   if (check && iter == 0) {
+                     CHECK_CUDA(cudaMemcpy(factors[n], d_factors[n],
+                       sizeof(scalar_t) * factor_sizes[n], cudaMemcpyDeviceToHost));
+                   }
+                   if (verbose) {
+                     std::cout << "[iter " << iter << " mode " << n
+                               << "] late tiled fallback total: "
+                               << tiled_stats.total_us << " us"
+                               << "  TTMc-only: " << tiled_stats.ttmc_us << " us\n";
+                   }
+                   continue;
+                 }
+                 late_runtime_tiled_disabled[n] = true;
+               }
                if (allowGpuIterativeEigFallback()) {
                  std::cout << "  late pinned blocked full-SVD fallback unavailable or failed for mode "
-                           << n << ", disabling late path 6 for later iterations and retrying ordinary path with iterative GPU fallback enabled\n";
+                           << n;
+                 if (late_runtime_tiled_disabled[n] && supports_tiled[n] && !use_tiled[n]) {
+                   std::cout << ", disabling late tiled fallback for later iterations";
+                 }
+                 std::cout << ", disabling late path 6 for later iterations and retrying ordinary path with iterative GPU fallback enabled\n";
                  gpu_truncated_svd_update_factor(
                    cusolverH, cublasH, d_arr_O,
                    static_cast<int>(M), static_cast<int>(N),
