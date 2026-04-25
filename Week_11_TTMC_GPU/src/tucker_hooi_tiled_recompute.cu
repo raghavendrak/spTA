@@ -5201,6 +5201,11 @@ static TiledModeUpdateStats runTiledModeUpdate(
            uint64_t N = rank_products[n];
            auto svd_start = std::chrono::high_resolution_clock::now();
 #if !SCALAR_DOUBLE
+           const bool allow_late_tiled_fallback =
+             ttmc_path == TTMcStorageMode::Auto &&
+             supports_tiled[n] &&
+             !use_tiled[n] &&
+             !late_runtime_tiled_disabled[n];
            const bool allow_late_pinned_blocked =
              g_enable_pinned_blocked_full_svd &&
              !forceGpuIterativeEig() &&
@@ -5208,78 +5213,93 @@ static TiledModeUpdateStats runTiledModeUpdate(
              !late_pinned_blocked_disabled[n] &&
              static_cast<int>(M) > static_cast<int>(N) &&
              static_cast<int>(N) > 0;
+           const bool allow_post_exact_rescue =
+             allow_late_tiled_fallback || allow_late_pinned_blocked;
            try {
              gpu_truncated_svd_update_factor(
                cusolverH, cublasH, d_arr_O,
                static_cast<int>(M), static_cast<int>(N),
                static_cast<int>(ranks[n]), d_factors[n], verbose,
-               /*allow_iterative_after_exact=*/!allow_late_pinned_blocked);
+               /*allow_iterative_after_exact=*/!allow_post_exact_rescue);
            } catch (const ExactTopRFullGramFallbackFailed&) {
-             if (!allow_late_pinned_blocked) throw;
+             if (!allow_post_exact_rescue) throw;
 
-             std::cout << "  exact top-R full-Gram fallback failed for mode " << n
-                       << ", trying late pinned blocked full-SVD fallback\n";
-             bool rescued = tryLatePinnedBlockedFullSVDFallback(
-               cusolverH, cublasH, d_arr_O,
-               static_cast<int>(M), static_cast<int>(N),
-               static_cast<int>(ranks[n]), d_factors[n], verbose);
-             if (!rescued) {
-               late_pinned_blocked_disabled[n] = true;
-               if (ttmc_path == TTMcStorageMode::Auto &&
-                   supports_tiled[n] &&
-                   !use_tiled[n] &&
-                   !late_runtime_tiled_disabled[n]) {
-                 std::cout << "  late pinned blocked full-SVD fallback unavailable or failed for mode "
-                           << n << ", trying late tiled fallback before iterative GPU fallback\n";
-                 if (tryPromoteModeToTiledAtRuntime(n, ranks_v)) {
-                   auto failed_svd_end = std::chrono::high_resolution_clock::now();
-                   double failed_svd_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                     failed_svd_end - svd_start).count();
-                   svd_time_us[n] += failed_svd_us;
+             bool rescued = false;
+             if (allow_late_tiled_fallback) {
+               std::cout << "  exact top-R full-Gram fallback failed for mode " << n
+                         << ", trying late tiled fallback before iterative GPU fallback\n";
+               if (tryPromoteModeToTiledAtRuntime(n, ranks_v)) {
+                 auto failed_svd_end = std::chrono::high_resolution_clock::now();
+                 double failed_svd_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                   failed_svd_end - svd_start).count();
+                 svd_time_us[n] += failed_svd_us;
 
-                   bool tiled_4d_mode = (order == 4);
-                   if (tiled_4d_mode) {
-                     release_full_mode_state_for_tiled_4d(n);
-                   }
-                   TiledModeUpdateStats tiled_stats = runTiledModeUpdate(
-                     cusolverH, cublasH,
-                     tiled_mode_tiles[n],
-                     tiled_workspace,
-                     d_factor_mats_v.data(),
-                     d_factors[n],
-                     factor_sizes[n],
-                     ranks_v.data(),
-                     order,
-                     (int)coo.dims[n],
-                     tiled_4d_mode,
-                     verbose);
-                   ttmc_time_us[n] += tiled_stats.ttmc_us;
-                   svd_time_us[n] += (tiled_stats.total_us - tiled_stats.ttmc_us);
-                   if (n == 0) {
-                     mode0_core_norm_sq = tiled_stats.core_norm_sq;
-                     mode0_core_ready = true;
-                   }
-                   if (check && iter == 0) {
-                     CHECK_CUDA(cudaMemcpy(factors[n], d_factors[n],
-                       sizeof(scalar_t) * factor_sizes[n], cudaMemcpyDeviceToHost));
-                   }
-                   if (verbose) {
-                     std::cout << "[iter " << iter << " mode " << n
-                               << "] late tiled fallback total: "
-                               << tiled_stats.total_us << " us"
-                               << "  TTMc-only: " << tiled_stats.ttmc_us << " us\n";
-                   }
-                   continue;
+                 bool tiled_4d_mode = (order == 4);
+                 if (tiled_4d_mode) {
+                   release_full_mode_state_for_tiled_4d(n);
                  }
-                 late_runtime_tiled_disabled[n] = true;
+                 TiledModeUpdateStats tiled_stats = runTiledModeUpdate(
+                   cusolverH, cublasH,
+                   tiled_mode_tiles[n],
+                   tiled_workspace,
+                   d_factor_mats_v.data(),
+                   d_factors[n],
+                   factor_sizes[n],
+                   ranks_v.data(),
+                   order,
+                   (int)coo.dims[n],
+                   tiled_4d_mode,
+                   verbose);
+                 ttmc_time_us[n] += tiled_stats.ttmc_us;
+                 svd_time_us[n] += (tiled_stats.total_us - tiled_stats.ttmc_us);
+                 if (n == 0) {
+                   mode0_core_norm_sq = tiled_stats.core_norm_sq;
+                   mode0_core_ready = true;
+                 }
+                 if (check && iter == 0) {
+                   CHECK_CUDA(cudaMemcpy(factors[n], d_factors[n],
+                     sizeof(scalar_t) * factor_sizes[n], cudaMemcpyDeviceToHost));
+                 }
+                 if (verbose) {
+                   std::cout << "[iter " << iter << " mode " << n
+                             << "] late tiled fallback total: "
+                             << tiled_stats.total_us << " us"
+                             << "  TTMc-only: " << tiled_stats.ttmc_us << " us\n";
+                 }
+                 continue;
                }
+               late_runtime_tiled_disabled[n] = true;
+             }
+
+             if (allow_late_pinned_blocked) {
+               std::cout << "  exact top-R full-Gram fallback failed for mode " << n
+                         << ", trying late pinned blocked full-SVD fallback\n";
+               rescued = tryLatePinnedBlockedFullSVDFallback(
+                 cusolverH, cublasH, d_arr_O,
+                 static_cast<int>(M), static_cast<int>(N),
+                 static_cast<int>(ranks[n]), d_factors[n], verbose);
+               if (!rescued) {
+                 late_pinned_blocked_disabled[n] = true;
+               } else {
+                 continue;
+               }
+             }
+
+             if (!rescued) {
                if (allowGpuIterativeEigFallback()) {
-                 std::cout << "  late pinned blocked full-SVD fallback unavailable or failed for mode "
+                 std::cout << "  exact top-R full-Gram fallback rescue chain exhausted for mode "
                            << n;
                  if (late_runtime_tiled_disabled[n] && supports_tiled[n] && !use_tiled[n]) {
                    std::cout << ", disabling late tiled fallback for later iterations";
                  }
-                 std::cout << ", disabling late path 6 for later iterations and retrying ordinary path with iterative GPU fallback enabled\n";
+                 if (late_pinned_blocked_disabled[n] &&
+                     g_enable_pinned_blocked_full_svd &&
+                     !use_tiled[n] &&
+                     static_cast<int>(M) > static_cast<int>(N) &&
+                     static_cast<int>(N) > 0) {
+                   std::cout << ", disabling late path 6 for later iterations";
+                 }
+                 std::cout << " and retrying ordinary path with iterative GPU fallback enabled\n";
                  gpu_truncated_svd_update_factor(
                    cusolverH, cublasH, d_arr_O,
                    static_cast<int>(M), static_cast<int>(N),
