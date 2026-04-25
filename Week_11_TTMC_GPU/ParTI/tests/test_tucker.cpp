@@ -32,6 +32,7 @@ int main(int argc, char const* argv[]) {
     size_t limit = 10;
     std::string output;
     int device = 0;
+    int solve_device = -1;
     Scalar tol = static_cast<Scalar>(1.0e-5);
     int max_iters = 50;
     ParamDefinition defs[] = {
@@ -42,6 +43,7 @@ int main(int argc, char const* argv[]) {
         { "-o",             PARAM_STRING, { &output } },
         { "--output",       PARAM_STRING, { &output } },
         { "--dev",          PARAM_INT,    { &device } },
+        { "--solve-dev",    PARAM_INT,    { &solve_device } },
         { "-t",             PARAM_SCALAR, { &tol } },
         { "--tol",          PARAM_SCALAR, { &tol } },
         { "-m",             PARAM_INT,    { &max_iters } },
@@ -57,6 +59,7 @@ int main(int argc, char const* argv[]) {
         std::printf("\t-l, --limit\t\tLimit the number of elements to print [Default: 10].\n");
         std::printf("\t-o, --output\t\tWrite the result to a file\n");
         std::printf("\t--dev\t\tComputing device\n");
+        std::printf("\t--solve-dev\t\tDevice used only for factor solves [Default: same as --dev].\n");
         std::printf("\t-t, --tol\t\tConvergence tolerance [Default: 1e-5].\n");
         std::printf("\t-m, --max-iters\t\tMaximum HOOI iterations [Default: 50].\n");
         std::printf("\n");
@@ -71,6 +74,20 @@ int main(int argc, char const* argv[]) {
         std::printf("Using CPU for calculation.\n");
     } else {
         std::printf("Unknown device type.\n");
+        return 1;
+    }
+
+    if(solve_device >= 0 && static_cast<size_t>(solve_device) >= session.devices.size()) {
+        std::printf("Invalid solve device id.\n");
+        return 1;
+    }
+    Device* solve_dev = (solve_device >= 0) ? session.devices[solve_device] : dev;
+    if(dynamic_cast<CudaDevice*>(solve_dev) != nullptr) {
+        std::printf("Using CUDA for factor solves.\n");
+    } else if(dynamic_cast<CpuDevice*>(solve_dev) != nullptr) {
+        std::printf("Using CPU for factor solves.\n");
+    } else {
+        std::printf("Unknown solve device type.\n");
         return 1;
     }
 
@@ -100,7 +117,7 @@ int main(int argc, char const* argv[]) {
     Timer timer_tucker(cpu);
     timer_tucker.start();
     SparseTensor Y = tucker_decomposition(
-        X, R.get(), dimorder.get(), dev, TUCKER_INIT_NVECS,
+        X, R.get(), dimorder.get(), dev, solve_dev, TUCKER_INIT_NVECS,
         static_cast<double>(tol), static_cast<unsigned>(max_iters));
     timer_tucker.stop();
     timer_tucker.print_elapsed_time("Tucker Decomp");

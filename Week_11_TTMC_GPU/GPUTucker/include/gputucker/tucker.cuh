@@ -26,6 +26,99 @@ namespace gputucker {
 
 namespace {
 
+struct FactorFilePayload {
+  uint64_t rows{0};
+  uint64_t cols{0};
+  std::vector<float> values;
+};
+
+inline FactorFilePayload ReadFactorFileFloat32(const std::string &path,
+                                               uint64_t expected_rows,
+                                               uint64_t max_cols) {
+  std::ifstream fin(path, std::ios::binary);
+  if (!fin) {
+    throw std::runtime_error("cannot open factors file: " + path);
+  }
+
+  fin.seekg(0, std::ios::end);
+  const std::streamsize file_size = fin.tellg();
+  fin.seekg(0, std::ios::beg);
+  if (file_size < 0) {
+    throw std::runtime_error("cannot stat factors file: " + path);
+  }
+
+  const std::streamsize bytes_per_row =
+      static_cast<std::streamsize>(expected_rows * sizeof(float));
+
+  auto read_values = [&](uint64_t rows, uint64_t cols, std::streamsize offset) {
+    FactorFilePayload payload;
+    payload.rows = rows;
+    payload.cols = cols;
+    payload.values.resize(static_cast<size_t>(rows * cols));
+    fin.seekg(offset, std::ios::beg);
+    fin.read(reinterpret_cast<char *>(payload.values.data()),
+             static_cast<std::streamsize>(payload.values.size() * sizeof(float)));
+    if (!fin) {
+      throw std::runtime_error("short read on factors file: " + path);
+    }
+    return payload;
+  };
+
+  if (file_size >= static_cast<std::streamsize>(2 * sizeof(uint64_t))) {
+    uint64_t fr = 0, fc = 0;
+    fin.read(reinterpret_cast<char *>(&fr), sizeof(uint64_t));
+    fin.read(reinterpret_cast<char *>(&fc), sizeof(uint64_t));
+    if (!fin) {
+      throw std::runtime_error("failed to read factors header: " + path);
+    }
+
+    const std::streamsize header_bytes =
+        static_cast<std::streamsize>(2 * sizeof(uint64_t) + fr * fc * sizeof(float));
+    if (fr == expected_rows && fc > 0 && fc <= max_cols && header_bytes == file_size) {
+      return read_values(fr, fc, static_cast<std::streamsize>(2 * sizeof(uint64_t)));
+    }
+    fin.clear();
+  }
+
+  if (bytes_per_row <= 0 || file_size % bytes_per_row != 0) {
+    throw std::runtime_error("factor file size mismatch for " + path);
+  }
+
+  const uint64_t inferred_cols = static_cast<uint64_t>(file_size / bytes_per_row);
+  if (inferred_cols == 0 || inferred_cols > max_cols) {
+    throw std::runtime_error("factor column mismatch for " + path);
+  }
+  return read_values(expected_rows, inferred_cols, 0);
+}
+
+template <typename ValueType>
+void OrthonormalizeTrailingColumns(uint64_t rows, uint64_t cols,
+                                   uint64_t start_col, ValueType *A) {
+  for (uint64_t c = start_col; c < cols; ++c) {
+    for (uint64_t k = 0; k < c; ++k) {
+      ValueType dot = 0;
+      for (uint64_t r = 0; r < rows; ++r) {
+        dot += A[r * cols + k] * A[r * cols + c];
+      }
+      for (uint64_t r = 0; r < rows; ++r) {
+        A[r * cols + c] -= dot * A[r * cols + k];
+      }
+    }
+
+    ValueType norm = 0;
+    for (uint64_t r = 0; r < rows; ++r) {
+      norm += A[r * cols + c] * A[r * cols + c];
+    }
+    norm = std::sqrt(norm);
+    if (norm < (ValueType)1e-10) {
+      norm = (ValueType)1;
+    }
+    for (uint64_t r = 0; r < rows; ++r) {
+      A[r * cols + c] /= norm;
+    }
+  }
+}
+
 template <typename ValueType>
 void init_factor_orthonormal(uint64_t rows, uint64_t cols,
                              unsigned int mode_idx, ValueType *A) {
@@ -33,51 +126,33 @@ void init_factor_orthonormal(uint64_t rows, uint64_t cols,
   if (factors_dir && *factors_dir) {
     std::string path = std::string(factors_dir) + "/mode" +
                        std::to_string(mode_idx) + ".bin";
-    std::ifstream fin(path, std::ios::binary);
-    if (!fin) {
-      throw std::runtime_error("cannot open factors file: " + path);
+    FactorFilePayload payload = ReadFactorFileFloat32(path, rows, cols);
+    if (payload.rows != rows || payload.cols == 0 || payload.cols > cols) {
+      throw std::runtime_error("factor shape mismatch for " + path);
     }
 
-    fin.seekg(0, std::ios::end);
-    const std::streamsize file_size = fin.tellg();
-    fin.seekg(0, std::ios::beg);
-
-    const std::streamsize raw_bytes =
-        static_cast<std::streamsize>(rows * cols * sizeof(float));
-    const std::streamsize header_bytes =
-        static_cast<std::streamsize>(2 * sizeof(uint64_t) + rows * cols * sizeof(float));
-
-    std::vector<float> buf(rows * cols);
-    if (file_size == raw_bytes) {
-      fin.read(reinterpret_cast<char *>(buf.data()), raw_bytes);
-    } else if (file_size == header_bytes) {
-      uint64_t fr = 0, fc = 0;
-      fin.read(reinterpret_cast<char *>(&fr), sizeof(uint64_t));
-      fin.read(reinterpret_cast<char *>(&fc), sizeof(uint64_t));
-      if (fr != rows || fc != cols) {
-        throw std::runtime_error("factor shape mismatch for " + path +
-                                 " (got " + std::to_string(fr) + "x" +
-                                 std::to_string(fc) + ", expected " +
-                                 std::to_string(rows) + "x" +
-                                 std::to_string(cols) + ")");
+    const uint64_t load_cols = payload.cols;
+    for (uint64_t r = 0; r < rows; ++r) {
+      for (uint64_t c = 0; c < load_cols; ++c) {
+        A[r * cols + c] =
+            static_cast<ValueType>(payload.values[r * load_cols + c]);
       }
-      fin.read(reinterpret_cast<char *>(buf.data()), raw_bytes);
+    }
+    if (load_cols < cols) {
+      std::mt19937 gen(42 + mode_idx);
+      std::normal_distribution<ValueType> dist((ValueType)0, (ValueType)1);
+      for (uint64_t c = load_cols; c < cols; ++c) {
+        for (uint64_t r = 0; r < rows; ++r) {
+          A[r * cols + c] = dist(gen);
+        }
+      }
+      OrthonormalizeTrailingColumns(rows, cols, load_cols, A);
+      std::cout << "[factors] loaded " << path << " (" << rows << " x "
+                << load_cols << ") and extended to " << cols << " cols\n";
     } else {
-      throw std::runtime_error(
-          "factor file size mismatch for " + path + " (got " +
-          std::to_string(file_size) + " bytes, expected raw " +
-          std::to_string(raw_bytes) + " or headered " +
-          std::to_string(header_bytes) + ")");
+      std::cout << "[factors] loaded " << path << " (" << rows << " x "
+                << cols << ")\n";
     }
-    if (!fin) {
-      throw std::runtime_error("short read on factors file: " + path);
-    }
-
-    for (uint64_t i = 0; i < rows * cols; ++i) {
-      A[i] = static_cast<ValueType>(buf[i]);
-    }
-    std::cout << "[factors] loaded " << path << " (" << rows << " x " << cols
-              << ")\n";
     return;
   }
 

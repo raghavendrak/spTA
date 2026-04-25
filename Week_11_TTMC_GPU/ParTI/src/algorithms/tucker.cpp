@@ -45,6 +45,107 @@ namespace pti {
 
 namespace {
 
+struct FactorFilePayload {
+    uint64_t rows{0};
+    uint64_t cols{0};
+    std::vector<float> values;
+};
+
+FactorFilePayload read_factor_file_float32(
+    const std::string& path,
+    size_t expected_rows,
+    size_t max_cols
+) {
+    std::ifstream fin(path, std::ios::binary);
+    ptiCheckError(!fin, ERR_UNKNOWN, ("cannot open factors file: " + path).c_str());
+
+    fin.seekg(0, std::ios::end);
+    const std::streamsize file_size = fin.tellg();
+    fin.seekg(0, std::ios::beg);
+    ptiCheckError(file_size < 0, ERR_UNKNOWN, ("cannot stat factors file: " + path).c_str());
+
+    const std::streamsize bytes_per_row =
+        static_cast<std::streamsize>(expected_rows * sizeof(float));
+
+    auto read_values = [&](uint64_t rows, uint64_t cols, std::streamsize offset) {
+        FactorFilePayload payload;
+        payload.rows = rows;
+        payload.cols = cols;
+        payload.values.resize(static_cast<size_t>(rows * cols));
+        fin.seekg(offset, std::ios::beg);
+        fin.read(reinterpret_cast<char*>(payload.values.data()),
+                 static_cast<std::streamsize>(payload.values.size() * sizeof(float)));
+        ptiCheckError(!fin, ERR_UNKNOWN, ("short read on factors file: " + path).c_str());
+        return payload;
+    };
+
+    if(file_size >= static_cast<std::streamsize>(2 * sizeof(uint64_t))) {
+        uint64_t fr = 0, fc = 0;
+        fin.read(reinterpret_cast<char*>(&fr), sizeof(uint64_t));
+        fin.read(reinterpret_cast<char*>(&fc), sizeof(uint64_t));
+        ptiCheckError(!fin, ERR_UNKNOWN, ("failed to read factors header: " + path).c_str());
+
+        const std::streamsize header_bytes =
+            static_cast<std::streamsize>(2 * sizeof(uint64_t) + fr * fc * sizeof(float));
+        if(fr == expected_rows &&
+           fc > 0 &&
+           fc <= max_cols &&
+           header_bytes == file_size) {
+            return read_values(fr, fc, static_cast<std::streamsize>(2 * sizeof(uint64_t)));
+        }
+        fin.clear();
+    }
+
+    ptiCheckError(bytes_per_row <= 0 || file_size % bytes_per_row != 0,
+                  ERR_SHAPE_MISMATCH,
+                  ("factor file size mismatch for " + path).c_str());
+
+    const uint64_t inferred_cols = static_cast<uint64_t>(file_size / bytes_per_row);
+    ptiCheckError(inferred_cols == 0 || inferred_cols > max_cols,
+                  ERR_SHAPE_MISMATCH,
+                  ("factor column mismatch for " + path).c_str());
+
+    return read_values(static_cast<uint64_t>(expected_rows), inferred_cols, 0);
+}
+
+template <typename Scalar>
+void extend_factor_columns(
+    Scalar *temp,
+    size_t rows,
+    size_t stride,
+    size_t start_col,
+    size_t end_col,
+    unsigned mode_idx
+) {
+    std::mt19937 gen(42 + static_cast<unsigned>(mode_idx));
+    std::normal_distribution<Scalar> dist((Scalar)0, (Scalar)1);
+    for(size_t c = start_col; c < end_col; ++c) {
+        for(size_t r = 0; r < rows; ++r) {
+            temp[r * stride + c] = dist(gen);
+        }
+        for(size_t k = 0; k < c; ++k) {
+            Scalar dot = 0;
+            for(size_t r = 0; r < rows; ++r) {
+                dot += temp[r * stride + k] * temp[r * stride + c];
+            }
+            for(size_t r = 0; r < rows; ++r) {
+                temp[r * stride + c] -= dot * temp[r * stride + k];
+            }
+        }
+        Scalar norm = 0;
+        for(size_t r = 0; r < rows; ++r) {
+            norm += temp[r * stride + c] * temp[r * stride + c];
+        }
+        norm = std::sqrt(norm);
+        if(norm < (Scalar)1e-10) norm = (Scalar)1;
+        for(size_t r = 0; r < rows; ++r) {
+            temp[r * stride + c] /= norm;
+        }
+    }
+}
+
+} // namespace
+
 void init_factor_orthonormal(
     Tensor&   mtx,
     size_t    mode_idx
@@ -63,25 +164,27 @@ void init_factor_orthonormal(
 
     const char* factors_dir = std::getenv("TUCKER_FACTORS_DIR");
     if(factors_dir && *factors_dir) {
-        // Read a precomputed I_n x R_n float32 matrix from <dir>/mode<n>.bin
-        // File format: [uint64 rows][uint64 cols][float32 data row-major]
         std::string path = std::string(factors_dir) + "/mode" + std::to_string(mode_idx) + ".bin";
-        std::ifstream fin(path, std::ios::binary);
-        ptiCheckError(!fin, ERR_UNKNOWN, ("cannot open factors file: " + path).c_str());
-
-        uint64_t fr = 0, fc = 0;
-        fin.read(reinterpret_cast<char*>(&fr), sizeof(uint64_t));
-        fin.read(reinterpret_cast<char*>(&fc), sizeof(uint64_t));
-        ptiCheckError(fr != I_n || fc != R_n, ERR_SHAPE_MISMATCH,
+        FactorFilePayload payload = read_factor_file_float32(path, I_n, R_n);
+        ptiCheckError(payload.rows != I_n || payload.cols == 0 || payload.cols > R_n,
+                      ERR_SHAPE_MISMATCH,
                       ("factor shape mismatch for " + path).c_str());
 
-        std::vector<float> buf(I_n * R_n);
-        fin.read(reinterpret_cast<char*>(buf.data()),
-                 sizeof(float) * static_cast<std::streamsize>(buf.size()));
-        ptiCheckError(!fin, ERR_UNKNOWN, ("short read on factors file: " + path).c_str());
-
-        for(size_t i = 0; i < I_n * R_n; ++i) temp[i] = static_cast<Scalar>(buf[i]);
-        std::printf("[factors] loaded %s (%zu x %zu)\n", path.c_str(), I_n, R_n);
+        const size_t load_cols = static_cast<size_t>(payload.cols);
+        for(size_t r = 0; r < I_n; ++r) {
+            for(size_t c = 0; c < load_cols; ++c) {
+                temp[r * R_n + c] =
+                    static_cast<Scalar>(payload.values[r * load_cols + c]);
+            }
+        }
+        if(load_cols < R_n) {
+            extend_factor_columns(temp.get(), I_n, R_n, load_cols, R_n,
+                                  static_cast<unsigned>(mode_idx));
+            std::printf("[factors] loaded %s (%zu x %zu) and extended to %zu cols\n",
+                        path.c_str(), I_n, load_cols, R_n);
+        } else {
+            std::printf("[factors] loaded %s (%zu x %zu)\n", path.c_str(), I_n, R_n);
+        }
     } else {
         std::mt19937 gen(42 + static_cast<unsigned>(mode_idx));
         std::normal_distribution<Scalar> dist((Scalar)0, (Scalar)1);
@@ -153,18 +256,21 @@ Tensor nvecs(
 
 }
 
-}
-
 SparseTensor tucker_decomposition(
     SparseTensor&   X,
     size_t const    R[],
     size_t const    dimorder[],
     Device*         device,
+    Device*         solve_device,
     enum tucker_decomposition_init_type init,
     double          tol,
     unsigned        maxiters
 ) {
     ptiCheckError(X.dense_order.size() != 0, ERR_SHAPE_MISMATCH, "X should be fully sparse");
+
+    if(solve_device == nullptr) {
+        solve_device = device;
+    }
 
     size_t N = X.nmodes;
     double normX = X.norm(device);
@@ -261,14 +367,14 @@ SparseTensor tucker_decomposition(
                 }
             }
 
-            Timer timer_svd(device->device_id);
+            Timer timer_svd(solve_device->device_id);
             timer_svd.start();
             // Mode n is sparse, while other modes are dense
-            U[n] = nvecs(*Utilde, n, R_cap[n], device);
+            U[n] = nvecs(*Utilde, n, R_cap[n], solve_device);
             timer_svd.stop();
             timer_svd.print_elapsed_time("SVD");
 
-            transpose_matrix_inplace(U[n], true, false, device);
+            transpose_matrix_inplace(U[n], true, false, solve_device);
         }   // End loop of nmodes
         timer_loop.stop();
         timer_loop.print_elapsed_time("Tucker Decomp Loop");

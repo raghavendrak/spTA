@@ -121,6 +121,7 @@ SparseTensor tucker_decomposition(
     size_t const R[],
     size_t const dimorder[],
     Device* device,
+    Device* solve_device = nullptr,
     enum tucker_decomposition_init_type init = TUCKER_INIT_NVECS,
     double tol = 1.0e-9,
     unsigned maxiters = 50
