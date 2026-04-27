@@ -131,6 +131,16 @@ struct ExactTopRFullGramFallbackFailed : public std::runtime_error {
     : std::runtime_error("Exact top-R full-Gram fallback failed") {}
 };
 
+struct ExactTopRResolutionFailed : public std::runtime_error {
+  ExactTopRResolutionFailed()
+    : std::runtime_error("Exact top-R full-Gram resolution failed") {}
+};
+
+struct TiledGramResolutionFailed : public std::runtime_error {
+  TiledGramResolutionFailed()
+    : std::runtime_error("Tiled Gram resolution failed") {}
+};
+
 static bool g_force_gpu_iterative_eig = false;
 static bool g_allow_gpu_iterative_eig_fallback = false;
 static bool g_enable_pinned_blocked_full_svd = false;
@@ -289,6 +299,9 @@ static void gpu_truncated_svd_update_factor_pinned_blocked(
   PinnedBlockedFullSVDWorkspace& ws,
   bool verbose);
 
+void gpu_full_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_t cublasH,
+  scalar_t* d_A, int M, int N, int R, scalar_t* d_factor, bool verbose);
+
 static bool tryLatePinnedBlockedFullSVDFallback(
   cusolverDnHandle_t cusolverH,
   cublasHandle_t cublasH,
@@ -416,6 +429,33 @@ static bool tryLatePinnedBlockedFullSVDFallback(
 
   freePinnedBlockedFullSVDWorkspace(ws);
   return true;
+}
+
+static void runSVdStyleRescueFromFullMatrix(
+  cusolverDnHandle_t cusolverH,
+  cublasHandle_t cublasH,
+  scalar_t* d_A,
+  int M,
+  int N,
+  int R,
+  scalar_t* d_factor,
+  bool verbose)
+{
+  bool rescued = false;
+  if (g_enable_pinned_blocked_full_svd && !forceGpuIterativeEig() &&
+      M > N && N > 0) {
+    if (verbose) {
+      std::cout << "  trying SVD-style rescue via late pinned blocked full-SVD\n";
+    }
+    rescued = tryLatePinnedBlockedFullSVDFallback(
+      cusolverH, cublasH, d_A, M, N, R, d_factor, verbose);
+  }
+  if (!rescued) {
+    if (verbose) {
+      std::cout << "  trying SVD-style rescue via regular full SVD\n";
+    }
+    gpu_full_svd_update_factor(cusolverH, cublasH, d_A, M, N, R, d_factor, verbose);
+  }
 }
 #endif
 
@@ -1815,8 +1855,10 @@ static bool solveTopREigensystemDpExact(
   scalar_t** d_VR_out,
   scalar_t** d_inv_sigma_out,
   double* core_norm_sq_out,
+  bool* resolution_failed_out,
   bool verbose)
 {
+  if (resolution_failed_out) *resolution_failed_out = false;
   if (d_VR_out) *d_VR_out = nullptr;
   if (d_inv_sigma_out) *d_inv_sigma_out = nullptr;
   if (core_norm_sq_out) *core_norm_sq_out = 0.0;
@@ -1936,6 +1978,7 @@ static bool solveTopREigensystemDpExact(
     sizeof(double) * rank,
     cudaMemcpyDeviceToHost));
   if (!topREigenvaluesPassResolutionHost(h_top, c, trace)) {
+    if (resolution_failed_out) *resolution_failed_out = true;
     if (verbose) {
       std::cout << "  exact top-R eigensolver resolution check failed among top-" << rank
                 << " eigenvalues\n";
@@ -2114,8 +2157,10 @@ static bool solveTopREigensystemDpIterativeGpu(
   scalar_t** d_VR_out,
   scalar_t** d_inv_sigma_out,
   double* core_norm_sq_out,
+  bool* resolution_failed_out,
   bool verbose)
 {
+  if (resolution_failed_out) *resolution_failed_out = false;
   if (d_VR_out) *d_VR_out = nullptr;
   if (d_inv_sigma_out) *d_inv_sigma_out = nullptr;
   if (core_norm_sq_out) *core_norm_sq_out = 0.0;
@@ -2181,6 +2226,7 @@ static bool solveTopREigensystemDpIterativeGpu(
   std::vector<double> h_top(rank);
   for (int j = 0; j < rank; ++j) h_top[j] = h_eval[k - rank + j];
   if (!topREigenvaluesPassResolutionHost(h_top, c, trace)) {
+    if (resolution_failed_out) *resolution_failed_out = true;
     if (verbose) {
       std::cout << "  iterative GPU eigensolver resolution check failed among top-" << rank
                 << " eigenvalues\n";
@@ -2551,6 +2597,9 @@ void gpu_full_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_t cub
 void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_t cublasH,
   scalar_t* d_A, int M, int N, int R, scalar_t* d_factor, bool verbose,
   bool allow_iterative_after_exact = true) {
+#if !SCALAR_DOUBLE
+   (void)allow_iterative_after_exact;
+#endif
    scalar_t alpha = (scalar_t)1, beta = (scalar_t)0;
    int K = std::min(M, N);
    R = std::min(R, K);
@@ -2824,7 +2873,7 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
      double *d_W_dp;
      CHECK_CUDA(cudaMalloc(&d_W_dp, sizeof(double) * N));
      int lwork = 0;
-     bool used_topr_solver = forceGpuIterativeEig();
+     bool used_topr_solver = false;
      scalar_t* d_V_R = nullptr;
      scalar_t* d_diag = nullptr;
      double* d_work_dp = nullptr;
@@ -2839,9 +2888,9 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
          if (verbose) {
            std::cout << "  full eigensolver bufferSize failed with status="
                      << cusolverStatusString(full_st)
-                     << ", trying exact top-R eigensolver\n";
-         }
-         used_topr_solver = true;
+                     << ", deferring to late tiled fallback\n";
+          }
+          used_topr_solver = true;
        } else {
          cudaEventRecord(ev_start);
          cudaError_t work_err = cudaMalloc(&d_work_dp, sizeof(double) * std::max(lwork, 1));
@@ -2849,7 +2898,7 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
            cudaGetLastError();
            used_topr_solver = true;
            if (verbose) {
-             std::cout << "  full eigensolver work alloc failed, trying exact top-R eigensolver\n";
+             std::cout << "  full eigensolver work alloc failed, deferring to late tiled fallback\n";
            }
          } else {
            CHECK_CUDA(cudaMalloc(&d_info, sizeof(int)));
@@ -2868,7 +2917,7 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
              if (verbose) {
                std::cout << "  full eigensolver failed with status="
                          << cusolverStatusString(full_st)
-                         << ", trying exact top-R eigensolver\n";
+                         << ", deferring to late tiled fallback\n";
              }
              CHECK_CUDA(cudaFree(d_work_dp));
              d_work_dp = nullptr;
@@ -2878,10 +2927,12 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
            }
          }
        }
-     } else if (verbose) {
-       if (forceGpuIterativeEig()) {
-         std::cout << "  exact top-R eigensolver forced to iterative GPU fallback\n";
-       }
+     }
+
+     if (used_topr_solver) {
+       CHECK_CUDA(cudaFree(d_Gram_dp));
+       CHECK_CUDA(cudaFree(d_W_dp));
+       throw ExactTopRFullGramFallbackFailed();
      }
 
      if (!used_topr_solver) {
@@ -2914,33 +2965,6 @@ void gpu_truncated_svd_update_factor(cusolverDnHandle_t cusolverH, cublasHandle_
        convert_dp_to_scalar<<<((long long)N*R + 255)/256, 256>>>(d_V_R_dp, d_V_R, N * R);
        CHECK_CUDA(cudaMalloc(&d_diag, sizeof(scalar_t) * R));
        compute_inv_sigma_dp<<<(R+255)/256, 256>>>(d_W_dp, d_diag, N, R, 1e-12);
-     } else {
-       CHECK_CUDA(cudaFree(d_W_dp));
-       d_W_dp = nullptr;
-       bool top_r_ok = false;
-       if (forceGpuIterativeEig()) {
-         top_r_ok = solveTopREigensystemDpIterativeGpu(
-           cusolverH, cublasH, d_Gram_dp, N, R, M + N, traceATA,
-           &d_V_R, &d_diag, nullptr, verbose);
-       } else {
-         top_r_ok = solveTopREigensystemDpExact(
-           cusolverH, d_Gram_dp, N, R, M + N, traceATA,
-           &d_V_R, &d_diag, nullptr, verbose);
-         if (!top_r_ok &&
-             allow_iterative_after_exact &&
-             allowGpuIterativeEigFallback()) {
-           if (verbose) {
-             std::cout << "  exact GPU top-R eigensolver failed, trying iterative GPU fallback\n";
-           }
-           top_r_ok = solveTopREigensystemDpIterativeGpu(
-             cusolverH, cublasH, d_Gram_dp, N, R, M + N, traceATA,
-             &d_V_R, &d_diag, nullptr, verbose);
-         }
-       }
-       if (!top_r_ok) {
-         CHECK_CUDA(cudaFree(d_Gram_dp));
-         throw ExactTopRFullGramFallbackFailed();
-       }
      }
      CHECK_CUDA(cudaGetLastError());
 
@@ -4074,8 +4098,10 @@ static bool solveTallGramEigensystem(
   int cols,
   int rank,
   TiledGramSVDResult& result,
+  bool* resolution_failed_out,
   bool verbose)
 {
+  if (resolution_failed_out) *resolution_failed_out = false;
   rank = std::min(rank, cols);
   result.cols = cols;
   result.rank = rank;
@@ -4115,6 +4141,7 @@ static bool solveTallGramEigensystem(
   if (h_info != 0) {
     if (verbose)
       std::cout << "  tiled Gram resolution check failed; full fallback is unavailable in tiled mode\n";
+    if (resolution_failed_out) *resolution_failed_out = true;
     CHECK_CUDA(cudaFree(d_W));
     CHECK_CUDA(cudaFree(d_work));
     CHECK_CUDA(cudaFree(d_info));
@@ -4213,14 +4240,15 @@ static bool solveTallGramEigensystem(
     CHECK_CUDA(cudaMemset(d_info, 0, sizeof(int)));
     if (rank > 1)
       check_resolution_dp<<<1, rank - 1>>>(d_W, M_total + cols, cols, rank, eps_mach_dp, d_info, traceATA);
-    CHECK_CUDA(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
-    if (h_info != 0) {
-      if (verbose)
-        std::cout << "  tiled Gram resolution check failed; full fallback is unavailable in tiled mode\n";
-      CHECK_CUDA(cudaFree(d_W));
-      CHECK_CUDA(cudaFree(d_work));
-      CHECK_CUDA(cudaFree(d_info));
-      return false;
+     CHECK_CUDA(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
+     if (h_info != 0) {
+       if (verbose)
+         std::cout << "  tiled Gram resolution check failed; full fallback is unavailable in tiled mode\n";
+       if (resolution_failed_out) *resolution_failed_out = true;
+       CHECK_CUDA(cudaFree(d_W));
+       CHECK_CUDA(cudaFree(d_work));
+       CHECK_CUDA(cudaFree(d_info));
+       return false;
     }
 
     std::vector<double> h_top(rank);
@@ -4249,24 +4277,33 @@ static bool solveTallGramEigensystem(
     CHECK_CUDA(cudaFree(d_W));
     d_W = nullptr;
     bool top_r_ok = false;
+    bool top_r_resolution_failed = false;
     if (forceGpuIterativeEig()) {
       top_r_ok = solveTopREigensystemDpIterativeGpu(
         cusolverH, cublasH, d_gram, cols, rank, M_total + cols, traceATA,
-        &result.d_VR, &result.d_inv_sigma, &result.core_norm_sq, verbose);
+        &result.d_VR, &result.d_inv_sigma, &result.core_norm_sq,
+        &top_r_resolution_failed, verbose);
     } else {
       top_r_ok = solveTopREigensystemDpExact(
         cusolverH, d_gram, cols, rank, M_total + cols, traceATA,
-        &result.d_VR, &result.d_inv_sigma, &result.core_norm_sq, verbose);
-      if (!top_r_ok && allowGpuIterativeEigFallback()) {
+        &result.d_VR, &result.d_inv_sigma, &result.core_norm_sq,
+        &top_r_resolution_failed, verbose);
+      if (!top_r_ok && !top_r_resolution_failed && allowGpuIterativeEigFallback()) {
         if (verbose) {
           std::cout << "  exact GPU top-R eigensolver failed in tiled path, trying iterative GPU fallback\n";
         }
+        bool iterative_resolution_failed = false;
         top_r_ok = solveTopREigensystemDpIterativeGpu(
           cusolverH, cublasH, d_gram, cols, rank, M_total + cols, traceATA,
-          &result.d_VR, &result.d_inv_sigma, &result.core_norm_sq, verbose);
+          &result.d_VR, &result.d_inv_sigma, &result.core_norm_sq,
+          &iterative_resolution_failed, verbose);
+        top_r_resolution_failed = top_r_resolution_failed || iterative_resolution_failed;
       }
     }
     if (!top_r_ok) {
+      if (top_r_resolution_failed && resolution_failed_out) {
+        *resolution_failed_out = true;
+      }
       if (d_work) CHECK_CUDA(cudaFree(d_work));
       if (d_info) CHECK_CUDA(cudaFree(d_info));
       return false;
@@ -4347,12 +4384,18 @@ static TiledModeUpdateStats runTiledModeUpdate(
   }
 
   TiledGramSVDResult svd_result;
-  if (!solveTallGramEigensystem(cusolverH, cublasH, d_gram, M_total, cols, rank, svd_result, verbose)) {
+  bool tiled_resolution_failed = false;
+  if (!solveTallGramEigensystem(
+        cusolverH, cublasH, d_gram, M_total, cols, rank, svd_result,
+        &tiled_resolution_failed, verbose)) {
 #if SCALAR_DOUBLE
     CHECK_CUDA(cudaFree(d_gram));
 #else
     CHECK_CUDA(cudaFree(d_gram));
 #endif
+    if (tiled_resolution_failed) {
+      throw TiledGramResolutionFailed();
+    }
     throw std::runtime_error("Tiled Gram eigensolve failed; full fallback is unavailable in tiled mode.");
   }
 
@@ -4946,7 +4989,6 @@ static TiledModeUpdateStats runTiledModeUpdate(
      int iter;
      std::vector<double> ttmc_time_us(order, 0.0);
      std::vector<double> svd_time_us(order, 0.0);
-     std::vector<bool> late_pinned_blocked_disabled(order, false);
      std::vector<bool> late_runtime_tiled_disabled(order, false);
      scalar_t input_tsr_norm = std::sqrt(
        frobenius_norm_sq_sparse(coo.values.data(), coo.values.size()));
@@ -5151,6 +5193,97 @@ static TiledModeUpdateStats runTiledModeUpdate(
        return true;
      };
 
+     auto trySVDStyleRescueForMode = [&](int n,
+                                         const CSFCopy& csf,
+                                         const std::vector<uint64_t>& ranks_v,
+                                         const std::vector<scalar_t*>& d_factor_mats_v,
+                                         uint64_t arr_O_size,
+                                         uint64_t M,
+                                         uint64_t N,
+                                         double& ttmc_us_accum,
+                                         double& svd_us_accum,
+                                         bool full_y_already_materialized,
+                                         double* mode0_core_norm_sq_out,
+                                         bool* mode0_core_ready_out) -> bool {
+       scalar_t* d_rescue_A = nullptr;
+       bool allocated_full_y = false;
+       double local_ttmc_us = 0.0;
+       auto rescue_start = std::chrono::high_resolution_clock::now();
+
+       if (full_y_already_materialized && d_arr_O != nullptr) {
+         d_rescue_A = d_arr_O;
+       } else {
+         prepare_full_mode_cache(n, ranks_v);
+         cudaError_t alloc_err = cudaMalloc(&d_rescue_A, sizeof(scalar_t) * arr_O_size);
+         if (alloc_err != cudaSuccess) {
+           cudaGetLastError();
+           if (verbose) {
+             std::cout << "  SVD-style rescue full-Y materialization alloc failed for mode "
+                       << n << "\n";
+           }
+           return false;
+         }
+         allocated_full_y = true;
+         auto ttmc_start = std::chrono::high_resolution_clock::now();
+         run_ttmc_cuda(
+           const_cast<uint64_t**>(csf.d_ptrs.data()),
+           const_cast<uint64_t**>(csf.d_idxs.data()),
+           csf.d_values,
+           const_cast<scalar_t**>(d_factor_mats_v.data()),
+           d_rescue_A, arr_O_size, /*ncm=*/0,
+           const_cast<uint64_t*>(ranks_v.data()), order,
+           ttmc_caches[n],
+           /*log_method=*/verbose);
+         auto ttmc_end = std::chrono::high_resolution_clock::now();
+         local_ttmc_us = std::chrono::duration_cast<std::chrono::microseconds>(
+           ttmc_end - ttmc_start).count();
+       }
+
+       try {
+         runSVdStyleRescueFromFullMatrix(
+           cusolverH, cublasH, d_rescue_A,
+           static_cast<int>(M), static_cast<int>(N),
+           static_cast<int>(ranks[n]), d_factors[n], verbose);
+
+         if (n == 0 && mode0_core_norm_sq_out && mode0_core_ready_out) {
+           scalar_t* d_core_tmp = nullptr;
+           scalar_t core_norm = (scalar_t)0;
+           scalar_t gemm_alpha = (scalar_t)1;
+           scalar_t gemm_beta = (scalar_t)0;
+           const uint64_t core_elems = (uint64_t)ranks[n] * N;
+           CHECK_CUDA(cudaMalloc(&d_core_tmp, sizeof(scalar_t) * core_elems));
+           CHECK_CUBLAS(cublasGemmT(
+             cublasH, CUBLAS_OP_N, CUBLAS_OP_T,
+             (int)N, (int)ranks[n], (int)M,
+             &gemm_alpha,
+             d_rescue_A, (int)N,
+             d_factors[n], (int)ranks[n],
+             &gemm_beta, d_core_tmp, (int)N));
+           CHECK_CUBLAS(cublasNrm2T(cublasH, (int)core_elems, d_core_tmp, 1, &core_norm));
+           CHECK_CUDA(cudaFree(d_core_tmp));
+           *mode0_core_norm_sq_out = (double)core_norm * (double)core_norm;
+           *mode0_core_ready_out = true;
+         }
+       } catch (...) {
+         if (allocated_full_y && d_rescue_A) {
+           cudaFree(d_rescue_A);
+           d_rescue_A = nullptr;
+         }
+         throw;
+       }
+
+       auto rescue_end = std::chrono::high_resolution_clock::now();
+       double total_us = std::chrono::duration_cast<std::chrono::microseconds>(
+         rescue_end - rescue_start).count();
+       ttmc_us_accum += local_ttmc_us;
+       svd_us_accum += (total_us - local_ttmc_us);
+
+       if (allocated_full_y) {
+         CHECK_CUDA(cudaFree(d_rescue_A));
+       }
+       return true;
+     };
+
      for (iter = 0; iter < max_iters; iter++) {
        auto iter_start = std::chrono::high_resolution_clock::now();
        double mode0_core_norm_sq = 0.0;
@@ -5206,28 +5339,19 @@ static TiledModeUpdateStats runTiledModeUpdate(
              supports_tiled[n] &&
              !use_tiled[n] &&
              !late_runtime_tiled_disabled[n];
-           const bool allow_late_pinned_blocked =
-             g_enable_pinned_blocked_full_svd &&
-             !forceGpuIterativeEig() &&
-             !use_tiled[n] &&
-             !late_pinned_blocked_disabled[n] &&
-             static_cast<int>(M) > static_cast<int>(N) &&
-             static_cast<int>(N) > 0;
-           const bool allow_post_exact_rescue =
-             allow_late_tiled_fallback || allow_late_pinned_blocked;
            try {
              gpu_truncated_svd_update_factor(
                cusolverH, cublasH, d_arr_O,
                static_cast<int>(M), static_cast<int>(N),
                static_cast<int>(ranks[n]), d_factors[n], verbose,
-               /*allow_iterative_after_exact=*/!allow_post_exact_rescue);
+               /*allow_iterative_after_exact=*/false);
            } catch (const ExactTopRFullGramFallbackFailed&) {
-             if (!allow_post_exact_rescue) throw;
+             if (!allow_late_tiled_fallback) throw;
 
              bool rescued = false;
              if (allow_late_tiled_fallback) {
-               std::cout << "  exact top-R full-Gram fallback failed for mode " << n
-                         << ", trying late tiled fallback before iterative GPU fallback\n";
+               std::cout << "  full-Gram eigensolver failed for mode " << n
+                         << ", trying late tiled fallback\n";
                if (tryPromoteModeToTiledAtRuntime(n, ranks_v)) {
                  auto failed_svd_end = std::chrono::high_resolution_clock::now();
                  double failed_svd_us = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -5238,21 +5362,43 @@ static TiledModeUpdateStats runTiledModeUpdate(
                  if (tiled_4d_mode) {
                    release_full_mode_state_for_tiled_4d(n);
                  }
-                 TiledModeUpdateStats tiled_stats = runTiledModeUpdate(
-                   cusolverH, cublasH,
-                   tiled_mode_tiles[n],
-                   tiled_workspace,
-                   d_factor_mats_v.data(),
-                   d_factors[n],
-                   factor_sizes[n],
-                   ranks_v.data(),
-                   order,
-                   (int)coo.dims[n],
-                   tiled_4d_mode,
-                   verbose);
-                 ttmc_time_us[n] += tiled_stats.ttmc_us;
-                 svd_time_us[n] += (tiled_stats.total_us - tiled_stats.ttmc_us);
-                 if (n == 0) {
+                TiledModeUpdateStats tiled_stats;
+                try {
+                  tiled_stats = runTiledModeUpdate(
+                    cusolverH, cublasH,
+                    tiled_mode_tiles[n],
+                    tiled_workspace,
+                    d_factor_mats_v.data(),
+                    d_factors[n],
+                    factor_sizes[n],
+                    ranks_v.data(),
+                    order,
+                    (int)coo.dims[n],
+                    tiled_4d_mode,
+                    verbose);
+                } catch (const TiledGramResolutionFailed&) {
+                  if (verbose) {
+                    std::cout << "  tiled Gram resolution failed for mode " << n
+                              << ", trying SVD-style rescue\n";
+                  }
+                  bool rescued = trySVDStyleRescueForMode(
+                    n, csf, ranks_v, d_factor_mats_v,
+                    arr_O_size, M, N,
+                    ttmc_time_us[n], svd_time_us[n],
+                    /*full_y_already_materialized=*/(d_arr_O != nullptr),
+                    &mode0_core_norm_sq, &mode0_core_ready);
+                  if (!rescued) {
+                    throw;
+                  }
+                  if (check && iter == 0) {
+                    CHECK_CUDA(cudaMemcpy(factors[n], d_factors[n],
+                      sizeof(scalar_t) * factor_sizes[n], cudaMemcpyDeviceToHost));
+                  }
+                  continue;
+                }
+                ttmc_time_us[n] += tiled_stats.ttmc_us;
+                svd_time_us[n] += (tiled_stats.total_us - tiled_stats.ttmc_us);
+                if (n == 0) {
                    mode0_core_norm_sq = tiled_stats.core_norm_sq;
                    mode0_core_ready = true;
                  }
@@ -5271,43 +5417,8 @@ static TiledModeUpdateStats runTiledModeUpdate(
                late_runtime_tiled_disabled[n] = true;
              }
 
-             if (allow_late_pinned_blocked) {
-               std::cout << "  exact top-R full-Gram fallback failed for mode " << n
-                         << ", trying late pinned blocked full-SVD fallback\n";
-               rescued = tryLatePinnedBlockedFullSVDFallback(
-                 cusolverH, cublasH, d_arr_O,
-                 static_cast<int>(M), static_cast<int>(N),
-                 static_cast<int>(ranks[n]), d_factors[n], verbose);
-               if (!rescued) {
-                 late_pinned_blocked_disabled[n] = true;
-               } else {
-                 continue;
-               }
-             }
-
              if (!rescued) {
-               if (allowGpuIterativeEigFallback()) {
-                 std::cout << "  exact top-R full-Gram fallback rescue chain exhausted for mode "
-                           << n;
-                 if (late_runtime_tiled_disabled[n] && supports_tiled[n] && !use_tiled[n]) {
-                   std::cout << ", disabling late tiled fallback for later iterations";
-                 }
-                 if (late_pinned_blocked_disabled[n] &&
-                     g_enable_pinned_blocked_full_svd &&
-                     !use_tiled[n] &&
-                     static_cast<int>(M) > static_cast<int>(N) &&
-                     static_cast<int>(N) > 0) {
-                   std::cout << ", disabling late path 6 for later iterations";
-                 }
-                 std::cout << " and retrying ordinary path with iterative GPU fallback enabled\n";
-                 gpu_truncated_svd_update_factor(
-                   cusolverH, cublasH, d_arr_O,
-                   static_cast<int>(M), static_cast<int>(N),
-                   static_cast<int>(ranks[n]), d_factors[n], verbose,
-                   /*allow_iterative_after_exact=*/true);
-               } else {
-                 throw;
-               }
+               throw;
              }
            }
 #else
@@ -5335,18 +5446,40 @@ static TiledModeUpdateStats runTiledModeUpdate(
              std::cout << "[iter 0 mode " << n
                        << "] skipping CPU TTMc check in tiled mode because Y is never fully materialized\n";
            }
-           TiledModeUpdateStats tiled_stats = runTiledModeUpdate(
-             cusolverH, cublasH,
-             tiled_mode_tiles[n],
-             tiled_workspace,
-             d_factor_mats_v.data(),
-             d_factors[n],
-             factor_sizes[n],
-             ranks_v.data(),
-             order,
-             (int)coo.dims[n],
-             tiled_4d_mode,
-             verbose);
+           TiledModeUpdateStats tiled_stats;
+           try {
+             tiled_stats = runTiledModeUpdate(
+               cusolverH, cublasH,
+               tiled_mode_tiles[n],
+               tiled_workspace,
+               d_factor_mats_v.data(),
+               d_factors[n],
+               factor_sizes[n],
+               ranks_v.data(),
+               order,
+               (int)coo.dims[n],
+               tiled_4d_mode,
+               verbose);
+           } catch (const TiledGramResolutionFailed&) {
+             if (verbose) {
+               std::cout << "  tiled Gram resolution failed for mode " << n
+                         << ", trying SVD-style rescue\n";
+             }
+             bool rescued = trySVDStyleRescueForMode(
+               n, csf, ranks_v, d_factor_mats_v,
+               arr_O_size, coo.dims[n], rank_products[n],
+               ttmc_time_us[n], svd_time_us[n],
+               /*full_y_already_materialized=*/false,
+               &mode0_core_norm_sq, &mode0_core_ready);
+             if (!rescued) {
+               throw;
+             }
+             if (check && iter == 0) {
+               CHECK_CUDA(cudaMemcpy(factors[n], d_factors[n],
+                 sizeof(scalar_t) * factor_sizes[n], cudaMemcpyDeviceToHost));
+             }
+             continue;
+           }
            ttmc_time_us[n] += tiled_stats.ttmc_us;
            svd_time_us[n] += (tiled_stats.total_us - tiled_stats.ttmc_us);
            if (n == 0) {
