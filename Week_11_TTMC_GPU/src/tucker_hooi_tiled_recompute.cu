@@ -668,6 +668,8 @@ static void runSVdStyleRescueFromFullMatrix(
    int  order            = 0;
    // Path selection
    bool prefer_static        = false;  // 3D: kernel_ttmc3_static_block_per_i
+                                       // 4D: kernel_ttmc4_static_block_per_ij (IntraDyn)
+   bool static4_block_per_i  = false;  // 4D variant: block per cuboid i (zero global atomics)
    bool prefer_tiny_streams  = false;  // 4D: launch_ttmc4_tiny_streams_flat
    // 3D static-block-per-i params
    int    s_block_size = 0;
@@ -722,7 +724,17 @@ static void runSVdStyleRescueFromFullMatrix(
    const scalar_t*, const scalar_t*, const scalar_t*, const scalar_t*,
    scalar_t*, uint32_t, uint32_t, uint32_t,
    const TaskRange*, uint64_t, unsigned long long*);
- 
+ __global__ void kernel_ttmc4_static_block_per_ij(
+   const uint64_t*, const uint64_t*, const uint64_t*,
+   const uint64_t*, const uint64_t*, const uint64_t*, const uint64_t*,
+   const scalar_t*, const scalar_t*, const scalar_t*, const scalar_t*,
+   scalar_t*, uint32_t, uint32_t, uint32_t, uint64_t, int);
+ __global__ void kernel_ttmc4_static_block_per_i(
+   const uint64_t*, const uint64_t*, const uint64_t*,
+   const uint64_t*, const uint64_t*, const uint64_t*, const uint64_t*,
+   const scalar_t*, const scalar_t*, const scalar_t*, const scalar_t*,
+   scalar_t*, uint32_t, uint32_t, uint32_t, int);
+
  // Perform all HOOI-loop-invariant preprocessing for one CSF copy.
  // mode_ptrs[i]  = HOST ptr to ptrs[i]; mode_idxs[i] = HOST ptr to idxs[i]
  // ranks          = CSF-level indexed ranks; factor_sizes = CSF-level indexed factor sizes
@@ -767,7 +779,14 @@ static void runSVdStyleRescueFromFullMatrix(
    if (order == 3 && ncm == 0) {
      bool force_static  = getEnvFlag("TTMC_FORCE_STATIC");
      bool force_dynamic = getEnvFlag("TTMC_FORCE_DYNAMIC");
+
+     auto fiber_stats_start = std::chrono::high_resolution_clock::now();
      FiberStats   stats = analyzeFiberStats(mode_ptrs[1], mode_ptrs[2], num_i);
+     auto fiber_stats_end = std::chrono::high_resolution_clock::now();
+     auto fiber_stats_us = std::chrono::duration_cast<std::chrono::microseconds>(
+       fiber_stats_end - fiber_stats_start).count();
+     std::cout << "[Fiber Stats] total: " << fiber_stats_us << " us\n";
+
      DynamicHints hints = chooseDynamicHints(stats.avg_k_per_j, force_dynamic);
      uint64_t base_tile     = hints.base_tile;
      uint64_t k_tile        = hints.k_tile;
@@ -802,8 +821,13 @@ static void runSVdStyleRescueFromFullMatrix(
                             (size_t)f1 * f2 * sizeof(scalar_t);
        cache.s_grid_size  = (int)size_mode_idx[0];
      } else {
+       auto build_dynamic_task_ranges_start = std::chrono::high_resolution_clock::now();
        buildDynamicTaskRanges(mode_ptrs[1], mode_ptrs[2], num_i, base_tile, k_tile,
                               cache.host_tasks, computeTaskReserveHint(size_mode_idx[1]));
+       auto build_dynamic_task_ranges_end = std::chrono::high_resolution_clock::now();
+       auto build_dynamic_task_ranges_us = std::chrono::duration_cast<std::chrono::microseconds>(
+         build_dynamic_task_ranges_end - build_dynamic_task_ranges_start).count();
+       std::cout << "[Build Dynamic Task Ranges] total: " << build_dynamic_task_ranges_us << " us\n";
        int blk = dyn_block, wpb = blk / 32;
        bool use_reg = (f1 <= 64 && f2 <= 32);
        size_t sh = use_reg ? 0 :
@@ -839,7 +863,66 @@ static void runSVdStyleRescueFromFullMatrix(
      bool force_dyn   = getEnvFlag("TTMC_FORCE_DYNAMIC");
      bool force_tiny  = getEnvFlag("TTMC_FORCE_TINY_STREAMS");
      bool dis_tiny    = getEnvFlag("TTMC_DISABLE_TINY_STREAMS");
+     bool force_static4 = getEnvFlag("TTMC_FORCE_STATIC");
+     bool force_cuboid4 = getEnvFlag("TTMC_FORCE_STATIC_CUBOID");
+
+     // 4D IntraDyn (single launch, no streams).
+     // Primary (adaptive default for the small-tensor regime, or forced via
+     // TTMC_FORCE_STATIC): kernel_ttmc4_static_block_per_ij.
+     //   One thread block per (i,j) slice, warps claim k-fibers via a shared
+     //   counter, buf2[f2*f3] in shared. Blocks sharing the same i combine
+     //   their slice results into O[i] with global reductions.
+     //   Shared usage: f2*f3 (buf2) + nw*f3 (per-warp buf1, general path).
+     // Variant (TTMC_FORCE_STATIC_CUBOID): kernel_ttmc4_static_block_per_i.
+     //   One thread block per cuboid i, warps claim j-subtrees. Zero global
+     //   atomics (block owns O[i]), but parallelism is capped at num_i.
+     //   Shared usage: nw*(f2*f3 + f2) warp buffers + f1*f2*f3 accumulator.
+     bool prefer_static4 = false;  // decided below (env force or adaptive heuristic)
+     cache.static4_block_per_i = force_cuboid4;
+     auto configure_static4 = [&]() {
+       int block_sz = getEnvInt("TTMC_BLOCK_PER_I_BLOCK", 256);
+       if (block_sz < 32) block_sz = 32;
+       block_sz = (block_sz / 32) * 32;
+       int nw = std::max(1, block_sz / 32);
+       size_t def_sh = prop.sharedMemPerBlock;
+       size_t max_sh = (prop.sharedMemPerBlockOptin > def_sh) ? prop.sharedMemPerBlockOptin : def_sh;
+       auto sh_for = [&](int w) {
+         if (force_cuboid4)
+           return ((size_t)w * ((size_t)f2 * f3 + f2) +
+                   (size_t)f1 * f2 * f3) * sizeof(scalar_t);
+         return ((size_t)f2 * f3 + (size_t)w * f3) * sizeof(scalar_t);
+       };
+       size_t sh = sh_for(nw);
+       while (sh > max_sh && block_sz > 32) {
+         block_sz -= 32; nw = block_sz / 32; sh = sh_for(nw);
+       }
+       if (sh > max_sh) {
+         prefer_static4 = false;  // does not fit in shared memory: fall back
+       } else {
+         if (sh > def_sh) {
+           if (force_cuboid4)
+             cudaCheckError(cudaFuncSetAttribute(kernel_ttmc4_static_block_per_i,
+               cudaFuncAttributeMaxDynamicSharedMemorySize, (int)sh));
+           else
+             cudaCheckError(cudaFuncSetAttribute(kernel_ttmc4_static_block_per_ij,
+               cudaFuncAttributeMaxDynamicSharedMemorySize, (int)sh));
+         }
+         cache.s_block_size = block_sz;
+         cache.s_num_warps  = nw;
+         cache.s_shared_mem = sh;
+         // Primary: one block per (i,j) node. Variant: one block per i node.
+         cache.s_grid_size  = force_cuboid4 ? (int)size_mode_idx[0]
+                                            : (int)size_mode_idx[1];
+       }
+     };
+
+     auto analyze_fiber_stats_start = std::chrono::high_resolution_clock::now();
      FiberStats stats = analyzeFiberStats(mode_ptrs[1], mode_ptrs[2], num_i);
+     auto analyze_fiber_stats_end = std::chrono::high_resolution_clock::now();
+     auto analyze_fiber_stats_us = std::chrono::duration_cast<std::chrono::microseconds>(
+       analyze_fiber_stats_end - analyze_fiber_stats_start).count();
+     std::cout << "[Analyze Fiber Stats] total: " << analyze_fiber_stats_us << " us\n";
+
      double avg_k = stats.avg_k_per_j;
      uint64_t max_dim = 0;
      for (int d = 0; d < order; ++d) max_dim = std::max(max_dim, dimensions[d]);
@@ -849,28 +932,45 @@ static void runSVdStyleRescueFromFullMatrix(
      int ta = std::max(1, getEnvInt("TTMC_TINY4D_MAX_AVG_K",       64));
      int sd = std::max(1, getEnvInt("TTMC_TINY4D_SMALL_DIM",    20000));
      int sn = std::max(1, getEnvInt("TTMC_TINY4D_SMALL_NNZ", 10000000));
+     // Adaptive selection: the single-launch 4D IntraDyn (block per (i,j))
+     // is the default for the small-tensor regime that previously used
+     // tiny-streams. Tiny-streams remains available via TTMC_FORCE_TINY_STREAMS.
      bool prefer_tiny = false;
      if (idx_C >= 0) {
-       if (force_tiny) prefer_tiny = true;
-       else if (!force_dyn && !dis_tiny) {
+       if (force_static4 || force_cuboid4) {
+         prefer_static4 = true;
+       } else if (force_tiny) {
+         prefer_tiny = true;
+       } else if (!force_dyn && !dis_tiny) {
          bool under_dim = max_dim   <= (uint64_t)td;
          bool under_nnz = total_nnz <= (uint64_t)tn;
          bool under_avg = avg_k     <= (double)ta;
          bool very_small= max_dim   <= (uint64_t)sd && total_nnz <= (uint64_t)sn;
-         prefer_tiny = under_dim && under_nnz && (under_avg || very_small);
+         prefer_static4 = under_dim && under_nnz && (under_avg || very_small);
        }
      }
+     if (prefer_static4) configure_static4();  // may fall back if shared memory does not fit
+     cache.prefer_static = prefer_static4;
      cache.prefer_tiny_streams = prefer_tiny;
-     if (prefer_tiny) {
+     if (prefer_static4) {
+       // 4D IntraDyn configured above; no task queue or streams needed.
+     } else if (prefer_tiny) {
        int def_s = (int)std::min(num_i, (uint64_t)32);
        if (def_s <= 0) def_s = 1;
        cache.tiny_stream_count = getEnvInt("TTMC_TINY4D_NUM_STREAMS", def_s);
        if (cache.tiny_stream_count <= 0) cache.tiny_stream_count = def_s;
      } else {
+      
+       auto build_dynamic_task_ranges_start = std::chrono::high_resolution_clock::now();
        DynamicHints hints = chooseDynamicHints(avg_k, force_dyn);
        buildDynamicTaskRanges(mode_ptrs[1], mode_ptrs[2], num_i,
                               hints.base_tile, hints.k_tile,
                               cache.host_tasks, computeTaskReserveHint(size_mode_idx[1]));
+       auto build_dynamic_task_ranges_end = std::chrono::high_resolution_clock::now();
+       auto build_dynamic_task_ranges_us = std::chrono::duration_cast<std::chrono::microseconds>(
+         build_dynamic_task_ranges_end - build_dynamic_task_ranges_start).count();
+       std::cout << "[Build Dynamic Task Ranges] total: " << build_dynamic_task_ranges_us << " us\n";
+       
        int blk = hints.dynamic_block_hint, wpb = blk / 32;
        size_t sh = (size_t)wpb * ((size_t)f2 * f3 + f2) * sizeof(scalar_t);
        size_t def_sh = prop.sharedMemPerBlock;
@@ -1295,6 +1395,227 @@ static void runSVdStyleRescueFromFullMatrix(
    __syncwarp(mask);
  }
  
+ // 4D IntraDyn: one thread block per (i,j) slice, single launch, no streams.
+ // Warps claim k-fibers dynamically via a shared counter (Algorithm 2 with one
+ // more sequential level inside the warp's claim). buf2[f2*f3] is accumulated
+ // in shared memory. Blocks sharing the same top-level index i combine their
+ // slice results into O[i] with global reductions in the final drain.
+ // Shared layout: [0, f2*f3)            block-level buf2
+ //                [f2*f3, f2*f3+nw*f3)  per-warp buf1 (used only when f3 > 32)
+ __global__ void kernel_ttmc4_static_block_per_ij(
+   const uint64_t* __restrict__ mode_0_idx,
+   const uint64_t* __restrict__ mode_1_ptr, const uint64_t* __restrict__ mode_1_idx,
+   const uint64_t* __restrict__ mode_2_ptr, const uint64_t* __restrict__ mode_2_idx,
+   const uint64_t* __restrict__ mode_3_ptr, const uint64_t* __restrict__ mode_3_idx,
+   const scalar_t* __restrict__ values,
+   const scalar_t* __restrict__ arr_A, const scalar_t* __restrict__ arr_B, const scalar_t* __restrict__ arr_C,
+   scalar_t* arr_O,
+   uint32_t f1, uint32_t f2, uint32_t f3,
+   uint64_t num_i, int num_warps)
+ {
+   extern __shared__ scalar_t buf[];
+   __shared__ int s_counter;
+   __shared__ uint64_t s_i;
+
+   const uint32_t warp_size = 32;
+   const uint32_t warp_id = threadIdx.x / warp_size;
+   const uint32_t lane = threadIdx.x % warp_size;
+   const unsigned full_mask = 0xFFFFFFFFu;
+   const uint32_t rs = f2 * f3;
+
+   uint64_t j_ptr = blockIdx.x;
+
+   // Thread 0 recovers the parent slice-mode entry i_ptr of this j node:
+   // largest i_ptr with mode_1_ptr[i_ptr] <= j_ptr.
+   if (threadIdx.x == 0) {
+     uint64_t left = 0, right = num_i;
+     while (right - left > 1) {
+       uint64_t mid = (left + right) / 2;
+       if (mode_1_ptr[mid] <= j_ptr) left = mid; else right = mid;
+     }
+     s_i = mode_0_idx[left];
+     s_counter = 0;
+   }
+   for (uint32_t idx = threadIdx.x; idx < rs; idx += blockDim.x)
+     buf[idx] = 0.0f;
+   __syncthreads();
+
+   uint64_t offset, k_ptr, k_ptr_offset = mode_2_ptr[j_ptr];
+   uint64_t k_ptr_end = mode_2_ptr[j_ptr + 1];
+
+   while (true) {
+     if (lane == 0) offset = atomicAdd(&s_counter, 1);
+     offset = __shfl_sync(full_mask, offset, 0);
+     k_ptr = k_ptr_offset + offset;
+     if (k_ptr >= k_ptr_end) break;
+
+     uint64_t k = mode_2_idx[k_ptr];
+     const scalar_t* __restrict__ b_row = arr_B + (k * (uint64_t)f2);
+     uint64_t l_begin = mode_3_ptr[k_ptr];
+     uint64_t l_end   = mode_3_ptr[k_ptr + 1];
+
+     if (f3 <= warp_size) {
+       // buf1 lives in a register: lane m holds buf1[m].
+       scalar_t tc = 0.0f;
+       for (uint64_t l_ptr = l_begin; l_ptr < l_end; ++l_ptr) {
+         uint64_t l = mode_3_idx[l_ptr];
+         scalar_t val = values[l_ptr];
+         if (lane < f3)
+           tc = fma(val, arr_C[l * (uint64_t)f3 + lane], tc);
+       }
+       // buf2[s,m] += buf1[m] * C_row(k)[s]; warps race across k's -> shared atomics.
+       for (uint32_t s = 0; s < f2; ++s) {
+         if (lane < f3)
+           atomicAdd(&buf[s * f3 + lane], b_row[s] * tc);
+       }
+     } else {
+       // General path: per-warp buf1 in shared memory.
+       scalar_t* buf1 = buf + rs + warp_id * f3;
+       for (uint32_t m = lane; m < f3; m += warp_size) buf1[m] = 0.0f;
+       __syncwarp(full_mask);
+       for (uint64_t l_ptr = l_begin; l_ptr < l_end; ++l_ptr) {
+         uint64_t l = mode_3_idx[l_ptr];
+         scalar_t val = values[l_ptr];
+         const scalar_t* __restrict__ c_row = arr_C + (l * (uint64_t)f3);
+         for (uint32_t m = lane; m < f3; m += warp_size)
+           buf1[m] = fma(val, c_row[m], buf1[m]);
+       }
+       __syncwarp(full_mask);
+       for (uint32_t s = 0; s < f2; ++s) {
+         scalar_t bs = b_row[s];
+         for (uint32_t m = lane; m < f3; m += warp_size)
+           atomicAdd(&buf[s * f3 + m], bs * buf1[m]);
+       }
+     }
+   }
+   __syncthreads();
+
+   // Drain: O[i,r,s,m] += buf2[s,m] * A_row(j)[r]. Blocks sharing i collide,
+   // hence global reductions.
+   uint64_t i = s_i;
+   uint64_t j = mode_1_idx[j_ptr];
+   const scalar_t* __restrict__ a_row = arr_A + (j * (uint64_t)f1);
+   scalar_t* out_base = arr_O + (uint64_t)i * f1 * rs;
+   for (uint32_t r = 0; r < f1; ++r) {
+     scalar_t a = a_row[r];
+     if (a == 0.0f) continue;
+     for (uint32_t idx = threadIdx.x; idx < rs; idx += blockDim.x)
+       atomicAdd(&out_base[(uint64_t)r * rs + idx], buf[idx] * a);
+   }
+ }
+
+ // 4D IntraDyn variant: one thread block per cuboid i (top-level CSF subtree),
+ // warps claim whole j-subtrees via the shared counter. The block owns O[i]
+ // exclusively, so the slice output is accumulated in shared memory and
+ // written with plain global stores: zero global atomics, like 3D IntraDyn.
+ // Parallelism is capped at num_i, so this variant suits sweeps whose slice
+ // mode is large.
+ // Shared layout: [0, nw*f2*f3)              per-warp buf2 (fiber buffers)
+ //                [nw*f2*f3, nw*(f2*f3+f2))  per-warp B-row caches
+ //                [nw*(f2*f3+f2), +f1*f2*f3) block accumulator for O[i]
+ __global__ void kernel_ttmc4_static_block_per_i(
+   const uint64_t* __restrict__ mode_0_idx,
+   const uint64_t* __restrict__ mode_1_ptr, const uint64_t* __restrict__ mode_1_idx,
+   const uint64_t* __restrict__ mode_2_ptr, const uint64_t* __restrict__ mode_2_idx,
+   const uint64_t* __restrict__ mode_3_ptr, const uint64_t* __restrict__ mode_3_idx,
+   const scalar_t* __restrict__ values,
+   const scalar_t* __restrict__ arr_A, const scalar_t* __restrict__ arr_B, const scalar_t* __restrict__ arr_C,
+   scalar_t* arr_O,
+   uint32_t f1, uint32_t f2, uint32_t f3, int num_warps)
+ {
+   extern __shared__ scalar_t buf[];
+   __shared__ int s_counter;
+
+   const uint32_t warp_size = 32;
+   const uint32_t warp_id = threadIdx.x / warp_size;
+   const uint32_t lane = threadIdx.x % warp_size;
+   const unsigned full_mask = 0xFFFFFFFFu;
+   const uint32_t rs = f2 * f3;
+   const uint32_t temp_ofst = warp_id * rs;
+   const uint32_t b_ofst    = (uint32_t)num_warps * rs + warp_id * f2;
+   const uint32_t acc_ofst  = (uint32_t)num_warps * (rs + f2);
+
+   uint64_t i_ptr = blockIdx.x;
+   uint64_t i = mode_0_idx[i_ptr];
+   const uint64_t out_sz = (uint64_t)f1 * rs;
+
+   for (uint64_t idx = threadIdx.x; idx < out_sz; idx += blockDim.x)
+     buf[acc_ofst + idx] = 0.0f;
+   if (threadIdx.x == 0) s_counter = 0;
+   __syncthreads();
+
+   uint64_t offset, j_ptr, j_ptr_offset = mode_1_ptr[i_ptr];
+   uint64_t j_ptr_end = mode_1_ptr[i_ptr + 1];
+
+   while (true) {
+     if (lane == 0) offset = atomicAdd(&s_counter, 1);
+     offset = __shfl_sync(full_mask, offset, 0);
+     j_ptr = j_ptr_offset + offset;
+     if (j_ptr >= j_ptr_end) break;
+
+     // Fill this warp's f2 x f3 buffer for its claimed j-subtree.
+     for (uint32_t idx = lane; idx < rs; idx += warp_size)
+       buf[temp_ofst + idx] = 0.0f;
+     __syncwarp(full_mask);
+
+     for (uint64_t k_ptr = mode_2_ptr[j_ptr]; k_ptr < mode_2_ptr[j_ptr + 1]; ++k_ptr) {
+       uint64_t k = mode_2_idx[k_ptr];
+       const scalar_t* __restrict__ b_row = arr_B + (k * (uint64_t)f2);
+       for (uint32_t r2 = lane; r2 < f2; r2 += warp_size)
+         buf[b_ofst + r2] = b_row[r2];
+       __syncwarp(full_mask);
+
+       uint64_t l_begin = mode_3_ptr[k_ptr];
+       uint64_t l_end   = mode_3_ptr[k_ptr + 1];
+
+       if (f3 <= warp_size) {
+         scalar_t tc = 0.0f;
+         for (uint64_t l_ptr = l_begin; l_ptr < l_end; ++l_ptr) {
+           uint64_t l = mode_3_idx[l_ptr];
+           scalar_t val = values[l_ptr];
+           if (lane < f3)
+             tc = fma(val, arr_C[l * (uint64_t)f3 + lane], tc);
+         }
+         for (uint32_t r2 = 0; r2 < f2; ++r2) {
+           if (lane < f3)
+             buf[temp_ofst + r2 * f3 + lane] =
+               fma(buf[b_ofst + r2], tc, buf[temp_ofst + r2 * f3 + lane]);
+         }
+       } else {
+         for (uint64_t l_ptr = l_begin; l_ptr < l_end; ++l_ptr) {
+           uint64_t l = mode_3_idx[l_ptr];
+           scalar_t val = values[l_ptr];
+           const scalar_t* __restrict__ c_row = arr_C + (l * (uint64_t)f3);
+           for (uint32_t idx = lane; idx < rs; idx += warp_size) {
+             uint32_t r2 = idx / f3;
+             uint32_t r3 = idx % f3;
+             buf[temp_ofst + idx] = fma(buf[b_ofst + r2] * val, c_row[r3], buf[temp_ofst + idx]);
+           }
+           __syncwarp(full_mask);
+         }
+       }
+     }
+
+     // Drain into the block accumulator: shared-memory atomics only.
+     uint64_t j = mode_1_idx[j_ptr];
+     const scalar_t* __restrict__ a_row = arr_A + (j * (uint64_t)f1);
+     for (uint32_t r1 = 0; r1 < f1; ++r1) {
+       scalar_t a = (lane == 0) ? a_row[r1] : 0.0f;
+       a = __shfl_sync(full_mask, a, 0);
+       if (a == 0.0f) continue;
+       uint32_t base = acc_ofst + r1 * rs;
+       for (uint32_t idx = lane; idx < rs; idx += warp_size)
+         atomicAdd(&buf[base + idx], buf[temp_ofst + idx] * a);
+     }
+     __syncwarp(full_mask);
+   }
+   __syncthreads();
+
+   // Slice i is owned by this block: plain global writes, no atomics.
+   for (uint64_t idx = threadIdx.x; idx < out_sz; idx += blockDim.x)
+     arr_O[i * out_sz + idx] += buf[acc_ofst + idx];
+ }
+
  __global__ void kernel_ttmc4_dynamic_tasks(
    const uint64_t* __restrict__ mode_0_idx,
    const uint64_t* __restrict__ mode_1_ptr, const uint64_t* __restrict__ mode_1_idx,
@@ -1642,7 +1963,41 @@ void run_ttmc_cuda(
          }
        }
        else if (order == 4) {
-         if (cache.prefer_tiny_streams) {
+         if (cache.prefer_static) {
+           auto start = std::chrono::high_resolution_clock::now();
+           if (cache.static4_block_per_i) {
+             kernel_ttmc4_static_block_per_i<<<cache.s_grid_size, cache.s_block_size, cache.s_shared_mem>>>(
+               d_mode_idxs[0],
+               d_mode_ptrs[1], d_mode_idxs[1],
+               d_mode_ptrs[2], d_mode_idxs[2],
+               d_mode_ptrs[3], d_mode_idxs[3],
+               d_values,
+               d_factor_mats[idx_A], d_factor_mats[idx_B], d_factor_mats[idx_C],
+               d_arr_O, f1, f2, f3, cache.s_num_warps);
+           } else {
+             uint64_t num_i = cache.size_mode_ptr[1] - 1;
+             kernel_ttmc4_static_block_per_ij<<<cache.s_grid_size, cache.s_block_size, cache.s_shared_mem>>>(
+               d_mode_idxs[0],
+               d_mode_ptrs[1], d_mode_idxs[1],
+               d_mode_ptrs[2], d_mode_idxs[2],
+               d_mode_ptrs[3], d_mode_idxs[3],
+               d_values,
+               d_factor_mats[idx_A], d_factor_mats[idx_B], d_factor_mats[idx_C],
+               d_arr_O, f1, f2, f3, num_i, cache.s_num_warps);
+           }
+           cudaCheckError(cudaGetLastError());
+           cudaCheckError(cudaDeviceSynchronize());
+           auto end = std::chrono::high_resolution_clock::now();
+           if (log_method) {
+             cout << "Method: " << (cache.static4_block_per_i
+                       ? "kernel_ttmc4_static_block_per_i"
+                       : "kernel_ttmc4_static_block_per_ij")
+                  << ", Time: "
+                  << std::chrono::duration_cast<std::chrono::microseconds>(end-start).count() / 1000.0
+                  << " ms" << endl;
+           }
+         }
+         else if (cache.prefer_tiny_streams) {
            // tiny_streams needs HOST mode data for its launch loop; use ptrs cached at prepare time.
            uint64_t num_i = cache.size_mode_ptr[1] - 1;
            double duration_ms = launch_ttmc4_tiny_streams_flat(
@@ -4585,6 +4940,8 @@ static TiledModeUpdateStats runTiledModeUpdate(
      // 1. Read COO tensor from .tns file
      // ===================================================================
      COOTensor coo = readCOOTensor(tns_file);
+
+     auto entire_tucker_start = std::chrono::high_resolution_clock::now();
      int order = coo.order;
      if (order < 3 || order > 4) {
        std::cerr << "Error: Tucker HOOI supports 3D and 4D tensors only (got order "
@@ -4613,28 +4970,42 @@ static TiledModeUpdateStats runTiledModeUpdate(
                << ", forced-iterative-eig="
                << (g_force_gpu_iterative_eig ? "enabled" : "disabled")
                << "\n";
- 
+
      // ===================================================================
      // 2. Unique-index counts per mode (for CSF compression ordering)
      // ===================================================================
      std::vector<size_t> uniqueCounts(order);
+     auto uniq_count_start = std::chrono::high_resolution_clock::now();
      for (int m = 0; m < order; m++) {
        std::unordered_set<uint64_t> uniq;
        for (const auto& idx : coo.indices) uniq.insert(idx[m]);
        uniqueCounts[m] = uniq.size();
      }
+     auto uniq_count_end = std::chrono::high_resolution_clock::now();
+     double uniq_count_ms =
+         std::chrono::duration_cast<std::chrono::microseconds>(uniq_count_end - uniq_count_start).count() / 1000.0;
+     std::cout << "[Unique Count] all " << order << " modes: " << uniq_count_ms << " ms\n";
      if (verbose) {
        std::cout << "Unique indices per mode:";
        for (int m = 0; m < order; m++) std::cout << " " << uniqueCounts[m];
        std::cout << "\n";
      }
- 
+     
      // ===================================================================
      // 3. Build `order` CSF copies (mode n as root → used for TTMc-n)
      // ===================================================================
      std::vector<CSFCopy> csf_copies(order);
+     double csf_build_total_ms = 0.0;
+     auto csf_build_all_start = std::chrono::high_resolution_clock::now();
      for (int n = 0; n < order; n++) {
+       auto csf_build_start = std::chrono::high_resolution_clock::now();
        csf_copies[n] = buildCSFCopy(coo, n, uniqueCounts);
+       auto csf_build_end = std::chrono::high_resolution_clock::now();
+       double csf_build_ms =
+           std::chrono::duration_cast<std::chrono::microseconds>(csf_build_end - csf_build_start).count() / 1000.0;
+       csf_build_total_ms += csf_build_ms;
+       std::cout << "[CSF Build] copy " << n << " (root=mode" << n << "): "
+                 << csf_build_ms << " ms\n";
        if (verbose) {
          std::cout << "CSF copy " << n << " (root=mode" << n << "): levels=[";
          for (int l = 0; l < order; l++) {
@@ -4645,11 +5016,21 @@ static TiledModeUpdateStats runTiledModeUpdate(
                    << "  nnz=" << csf_copies[n].values.size() << "\n";
        }
      }
+     auto csf_build_all_end = std::chrono::high_resolution_clock::now();
+     double csf_build_all_ms =
+         std::chrono::duration_cast<std::chrono::microseconds>(csf_build_all_end - csf_build_all_start).count() / 1000.0;
+     std::cout << "[CSF Build] total (" << order << " copies): " << csf_build_all_ms
+               << " ms (sum of per-copy: " << csf_build_total_ms << " ms)\n";
  
      // ===================================================================
      // 4. Upload all CSF copies to GPU (persistent across iterations)
      // ===================================================================
+     auto up0 = std::chrono::high_resolution_clock::now();
      for (int n = 0; n < order; n++) uploadCSFToGPU(csf_copies[n]);
+     auto up1 = std::chrono::high_resolution_clock::now();
+     std::cout << "[CSF Upload] total (" << order << " copies): "
+                << std::chrono::duration_cast<std::chrono::microseconds>(up1-up0).count()/1000.0 << " ms\n";
+
  
      // ===================================================================
      // 5. Allocate and initialize factor matrices on CPU (row-major)
@@ -4658,6 +5039,8 @@ static TiledModeUpdateStats runTiledModeUpdate(
      std::vector<uint64_t> factor_sizes(order);
      const char* factors_dir_env = std::getenv("TUCKER_FACTORS_DIR");
      const char* dump_dir_env = std::getenv("TUCKER_FACTORS_DUMP_DIR");
+
+     auto factors_start = std::chrono::high_resolution_clock::now();
      for (int i = 0; i < order; i++) {
        factor_sizes[i] = coo.dims[i] * ranks[i];
        factors[i] = new scalar_t[factor_sizes[i]];
@@ -4683,7 +5066,11 @@ static TiledModeUpdateStats runTiledModeUpdate(
                    << " (" << coo.dims[i] << " x " << ranks[i] << ")\n";
        }
      }
- 
+     auto factors_end = std::chrono::high_resolution_clock::now();
+     double factors_ms =
+         std::chrono::duration_cast<std::chrono::microseconds>(factors_end - factors_start).count() / 1000.0;
+     std::cout << "[Factors] total (" << order << " factors): " << factors_ms << " ms\n";
+
      cusolverDnHandle_t cusolverH = nullptr;
      cublasHandle_t cublasH = nullptr;
      CHECK_CUSOLVER(cusolverDnCreate(&cusolverH));
@@ -5588,6 +5975,11 @@ static TiledModeUpdateStats runTiledModeUpdate(
      cublasDestroy(cublasH);
  
      std::cout << "\nTucker HOOI done: " << num_iters << " iters, " << total_us << " us total\n";
+
+     auto entire_tucker_end = std::chrono::high_resolution_clock::now();
+     auto entire_tucker_us = std::chrono::duration_cast<std::chrono::microseconds>(
+       entire_tucker_end - entire_tucker_start).count();
+     std::cout << "[Entire Tucker] total: " << entire_tucker_us << " us\n";
      return 0;
  
    } catch (const std::exception& e) {
