@@ -22,7 +22,7 @@ int main(int argc, char *argv[]) {
     std::cout << options->get_input_path() << std::endl;
 
     using index_t = uint32_t;
-    using value_t = double;
+    using value_t = float;
     using block_t = Block<index_t, value_t>;
     using tensor_t = Tensor<block_t>;
 
