@@ -34,6 +34,10 @@
  #include <limits>
  #include <cctype>
  #include <strings.h>
+ #include <cstdlib>
+ #include <thread>
+ #include <atomic>
+ #include <new>
  #include <cuda_runtime.h>
  #include <cusolverDn.h>
  #include <cublas_v2.h>
@@ -2656,19 +2660,34 @@ static bool solveTopREigensystemDpIterativeGpu(
  void init_factor_orthonormal(uint64_t rows, uint64_t cols, unsigned int seed, scalar_t* A) {
    std::mt19937 gen(seed);
    std::normal_distribution<scalar_t> dist((scalar_t)0, (scalar_t)1);
-   for (uint64_t i = 0; i < rows * cols; i++) A[i] = dist(gen);
+   // The output A is row-major (rows x cols), so the classical column-wise
+   // Gram-Schmidt below touches A[r*cols + c] with stride `cols` in its inner
+   // loops -- cache-hostile since `rows` is a (potentially huge) tensor mode and
+   // the cost is O(rows*cols^2). Do the work in a column-major scratch buffer so
+   // every inner loop is stride-1, then scatter back to the row-major layout.
+   // The RNG draw order and the floating-point op order are unchanged, so the
+   // result is bit-identical to the original implementation.
+   std::vector<scalar_t> M((size_t)rows * (size_t)cols);
+   for (uint64_t r = 0; r < rows; r++)
+     for (uint64_t c = 0; c < cols; c++)
+       M[(size_t)c * rows + r] = dist(gen);  // draw #(r*cols+c) -> element (r,c)
    for (uint64_t c = 0; c < cols; c++) {
+     scalar_t* col = &M[(size_t)c * rows];
      scalar_t norm = 0;
-     for (uint64_t r = 0; r < rows; r++) norm += A[r * cols + c] * A[r * cols + c];
+     for (uint64_t r = 0; r < rows; r++) norm += col[r] * col[r];
      norm = std::sqrt(norm);
      if (norm < (scalar_t)1e-10) norm = (scalar_t)1;
-     for (uint64_t r = 0; r < rows; r++) A[r * cols + c] /= norm;
+     for (uint64_t r = 0; r < rows; r++) col[r] /= norm;
      for (uint64_t c2 = c + 1; c2 < cols; c2++) {
+       scalar_t* col2 = &M[(size_t)c2 * rows];
        scalar_t dot = 0;
-       for (uint64_t r = 0; r < rows; r++) dot += A[r * cols + c] * A[r * cols + c2];
-       for (uint64_t r = 0; r < rows; r++) A[r * cols + c2] -= dot * A[r * cols + c];
+       for (uint64_t r = 0; r < rows; r++) dot += col[r] * col2[r];
+       for (uint64_t r = 0; r < rows; r++) col2[r] -= dot * col[r];
      }
    }
+   for (uint64_t r = 0; r < rows; r++)
+     for (uint64_t c = 0; c < cols; c++)
+       A[(size_t)r * cols + c] = M[(size_t)c * rows + r];
  }
 
 static std::string factorBinPath(const std::string& dir, int mode)
@@ -3729,7 +3748,112 @@ static void gpu_truncated_svd_update_factor_pinned_blocked(
    scalar_t  *d_values = nullptr;
  };
  
- CSFCopy buildCSFCopy(const COOTensor& coo, int rootMode,
+ // ===================================================================
+ // Parallel CSF construction helpers.
+ //
+ // Ported from SPLATT (src/thread_partition.c and src/sort.c):
+ //   * partition_simple        -> even contiguous partitioning of items
+ //   * p_counting_sort_hybrid  -> counting sort on the root mode followed by an
+ //                                independent parallel sort of each root slice
+ //   * p_mk_fptr / p_mk_outerptr -> count-then-fill construction of the CSF
+ //                                  pointer/index arrays
+ // Implemented with std::thread so no extra compiler/link flags are required.
+ // ===================================================================
+ namespace csfpar {
+ 
+ // Number of worker threads (override with CSF_BUILD_THREADS).
+ inline unsigned numThreads() {
+   static const unsigned n = [] {
+     if (const char* e = std::getenv("CSF_BUILD_THREADS")) {
+       int v = std::atoi(e);
+       if (v > 0) return (unsigned)v;
+     }
+     unsigned hc = std::thread::hardware_concurrency();
+     return hc ? hc : 1u;
+   }();
+   return n;
+ }
+ 
+ // Sort element: a scalar sort key paired with the originating nonzero id.
+ struct KV { uint64_t key; uint64_t idx; };
+ 
+ // SPLATT partition_simple: thread t owns items [parts[t], parts[t+1]).
+ inline std::vector<size_t> partitionSimple(size_t nitems, unsigned nparts) {
+   std::vector<size_t> parts(nparts + 1);
+   parts[0] = 0;
+   size_t per = std::max<size_t>(nitems / nparts, 1);
+   for (unsigned p = 1; p < nparts; ++p) parts[p] = std::min(per * p, nitems);
+   parts[nparts] = nitems;
+   return parts;
+ }
+ 
+ // Run body(tid, nthreads) on nthreads threads (the caller acts as tid 0).
+ template <class F>
+ inline void parallelRegion(unsigned nthreads, F body) {
+   if (nthreads <= 1) { body(0u, 1u); return; }
+   std::vector<std::thread> pool;
+   pool.reserve(nthreads - 1);
+   for (unsigned t = 1; t < nthreads; ++t) pool.emplace_back(body, t, nthreads);
+   body(0u, nthreads);
+   for (auto& th : pool) th.join();
+ }
+ 
+ // Dynamically scheduled parallel-for over [0, n) (mirrors omp schedule(dynamic)).
+ template <class F>
+ inline void parallelForDynamic(unsigned nthreads, size_t n, size_t chunk, F body) {
+   if (n == 0) return;
+   if (nthreads <= 1 || n <= chunk) { for (size_t i = 0; i < n; ++i) body(i); return; }
+   std::atomic<size_t> next{0};
+   parallelRegion(nthreads, [&](unsigned, unsigned) {
+     for (;;) {
+       size_t s = next.fetch_add(chunk, std::memory_order_relaxed);
+       if (s >= n) break;
+       size_t e = std::min(s + chunk, n);
+       for (size_t i = s; i < e; ++i) body(i);
+     }
+   });
+ }
+ 
+ // Parallel ascending sort of a[0..n) by .key. Used for slices too large for a
+ // single thread (heavy slice skew or a low-cardinality root mode). Sorts each
+ // block in parallel, then merges runs pairwise (only the final merge is serial).
+ inline void parallelSortKV(KV* a, size_t n, unsigned nthreads) {
+   auto less = [](const KV& x, const KV& y) { return x.key < y.key; };
+   if (n < 2) return;
+   if (nthreads <= 1 || n < (size_t)(1 << 15)) { std::sort(a, a + n, less); return; }
+ 
+   unsigned P = (unsigned)std::min<size_t>(nthreads, n);
+   std::vector<size_t> bnd = partitionSimple(n, P);
+   parallelRegion(P, [&](unsigned t, unsigned) {
+     if (bnd[t] < bnd[t + 1]) std::sort(a + bnd[t], a + bnd[t + 1], less);
+   });
+ 
+   std::vector<KV> scratch(n);
+   KV* src = a;
+   KV* dst = scratch.data();
+   std::vector<size_t> runs = bnd;
+   while (runs.size() > 2) {
+     size_t nRuns = runs.size() - 1;
+     size_t nMerged = (nRuns + 1) / 2;
+     parallelForDynamic(nthreads, nMerged, 1, [&](size_t m) {
+       size_t lo  = runs[2 * m];
+       size_t mid = runs[std::min(2 * m + 1, nRuns)];
+       size_t hi  = runs[std::min(2 * m + 2, nRuns)];
+       std::merge(src + lo, src + mid, src + mid, src + hi, dst + lo, less);
+     });
+     std::vector<size_t> next(nMerged + 1);
+     next[0] = 0;
+     for (size_t m = 0; m < nMerged; ++m) next[m + 1] = runs[std::min(2 * m + 2, nRuns)];
+     std::swap(src, dst);
+     runs.swap(next);
+   }
+   if (src != a) std::copy(src, src + n, a);
+ }
+ 
+ } // namespace csfpar
+ 
+ // Serial reference builder (kept for correctness verification and fallback).
+ CSFCopy buildCSFCopySerial(const COOTensor& coo, int rootMode,
                       const std::vector<size_t>& uniqueCounts) {
    const int order = coo.order;
    size_t nnz = coo.values.size();
@@ -3781,6 +3905,292 @@ static void gpu_truncated_svd_update_factor_pinned_blocked(
    }
    for (int l = 0; l < order; l++) csf.ptrs[l].push_back(csf.idxs[l].size());
    return csf;
+ }
+ 
+ // Parallel builder. Produces output byte-identical to buildCSFCopySerial while
+ // using all available CPU cores (SPLATT-style counting sort + count-then-fill).
+ CSFCopy buildCSFCopyParallel(const COOTensor& coo, int rootMode,
+                      const std::vector<size_t>& uniqueCounts) {
+   const int order = coo.order;
+   const size_t nnz = coo.values.size();
+   const unsigned nthreads = csfpar::numThreads();
+ 
+   // ---- mode order: root first, remaining ascending by unique-index count ----
+   std::vector<int> rest;
+   for (int m = 0; m < order; m++) if (m != rootMode) rest.push_back(m);
+   std::sort(rest.begin(), rest.end(),
+             [&](int a, int b){ return uniqueCounts[a] < uniqueCounts[b]; });
+ 
+   CSFCopy csf;
+   csf.order = order;
+   csf.modeOrder.clear();
+   csf.modeOrder.push_back(rootMode);
+   for (int r : rest) csf.modeOrder.push_back(r);
+   csf.dims.resize(order);
+   for (int l = 0; l < order; l++) csf.dims[l] = coo.dims[csf.modeOrder[l]];
+   csf.ptrs.assign(order, {});
+   csf.idxs.assign(order, {});
+ 
+   if (nnz == 0) {
+     for (int l = 0; l < order; l++) csf.ptrs[l].assign(l == 0 ? 2 : 1, 0);
+     return csf;
+   }
+ 
+   const std::vector<int> modeOrder = csf.modeOrder;
+ 
+   const bool prof = [] { const char* e = std::getenv("CSF_BUILD_PROFILE"); return e && std::atoi(e); }();
+   auto tprev = std::chrono::high_resolution_clock::now();
+   auto PROF = [&](const char* label) {
+     if (!prof) return;
+     auto now = std::chrono::high_resolution_clock::now();
+     double ms = std::chrono::duration_cast<std::chrono::microseconds>(now - tprev).count() / 1000.0;
+     std::cout << "    [csfpar root=mode" << rootMode << "] " << label << ": " << ms << " ms\n";
+     tprev = now;
+   };
+ 
+   // ---- contiguous key matrix in mode order: keyFull[j*order + l] ----
+   std::vector<uint64_t> keyFull(nnz * (size_t)order);
+   csfpar::parallelForDynamic(nthreads, nnz, 65536, [&](size_t j) {
+     const std::vector<uint64_t>& idx = coo.indices[j];
+     uint64_t* dst = keyFull.data() + j * order;
+     for (int l = 0; l < order; l++) dst[l] = idx[modeOrder[l]];
+   });
+   PROF("keyFull");
+
+   // ---- counting sort on the root mode -> kv grouped by root slice ----
+   const uint64_t rootDim = csf.dims[0];
+ 
+   // Composite row-major key over the non-root levels (1..order-1) lets each
+   // slice be sorted by a single scalar (cache friendly). Fall back to a
+   // multi-key comparator if the remaining dimensions overflow 64 bits.
+   std::vector<uint64_t> stride((size_t)order, 0);
+   bool useComposite = (order > 1);
+   {
+     uint64_t s = 1;
+     for (int l = order - 1; l >= 1; --l) {
+       stride[l] = s;
+       uint64_t dl = csf.dims[l] ? csf.dims[l] : 1;
+       if (s > (std::numeric_limits<uint64_t>::max)() / dl) { useComposite = false; break; }
+       s *= dl;
+     }
+   }
+ 
+   std::vector<csfpar::KV> kv(nnz);
+   std::vector<size_t> sliceStart((size_t)rootDim + 1, 0);
+   {
+     // Cap per-thread histogram memory (rootDim can be large).
+     unsigned histThreads = nthreads;
+     const size_t maxEntries = (size_t)64 * 1024 * 1024;  // ~512 MB of uint64
+     if (rootDim > 0) {
+       unsigned cap = (unsigned)std::max<size_t>(1, maxEntries / rootDim);
+       if (histThreads > cap) histThreads = cap;
+     }
+     std::vector<size_t> parts = csfpar::partitionSimple(nnz, histThreads);
+     std::vector<size_t> local((size_t)histThreads * rootDim, 0);
+     const uint64_t* k = keyFull.data();
+ 
+     // Phase A: per-thread local histograms of root indices.
+     csfpar::parallelRegion(histThreads, [&](unsigned tid, unsigned) {
+       size_t* h = local.data() + (size_t)tid * rootDim;
+       for (size_t j = parts[tid]; j < parts[tid + 1]; ++j) ++h[k[j * order]];
+     });
+     // Phase B: total per slice, then exclusive prefix sum -> sliceStart.
+     std::vector<size_t> bucketTotal((size_t)rootDim, 0);
+     csfpar::parallelForDynamic(histThreads, rootDim, 8192, [&](size_t r) {
+       size_t sum = 0;
+       for (unsigned t = 0; t < histThreads; ++t) sum += local[(size_t)t * rootDim + r];
+       bucketTotal[r] = sum;
+     });
+     for (uint64_t r = 0; r < rootDim; ++r) sliceStart[r + 1] = sliceStart[r] + bucketTotal[r];
+     // Phase C: convert local counts -> per-thread write offsets within slices.
+     csfpar::parallelForDynamic(histThreads, rootDim, 8192, [&](size_t r) {
+       size_t running = sliceStart[r];
+       for (unsigned t = 0; t < histThreads; ++t) {
+         size_t c = local[(size_t)t * rootDim + r];
+         local[(size_t)t * rootDim + r] = running;
+         running += c;
+       }
+     });
+     // Phase D: scatter {compositeKey, origId} grouped by root slice
+     // (disjoint slots per thread/slice, so no synchronization is needed).
+     const uint64_t* strd = stride.data();
+     csfpar::parallelRegion(histThreads, [&](unsigned tid, unsigned) {
+       size_t* off = local.data() + (size_t)tid * rootDim;
+       for (size_t j = parts[tid]; j < parts[tid + 1]; ++j) {
+         const uint64_t* row = k + j * order;
+         uint64_t key = 0;
+         if (useComposite)
+           for (int l = 1; l < order; l++) key += row[l] * strd[l];
+         size_t dst = off[row[0]]++;
+         kv[dst].key = key;
+         kv[dst].idx = j;
+       }
+     });
+   }
+   PROF("counting-sort (root)");
+ 
+   // ---- sort within each root slice by the remaining modes ----
+   // Small slices are independent tasks (dynamic schedule); large slices (heavy
+   // skew or a low-cardinality root) are sorted with internal parallelism so a
+   // single dense slice can't serialize the whole build.
+   {
+     const uint64_t* k = keyFull.data();
+     auto gatherCmp = [&](const csfpar::KV& a, const csfpar::KV& b) {
+       const uint64_t* ka = k + a.idx * order;
+       const uint64_t* kb = k + b.idx * order;
+       for (int l = 1; l < order; l++)
+         if (ka[l] != kb[l]) return ka[l] < kb[l];
+       return false;
+     };
+     const size_t bigThreshold = std::max<size_t>((size_t)1 << 16, nnz / nthreads);
+     std::vector<size_t> bigSlices;
+     csfpar::parallelForDynamic(nthreads, rootDim, 32, [&](size_t r) {
+       size_t s = sliceStart[r], e = sliceStart[r + 1];
+       if (e - s <= 1 || e - s > bigThreshold) return;  // big slices handled below
+       if (useComposite)
+         std::sort(kv.begin() + s, kv.begin() + e,
+                   [](const csfpar::KV& a, const csfpar::KV& b) { return a.key < b.key; });
+       else
+         std::sort(kv.begin() + s, kv.begin() + e, gatherCmp);
+     });
+     for (uint64_t r = 0; r < rootDim; ++r)
+       if (sliceStart[r + 1] - sliceStart[r] > bigThreshold) bigSlices.push_back(r);
+     for (size_t r : bigSlices) {
+       size_t s = sliceStart[r], e = sliceStart[r + 1];
+       if (useComposite)
+         csfpar::parallelSortKV(kv.data() + s, e - s, nthreads);
+       else
+         std::sort(kv.begin() + s, kv.begin() + e, gatherCmp);
+     }
+   }
+   PROF("per-slice sort");
+ 
+   // ---- materialize sorted indices (row-major) + values ----
+   //      sIdx[pi*order + l] keeps every phase below cache-contiguous.
+   std::vector<uint64_t> sIdx(nnz * (size_t)order);
+   csf.values.resize(nnz);
+   csfpar::parallelForDynamic(nthreads, nnz, 65536, [&](size_t pi) {
+     size_t j = kv[pi].idx;
+     const uint64_t* src = keyFull.data() + j * order;
+     uint64_t* dst = sIdx.data() + pi * order;
+     for (int l = 0; l < order; l++) dst[l] = src[l];
+     csf.values[pi] = coo.values[j];
+   });
+   std::vector<uint64_t>().swap(keyFull);
+   PROF("materialize sIdx/vals");
+ 
+   // ---- firstDiff[pi]: shallowest level whose index differs from pi-1.
+   //      Levels [firstDiff[pi], order) each start a new CSF node at pi
+   //      (firstDiff==order means a fully-duplicate coord -> matches serial).
+   std::vector<int> firstDiff(nnz);
+   csfpar::parallelForDynamic(nthreads, nnz, 65536, [&](size_t pi) {
+     if (pi == 0) { firstDiff[0] = 0; return; }
+     const uint64_t* cur = sIdx.data() + pi * order;
+     const uint64_t* prv = cur - order;
+     int d = order;
+     for (int l = 0; l < order; l++) {
+       if (cur[l] != prv[l]) { d = l; break; }
+     }
+     firstDiff[pi] = d;
+   });
+   PROF("firstDiff");
+ 
+   // ---- count-then-fill construction (mirrors the serial inner loop) ----
+   std::vector<size_t> parts = csfpar::partitionSimple(nnz, nthreads);
+   std::vector<std::vector<size_t>> tcount(nthreads, std::vector<size_t>(order, 0));
+   csfpar::parallelRegion(nthreads, [&](unsigned tid, unsigned) {
+     size_t* c = tcount[tid].data();
+     for (size_t pi = parts[tid]; pi < parts[tid + 1]; ++pi) {
+       int d = firstDiff[pi];
+       for (int l = d; l < order; l++) ++c[l];
+     }
+   });
+ 
+   // Exclusive prefix over threads per level -> starting positions + totals.
+   std::vector<std::vector<size_t>> threadStart(nthreads, std::vector<size_t>(order, 0));
+   std::vector<size_t> N(order, 0);
+   for (int l = 0; l < order; l++) {
+     size_t running = 0;
+     for (unsigned t = 0; t < nthreads; ++t) {
+       threadStart[t][l] = running;
+       running += tcount[t][l];
+     }
+     N[l] = running;
+   }
+ 
+   for (int l = 0; l < order; l++) csf.idxs[l].resize(N[l]);
+   csf.ptrs[0].assign(2, 0); csf.ptrs[0][1] = N[0];
+   for (int l = 1; l < order; l++) csf.ptrs[l].resize(N[l - 1] + 1);
+ 
+   csfpar::parallelRegion(nthreads, [&](unsigned tid, unsigned) {
+     std::vector<size_t> pos(order);
+     for (int l = 0; l < order; l++) pos[l] = threadStart[tid][l];
+     for (size_t pi = parts[tid]; pi < parts[tid + 1]; ++pi) {
+       int d = firstDiff[pi];
+       const uint64_t* srow = sIdx.data() + pi * order;
+       for (int l = d; l < order; l++) {
+         if (l + 1 < order) csf.ptrs[l + 1][pos[l]] = pos[l + 1];
+         csf.idxs[l][pos[l]] = srow[l];
+         ++pos[l];
+       }
+     }
+   });
+   for (int l = 1; l < order; l++) csf.ptrs[l][N[l - 1]] = N[l];
+   PROF("count-then-fill");
+ 
+   return csf;
+ }
+ 
+ // Dispatcher: parallel by default. CSF_BUILD_SERIAL=1 forces the serial path;
+ // CSF_BUILD_VERIFY=1 additionally builds serially and asserts identical output.
+ CSFCopy buildCSFCopy(const COOTensor& coo, int rootMode,
+                      const std::vector<size_t>& uniqueCounts) {
+   static const bool forceSerial = [] {
+     const char* e = std::getenv("CSF_BUILD_SERIAL");
+     return e && std::atoi(e) != 0;
+   }();
+   static const bool verify = [] {
+     const char* e = std::getenv("CSF_BUILD_VERIFY");
+     return e && std::atoi(e) != 0;
+   }();
+ 
+   if (forceSerial) return buildCSFCopySerial(coo, rootMode, uniqueCounts);
+ 
+   // The parallel path allocates a few nnz-sized temporaries. On a memory
+   // constrained machine those allocations can throw; rather than aborting, fall
+   // back to the low-footprint serial builder. (All large allocations happen on
+   // this thread, so std::bad_alloc propagates here.)
+   CSFCopy par;
+   try {
+     par = buildCSFCopyParallel(coo, rootMode, uniqueCounts);
+   } catch (const std::bad_alloc&) {
+     std::cout << "parallel csf construction failed, falling back to serial" << std::endl;
+     return buildCSFCopySerial(coo, rootMode, uniqueCounts);
+   } catch (const std::length_error&) {
+     std::cout << "parallel csf construction failed, falling back to serial" << std::endl;
+     return buildCSFCopySerial(coo, rootMode, uniqueCounts);
+   }
+ 
+   if (verify) {
+     CSFCopy ser = buildCSFCopySerial(coo, rootMode, uniqueCounts);
+     auto report = [&](const char* what) {
+       std::cerr << "[CSF Verify] MISMATCH (root=mode" << rootMode << "): " << what << "\n";
+     };
+     bool ok = (par.modeOrder == ser.modeOrder) && (par.dims == ser.dims) &&
+               (par.values == ser.values) && (par.idxs == ser.idxs) &&
+               (par.ptrs == ser.ptrs);
+     if (!ok) {
+       if (par.modeOrder != ser.modeOrder) report("modeOrder");
+       if (par.dims != ser.dims) report("dims");
+       if (par.values != ser.values) report("values");
+       if (par.idxs != ser.idxs) report("idxs");
+       if (par.ptrs != ser.ptrs) report("ptrs");
+     } else {
+       std::cout << "[CSF Verify] root=mode" << rootMode
+                 << " parallel == serial (nnz=" << par.values.size() << ")\n";
+     }
+   }
+   return par;
  }
  
  void uploadCSFToGPU(CSFCopy& csf) {
